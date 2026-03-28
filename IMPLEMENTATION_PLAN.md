@@ -1,4 +1,4 @@
-# Yaypi: Yet Another YAML-Powered API — Complete Technical Implementation Plan
+# Yaypi: Yay-PI, like API but yaml based — Complete Technical Implementation Plan
 
 ---
 

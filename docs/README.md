@@ -1,6 +1,6 @@
 # yayPi Documentation
 
-**yayPi** (Yet Another YAML-Powered API) is a Go framework that generates a fully functional REST API backend from YAML configuration files — no code generation, no templates, no boilerplate.
+**yayPi** (Yay-PI, like API but yaml based) is a Go framework that generates a fully functional REST API backend from YAML configuration files — no code generation, no templates, no boilerplate.
 
 ## Quick Start
 
