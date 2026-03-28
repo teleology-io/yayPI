@@ -206,7 +206,7 @@ func runServer(configFile string) error {
 
 		// Auto-migrate if configured
 		if cfg.AutoMigrate {
-			engine := migration.NewEngine(dbManager.Default(), reg)
+			engine := migration.NewEngine(dbManager.Default().SQL, dbManager.Default().Dialect, reg)
 			stmts, err := engine.Diff(context.Background())
 			if err != nil {
 				log.Warn().Err(err).Msg("schema diff failed; skipping auto-migrate")
@@ -216,7 +216,7 @@ func runServer(configFile string) error {
 				if err != nil {
 					log.Warn().Err(err).Msg("auto-migrate generation failed")
 				} else {
-					runner := migration.NewRunner(dbManager.Default(), "migrations")
+					runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
 					if err := runner.Up(context.Background(), 0); err != nil {
 						log.Warn().Err(err).Str("up", m.UpPath).Msg("auto-migrate failed")
 					}
@@ -373,7 +373,7 @@ func runMigrateGenerate(configFile, name string) error {
 	}
 	defer dbManager.Close()
 
-	engine := migration.NewEngine(dbManager.Default(), reg)
+	engine := migration.NewEngine(dbManager.Default().SQL, dbManager.Default().Dialect, reg)
 	stmts, err := engine.Diff(context.Background())
 	if err != nil {
 		return fmt.Errorf("schema diff: %w", err)
@@ -406,7 +406,7 @@ func runMigrateUp(configFile string, steps int) error {
 	}
 	defer dbManager.Close()
 
-	runner := migration.NewRunner(dbManager.Default(), "migrations")
+	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
 	if err := runner.Up(context.Background(), steps); err != nil {
 		return fmt.Errorf("migration up: %w", err)
 	}
@@ -432,7 +432,7 @@ func runMigrateDown(configFile string, steps int) error {
 	}
 	defer dbManager.Close()
 
-	runner := migration.NewRunner(dbManager.Default(), "migrations")
+	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
 	if err := runner.Down(context.Background(), steps); err != nil {
 		return fmt.Errorf("migration down: %w", err)
 	}
@@ -458,7 +458,7 @@ func runMigrateStatus(configFile string) error {
 	}
 	defer dbManager.Close()
 
-	runner := migration.NewRunner(dbManager.Default(), "migrations")
+	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
 	statuses, err := runner.Status(context.Background())
 	if err != nil {
 		return err
@@ -491,7 +491,7 @@ func runMigrateVerify(configFile string) error {
 	}
 	defer dbManager.Close()
 
-	runner := migration.NewRunner(dbManager.Default(), "migrations")
+	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
 	if err := runner.Verify(context.Background()); err != nil {
 		return err
 	}

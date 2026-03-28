@@ -36,14 +36,6 @@ func sqlHandler(jobCfg config.JobDef, dbManager *db.Manager) func(ctx context.Co
 		}
 
 		dbName, _ := jobCfg.Config["database"].(string)
-		var pool interface{ Exec(context.Context, string, ...any) (interface{ RowsAffected() int64 }, error) }
-		_ = pool
-
-		var pgPool interface {
-			Exec(ctx context.Context, sql string, arguments ...any) (interface{ RowsAffected() int64 }, error)
-		}
-		_ = pgPool
-
 		// Use the db manager to get the pool
 		var execErr error
 		if dbName != "" {
@@ -51,9 +43,9 @@ func sqlHandler(jobCfg config.JobDef, dbManager *db.Manager) func(ctx context.Co
 			if err != nil {
 				return fmt.Errorf("job %q: database %q not found: %w", jobCfg.Name, dbName, err)
 			}
-			_, execErr = p.Exec(ctx, sqlStr)
+			_, execErr = p.SQL.ExecContext(ctx, sqlStr)
 		} else {
-			_, execErr = dbManager.Default().Exec(ctx, sqlStr)
+			_, execErr = dbManager.Default().SQL.ExecContext(ctx, sqlStr)
 		}
 
 		return execErr

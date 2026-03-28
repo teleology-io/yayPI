@@ -33,7 +33,7 @@ func (f *Factory) Delete(entity *schema.Entity, opts *schema.DeleteOpts) http.Ha
 			}
 		}
 
-		pool, err := f.db.ForEntity(entity.Name)
+		dbc, err := f.db.ForEntity(entity.Name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "database unavailable")
 			return
@@ -47,7 +47,7 @@ func (f *Factory) Delete(entity *schema.Entity, opts *schema.DeleteOpts) http.Ha
 			soft = true
 		}
 
-		builder := query.NewBuilder(entity, pool)
+		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
 		if err := builder.Delete(r.Context(), id, soft); err != nil {
 			if err.Error() == "record not found" {
 				writeError(w, http.StatusNotFound, "record not found")

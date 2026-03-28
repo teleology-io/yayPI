@@ -3,6 +3,7 @@ package migration
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/csullivan/yaypi/internal/dialect"
 )
 
 const migrationsTable = "yaypi_migrations"
@@ -25,25 +26,19 @@ type MigrationStatus struct {
 
 // Runner applies and rolls back migrations.
 type Runner struct {
-	pool          *pgxpool.Pool
+	db            *sql.DB
+	dialect       dialect.Dialect
 	migrationsDir string
 }
 
 // NewRunner creates a Runner.
-func NewRunner(pool *pgxpool.Pool, migrationsDir string) *Runner {
-	return &Runner{pool: pool, migrationsDir: migrationsDir}
+func NewRunner(db *sql.DB, d dialect.Dialect, migrationsDir string) *Runner {
+	return &Runner{db: db, dialect: d, migrationsDir: migrationsDir}
 }
 
 // ensureTable creates the migrations tracking table if it does not exist.
 func (r *Runner) ensureTable(ctx context.Context) error {
-	_, err := r.pool.Exec(ctx, fmt.Sprintf(`
-		CREATE TABLE IF NOT EXISTS %s (
-			id SERIAL PRIMARY KEY,
-			name TEXT NOT NULL UNIQUE,
-			checksum TEXT NOT NULL,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)
-	`, quoteIdent(migrationsTable)))
+	_, err := r.db.ExecContext(ctx, r.dialect.MigrationsTableDDL(migrationsTable))
 	return err
 }
 
@@ -53,10 +48,11 @@ func (r *Runner) Status(ctx context.Context) ([]MigrationStatus, error) {
 		return nil, fmt.Errorf("ensuring migrations table: %w", err)
 	}
 
-	// Fetch applied migrations
-	rows, err := r.pool.Query(ctx, fmt.Sprintf(
-		"SELECT name, checksum, applied_at FROM %s ORDER BY name", quoteIdent(migrationsTable),
+	q := r.dialect.Rebind(fmt.Sprintf(
+		"SELECT name, checksum, applied_at FROM %s ORDER BY name",
+		r.dialect.QuoteIdent(migrationsTable),
 	))
+	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
 		return nil, fmt.Errorf("querying migrations table: %w", err)
 	}
@@ -75,7 +71,6 @@ func (r *Runner) Status(ctx context.Context) ([]MigrationStatus, error) {
 		return nil, err
 	}
 
-	// Find all up migration files
 	files, err := filepath.Glob(filepath.Join(r.migrationsDir, "*.up.sql"))
 	if err != nil {
 		return nil, fmt.Errorf("globbing migrations: %w", err)
@@ -88,10 +83,7 @@ func (r *Runner) Status(ctx context.Context) ([]MigrationStatus, error) {
 		if s, ok := applied[name]; ok {
 			statuses = append(statuses, s)
 		} else {
-			statuses = append(statuses, MigrationStatus{
-				Name:    name,
-				Pending: true,
-			})
+			statuses = append(statuses, MigrationStatus{Name: name, Pending: true})
 		}
 	}
 
@@ -117,7 +109,6 @@ func (r *Runner) Up(ctx context.Context, steps int) error {
 		if steps > 0 && applied >= steps {
 			break
 		}
-
 		upFile := filepath.Join(r.migrationsDir, s.Name)
 		if err := r.applyMigration(ctx, upFile, s.Name); err != nil {
 			return fmt.Errorf("applying migration %s: %w", s.Name, err)
@@ -125,9 +116,6 @@ func (r *Runner) Up(ctx context.Context, steps int) error {
 		applied++
 	}
 
-	if applied == 0 {
-		return nil // nothing to do
-	}
 	return nil
 }
 
@@ -141,9 +129,11 @@ func (r *Runner) Down(ctx context.Context, steps int) error {
 		return fmt.Errorf("steps must be > 0 for rollback")
 	}
 
-	rows, err := r.pool.Query(ctx, fmt.Sprintf(
-		"SELECT name FROM %s ORDER BY name DESC LIMIT $1", quoteIdent(migrationsTable),
-	), steps)
+	q := r.dialect.Rebind(fmt.Sprintf(
+		"SELECT name FROM %s ORDER BY name DESC LIMIT $1",
+		r.dialect.QuoteIdent(migrationsTable),
+	))
+	rows, err := r.db.QueryContext(ctx, q, steps)
 	if err != nil {
 		return err
 	}
@@ -178,9 +168,8 @@ func (r *Runner) Verify(ctx context.Context) error {
 		return fmt.Errorf("ensuring migrations table: %w", err)
 	}
 
-	rows, err := r.pool.Query(ctx, fmt.Sprintf(
-		"SELECT name, checksum FROM %s", quoteIdent(migrationsTable),
-	))
+	q := fmt.Sprintf("SELECT name, checksum FROM %s", r.dialect.QuoteIdent(migrationsTable))
+	rows, err := r.db.QueryContext(ctx, q)
 	if err != nil {
 		return err
 	}
@@ -192,14 +181,12 @@ func (r *Runner) Verify(ctx context.Context) error {
 		if err := rows.Scan(&name, &checksum); err != nil {
 			return err
 		}
-
 		path := filepath.Join(r.migrationsDir, name)
 		data, err := os.ReadFile(path)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("%s: file not found", name))
 			continue
 		}
-
 		computed := fmt.Sprintf("%x", sha256.Sum256(data))
 		if computed != checksum {
 			errs = append(errs, fmt.Sprintf("%s: checksum mismatch (expected %s, got %s)", name, checksum, computed))
@@ -220,30 +207,28 @@ func (r *Runner) applyMigration(ctx context.Context, path, name string) error {
 	}
 
 	checksum := fmt.Sprintf("%x", sha256.Sum256(data))
-	sql := string(data)
+	sqlContent := string(data)
 
-	// Separate concurrent statements
-	txSQL, concurrentSQL := splitConcurrent(sql)
+	txSQL, concurrentSQL := splitConcurrent(sqlContent)
 
-	// Run transactional part
 	if strings.TrimSpace(txSQL) != "" {
-		if _, err := r.pool.Exec(ctx, txSQL); err != nil {
+		if _, err := r.db.ExecContext(ctx, txSQL); err != nil {
 			return fmt.Errorf("executing migration SQL: %w", err)
 		}
 	}
 
-	// Run concurrent statements outside transaction
+	// Concurrent statements (Postgres CONCURRENTLY indexes) run outside a transaction
 	for _, stmt := range concurrentSQL {
-		if _, err := r.pool.Exec(ctx, stmt); err != nil {
+		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("executing concurrent statement: %w", err)
 		}
 	}
 
-	// Record in migrations table
-	_, err = r.pool.Exec(ctx,
-		fmt.Sprintf("INSERT INTO %s (name, checksum) VALUES ($1, $2)", quoteIdent(migrationsTable)),
-		name, checksum,
-	)
+	insert := r.dialect.Rebind(fmt.Sprintf(
+		"INSERT INTO %s (name, checksum) VALUES ($1, $2)",
+		r.dialect.QuoteIdent(migrationsTable),
+	))
+	_, err = r.db.ExecContext(ctx, insert, name, checksum)
 	return err
 }
 
@@ -254,20 +239,21 @@ func (r *Runner) rollbackMigration(ctx context.Context, path, upName string) err
 		return fmt.Errorf("reading down migration file: %w", err)
 	}
 
-	if _, err := r.pool.Exec(ctx, string(data)); err != nil {
+	if _, err := r.db.ExecContext(ctx, string(data)); err != nil {
 		return fmt.Errorf("executing down migration SQL: %w", err)
 	}
 
-	_, err = r.pool.Exec(ctx,
-		fmt.Sprintf("DELETE FROM %s WHERE name = $1", quoteIdent(migrationsTable)),
-		upName,
-	)
+	del := r.dialect.Rebind(fmt.Sprintf(
+		"DELETE FROM %s WHERE name = $1",
+		r.dialect.QuoteIdent(migrationsTable),
+	))
+	_, err = r.db.ExecContext(ctx, del, upName)
 	return err
 }
 
-// splitConcurrent separates regular SQL from lines marked as concurrent.
-func splitConcurrent(sql string) (string, []string) {
-	lines := strings.Split(sql, "\n")
+// splitConcurrent separates regular SQL from lines after "-- Run outside transaction:".
+func splitConcurrent(sqlContent string) (string, []string) {
+	lines := strings.Split(sqlContent, "\n")
 	var txLines []string
 	var concurrentStmts []string
 	inConcurrent := false

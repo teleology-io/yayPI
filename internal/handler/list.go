@@ -13,13 +13,13 @@ import (
 // List creates a handler that lists records for the given entity.
 func (f *Factory) List(entity *schema.Entity, opts *schema.ListOpts) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		pool, err := f.db.ForEntity(entity.Name)
+		dbc, err := f.db.ForEntity(entity.Name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "database unavailable")
 			return
 		}
 
-		builder := query.NewBuilder(entity, pool)
+		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
 
 		// Build allowed columns set from opts
 		allowedFilter := make(map[string]struct{})

@@ -33,13 +33,13 @@ func (f *Factory) Create(entity *schema.Entity, opts *schema.CreateOpts) http.Ha
 			}
 		}
 
-		pool, err := f.db.ForEntity(entity.Name)
+		dbc, err := f.db.ForEntity(entity.Name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "database unavailable")
 			return
 		}
 
-		builder := query.NewBuilder(entity, pool)
+		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
 		record, err := builder.Create(r.Context(), data)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "create failed")

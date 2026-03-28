@@ -5,6 +5,7 @@ import (
 	"crypto/hmac"
 	"crypto/rand"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -16,12 +17,11 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/csullivan/yaypi/internal/config"
 	"github.com/csullivan/yaypi/internal/db"
+	"github.com/csullivan/yaypi/internal/dialect"
 	"github.com/csullivan/yaypi/internal/schema"
 )
 
@@ -72,11 +72,12 @@ func (h *Handler) Mount(r chi.Router) {
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	reg := h.cfg.Register
-	entity, pool, err := h.resolveEntity()
+	entity, dbc, err := h.resolveEntity()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "configuration error")
 		return
 	}
+	d := dbc.Dialect
 
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -111,31 +112,55 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	cols, placeholders, vals := buildInsert(entity, body)
+	cols, placeholders, vals := buildInsert(entity, body, d)
 	if len(cols) == 0 {
 		writeError(w, http.StatusBadRequest, "no valid fields provided")
 		return
 	}
 
-	query := fmt.Sprintf(
-		`INSERT INTO %s (%s) VALUES (%s) RETURNING *`,
-		quoteIdent(entity.Table),
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-	)
-
-	rows, err := pool.Query(r.Context(), query, vals...)
-	if err != nil {
-		if isUniqueViolation(err) {
-			writeError(w, http.StatusConflict, "a user with that credential already exists")
+	var user map[string]any
+	if d.SupportsReturning() {
+		query := d.Rebind(fmt.Sprintf(
+			`INSERT INTO %s (%s) VALUES (%s) RETURNING *`,
+			d.QuoteIdent(entity.Table), strings.Join(cols, ", "), strings.Join(placeholders, ", "),
+		))
+		rows, qerr := dbc.SQL.QueryContext(r.Context(), query, vals...)
+		if qerr != nil {
+			if d.IsUniqueViolation(qerr) {
+				writeError(w, http.StatusConflict, "a user with that credential already exists")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "could not create user")
 			return
 		}
-		writeError(w, http.StatusInternalServerError, "could not create user")
-		return
+		defer rows.Close()
+		user, err = scanRow(rows)
+	} else {
+		query := d.Rebind(fmt.Sprintf(
+			`INSERT INTO %s (%s) VALUES (%s)`,
+			d.QuoteIdent(entity.Table), strings.Join(cols, ", "), strings.Join(placeholders, ", "),
+		))
+		res, qerr := dbc.SQL.ExecContext(r.Context(), query, vals...)
+		if qerr != nil {
+			if d.IsUniqueViolation(qerr) {
+				writeError(w, http.StatusConflict, "a user with that credential already exists")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "could not create user")
+			return
+		}
+		lastID, _ := res.LastInsertId()
+		credCol := fieldToColumn(entity, reg.CredentialField)
+		fetchQ := d.Rebind(fmt.Sprintf(`SELECT * FROM %s WHERE %s = $1 LIMIT 1`,
+			d.QuoteIdent(entity.Table), d.QuoteIdent(credCol)))
+		rows, qerr := dbc.SQL.QueryContext(r.Context(), fetchQ, body[reg.CredentialField])
+		if qerr != nil || lastID == 0 {
+			writeError(w, http.StatusInternalServerError, "could not read created user")
+			return
+		}
+		defer rows.Close()
+		user, err = scanRow(rows)
 	}
-	defer rows.Close()
-
-	user, err := scanRow(rows)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not read created user")
 		return
@@ -155,11 +180,12 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	login := h.cfg.Login
-	entity, pool, err := h.resolveEntity()
+	entity, dbc, err := h.resolveEntity()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "configuration error")
 		return
 	}
+	d := dbc.Dialect
 
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -177,13 +203,11 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	credCol := fieldToColumn(entity, login.CredentialField)
 	hashCol := fieldToColumn(entity, login.HashField)
 
-	// Fetch all columns directly so the hash field is included (bypasses omit_response)
-	query := fmt.Sprintf(
+	query := d.Rebind(fmt.Sprintf(
 		`SELECT * FROM %s WHERE %s = $1 AND deleted_at IS NULL LIMIT 1`,
-		quoteIdent(entity.Table), quoteIdent(credCol),
-	)
-
-	rows, err := pool.Query(r.Context(), query, strings.ToLower(strings.TrimSpace(credential)))
+		d.QuoteIdent(entity.Table), d.QuoteIdent(credCol),
+	))
+	rows, err := dbc.SQL.QueryContext(r.Context(), query, strings.ToLower(strings.TrimSpace(credential)))
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -217,11 +241,12 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 // ── me ────────────────────────────────────────────────────────────────────────
 
 func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
-	entity, pool, err := h.resolveEntity()
+	entity, dbc, err := h.resolveEntity()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "configuration error")
 		return
 	}
+	d := dbc.Dialect
 
 	sub, err := h.extractSub(r)
 	if err != nil {
@@ -229,10 +254,10 @@ func (h *Handler) me(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	rows, err := pool.Query(r.Context(),
-		fmt.Sprintf(`SELECT * FROM %s WHERE id = $1 AND deleted_at IS NULL LIMIT 1`, quoteIdent(entity.Table)),
-		sub,
-	)
+	query := d.Rebind(fmt.Sprintf(
+		`SELECT * FROM %s WHERE id = $1 AND deleted_at IS NULL LIMIT 1`, d.QuoteIdent(entity.Table),
+	))
+	rows, err := dbc.SQL.QueryContext(r.Context(), query, sub)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
@@ -306,7 +331,7 @@ func (h *Handler) oauthCallback(p config.OAuth2ProviderDef) http.HandlerFunc {
 			return
 		}
 
-		entity, pool, err := h.resolveEntity()
+		entity, dbc, err := h.resolveEntity()
 		if err != nil {
 			h.oauthError(w, r, p, "configuration error")
 			return
@@ -323,7 +348,7 @@ func (h *Handler) oauthCallback(p config.OAuth2ProviderDef) http.HandlerFunc {
 		}
 		email = strings.ToLower(strings.TrimSpace(email))
 
-		user, err := h.oauthUpsert(r.Context(), pool, entity, p, email, info)
+		user, err := h.oauthUpsert(r.Context(), dbc, entity, p, email, info)
 		if err != nil {
 			h.oauthError(w, r, p, "could not sign in")
 			return
@@ -354,20 +379,19 @@ func (h *Handler) oauthError(w http.ResponseWriter, r *http.Request, p config.OA
 
 func (h *Handler) oauthUpsert(
 	ctx context.Context,
-	pool *pgxpool.Pool,
+	dbc *db.DB,
 	entity *schema.Entity,
 	p config.OAuth2ProviderDef,
 	email string,
 	info map[string]any,
 ) (map[string]any, error) {
+	d := dbc.Dialect
 	emailCol := fieldToColumn(entity, "email")
 
 	// Try to find an existing user by email
-	rows, err := pool.Query(ctx,
-		fmt.Sprintf(`SELECT * FROM %s WHERE %s = $1 AND deleted_at IS NULL LIMIT 1`,
-			quoteIdent(entity.Table), quoteIdent(emailCol)),
-		email,
-	)
+	q := d.Rebind(fmt.Sprintf(`SELECT * FROM %s WHERE %s = $1 AND deleted_at IS NULL LIMIT 1`,
+		d.QuoteIdent(entity.Table), d.QuoteIdent(emailCol)))
+	rows, err := dbc.SQL.QueryContext(ctx, q, email)
 	if err != nil {
 		return nil, err
 	}
@@ -377,7 +401,6 @@ func (h *Handler) oauthUpsert(
 		return user, nil
 	}
 
-	// Build new user record from OAuth2 info
 	nameField := p.NameField
 	if nameField == "" {
 		nameField = "name"
@@ -420,25 +443,35 @@ func (h *Handler) oauthUpsert(
 		"role":         defaultRole,
 	}
 
-	cols, placeholders, vals := buildInsert(entity, newUser)
-	query := fmt.Sprintf(
-		`INSERT INTO %s (%s) VALUES (%s) ON CONFLICT DO NOTHING RETURNING *`,
-		quoteIdent(entity.Table),
-		strings.Join(cols, ", "),
-		strings.Join(placeholders, ", "),
-	)
-	rows, err = pool.Query(ctx, query, vals...)
+	cols, placeholders, vals := buildInsert(entity, newUser, d)
+	upsertSQL := d.Rebind(d.UpsertIgnore(d.QuoteIdent(entity.Table), cols, placeholders))
+
+	if d.SupportsReturning() {
+		rows, err = dbc.SQL.QueryContext(ctx, upsertSQL, vals...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return scanRow(rows)
+	}
+	// MySQL: INSERT IGNORE then re-fetch by email
+	if _, err = dbc.SQL.ExecContext(ctx, upsertSQL, vals...); err != nil {
+		return nil, err
+	}
+	fetchQ := d.Rebind(fmt.Sprintf(`SELECT * FROM %s WHERE %s = $1 AND deleted_at IS NULL LIMIT 1`,
+		d.QuoteIdent(entity.Table), d.QuoteIdent(emailCol)))
+	rows2, err := dbc.SQL.QueryContext(ctx, fetchQ, email)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	return scanRow(rows)
+	defer rows2.Close()
+	return scanRow(rows2)
 }
 
 // ── JWT helpers ───────────────────────────────────────────────────────────────
 
 func (h *Handler) issueToken(user map[string]any) (string, error) {
-	sub := fmt.Sprintf("%v", user["id"])
+	sub := anyToString(user["id"])
 	role, _ := user["role"].(string)
 	email, _ := user["email"].(string)
 
@@ -637,20 +670,20 @@ func defaultScopes(provider string) []string {
 
 // ── DB / schema helpers ───────────────────────────────────────────────────────
 
-func (h *Handler) resolveEntity() (*schema.Entity, *pgxpool.Pool, error) {
+func (h *Handler) resolveEntity() (*schema.Entity, *db.DB, error) {
 	entity, ok := h.registry.GetEntity(h.cfg.UserEntity)
 	if !ok {
 		return nil, nil, fmt.Errorf("entity %q not found in registry", h.cfg.UserEntity)
 	}
-	pool := h.dbManager.Default()
+	dbc := h.dbManager.Default()
 	if entity.Database != "" {
-		p, err := h.dbManager.Get(entity.Database)
+		d, err := h.dbManager.Get(entity.Database)
 		if err != nil {
 			return nil, nil, err
 		}
-		pool = p
+		dbc = d
 	}
-	return entity, pool, nil
+	return entity, dbc, nil
 }
 
 // fieldToColumn returns the snake_case column name for a given entity field name.
@@ -663,10 +696,10 @@ func fieldToColumn(entity *schema.Entity, fieldName string) string {
 	return fieldName
 }
 
-// buildInsert produces quoted column names, $N placeholders, and values for an INSERT.
+// buildInsert produces quoted column names, dialect placeholders, and values for an INSERT.
 // Only columns that exist in the entity definition are included (protects against
 // arbitrary key injection). Primary-key fields with a DB default are skipped.
-func buildInsert(entity *schema.Entity, data map[string]any) (cols, placeholders []string, vals []any) {
+func buildInsert(entity *schema.Entity, data map[string]any, d dialect.Dialect) (cols, placeholders []string, vals []any) {
 	n := 1
 	for _, f := range entity.Fields {
 		if f.PrimaryKey && f.Default != "" {
@@ -684,27 +717,55 @@ func buildInsert(entity *schema.Entity, data map[string]any) (cols, placeholders
 		if !ok {
 			continue
 		}
-		cols = append(cols, quoteIdent(f.ColumnName))
-		placeholders = append(placeholders, fmt.Sprintf("$%d", n))
+		cols = append(cols, d.QuoteIdent(f.ColumnName))
+		if d.Name() == "postgres" {
+			placeholders = append(placeholders, fmt.Sprintf("$%d", n))
+		} else {
+			placeholders = append(placeholders, "?")
+		}
 		vals = append(vals, val)
 		n++
 	}
 	return
 }
 
-// scanRow reads the first row from pgx.Rows into a map[string]any.
-func scanRow(rows pgx.Rows) (map[string]any, error) {
-	if !rows.Next() {
-		return nil, nil
+// anyToString converts an id value to its string representation.
+// database/sql may scan UUID columns as []byte (16 raw bytes); format those as UUID strings.
+func anyToString(v any) string {
+	switch id := v.(type) {
+	case string:
+		return id
+	case []byte:
+		if len(id) == 16 {
+			return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x",
+				id[0:4], id[4:6], id[6:8], id[8:10], id[10:16])
+		}
+		return string(id)
+	default:
+		return fmt.Sprintf("%v", v)
 	}
-	descs := rows.FieldDescriptions()
-	vals, err := rows.Values()
+}
+
+// scanRow reads the first row from *sql.Rows into a map[string]any.
+func scanRow(rows *sql.Rows) (map[string]any, error) {
+	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
 	}
-	result := make(map[string]any, len(descs))
-	for i, d := range descs {
-		result[d.Name] = vals[i]
+	if !rows.Next() {
+		return nil, nil
+	}
+	vals := make([]any, len(cols))
+	ptrs := make([]any, len(cols))
+	for i := range vals {
+		ptrs[i] = &vals[i]
+	}
+	if err := rows.Scan(ptrs...); err != nil {
+		return nil, err
+	}
+	result := make(map[string]any, len(cols))
+	for i, col := range cols {
+		result[col] = vals[i]
 	}
 	return result, nil
 }
@@ -719,13 +780,6 @@ func stripSensitive(entity *schema.Entity, user map[string]any) {
 	}
 }
 
-func isUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "23505")
-}
-
-func quoteIdent(s string) string {
-	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
-}
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
 

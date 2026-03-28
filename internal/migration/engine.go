@@ -2,11 +2,12 @@ package migration
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"strings"
 
+	"github.com/csullivan/yaypi/internal/dialect"
 	"github.com/csullivan/yaypi/internal/schema"
-	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // DBColumn represents a column as reported by information_schema.
@@ -18,30 +19,29 @@ type DBColumn struct {
 	Default    string
 }
 
-// DBIndex represents an index as reported by pg_indexes.
+// DBIndex represents an index as reported by the catalog.
 type DBIndex struct {
-	TableName  string
-	IndexName  string
-	IndexDef   string
-	IsUnique   bool
+	TableName string
+	IndexName string
 }
 
 // DDLStatement holds a single DDL statement with metadata.
 type DDLStatement struct {
 	SQL         string
 	Description string
-	Concurrent  bool // true for CREATE INDEX CONCURRENTLY
+	Concurrent  bool // true for CREATE INDEX CONCURRENTLY (Postgres only)
 }
 
 // Engine computes schema diffs between entity definitions and the live database.
 type Engine struct {
-	pool     *pgxpool.Pool
+	db       *sql.DB
+	dialect  dialect.Dialect
 	registry *schema.Registry
 }
 
 // NewEngine creates a migration Engine.
-func NewEngine(pool *pgxpool.Pool, registry *schema.Registry) *Engine {
-	return &Engine{pool: pool, registry: registry}
+func NewEngine(db *sql.DB, d dialect.Dialect, registry *schema.Registry) *Engine {
+	return &Engine{db: db, dialect: d, registry: registry}
 }
 
 // Diff computes DDL statements needed to bring the database schema up to date.
@@ -67,25 +67,23 @@ func (e *Engine) Diff(ctx context.Context) ([]DDLStatement, error) {
 		table := entity.Table
 
 		if !existingTables[table] {
-			// CREATE TABLE
 			stmts = append(stmts, DDLStatement{
 				SQL:         e.createTableSQL(entity),
 				Description: fmt.Sprintf("create table %s", table),
 			})
 		} else {
-			// ADD missing columns
 			for _, field := range entity.Fields {
 				key := table + "." + field.ColumnName
 				if _, exists := existingCols[key]; !exists {
 					stmts = append(stmts, DDLStatement{
-						SQL:         fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;", quoteIdent(table), columnDef(field)),
+						SQL: fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s;",
+							e.dialect.QuoteIdent(table), e.columnDef(field)),
 						Description: fmt.Sprintf("add column %s.%s", table, field.ColumnName),
 					})
 				}
 			}
 		}
 
-		// CREATE missing indexes
 		for _, idx := range entity.Indexes {
 			idxKey := table + "." + idx.Name
 			if !existingIndexes[idxKey] {
@@ -99,17 +97,29 @@ func (e *Engine) Diff(ctx context.Context) ([]DDLStatement, error) {
 				}
 				cols := make([]string, len(idx.Columns))
 				for i, c := range idx.Columns {
-					cols[i] = quoteIdent(c)
+					cols[i] = e.dialect.QuoteIdent(c)
 				}
-				sql := fmt.Sprintf(
-					"CREATE %sINDEX CONCURRENTLY IF NOT EXISTS %s ON %s USING %s (%s);",
-					unique, quoteIdent(idx.Name), quoteIdent(table), idxType, strings.Join(cols, ", "),
-				)
-				stmts = append(stmts, DDLStatement{
-					SQL:         sql,
-					Description: fmt.Sprintf("create index %s", idx.Name),
-					Concurrent:  true,
-				})
+
+				if e.dialect.SupportsConcurrentIndex() {
+					stmts = append(stmts, DDLStatement{
+						SQL: fmt.Sprintf(
+							"CREATE %sINDEX CONCURRENTLY IF NOT EXISTS %s ON %s USING %s (%s);",
+							unique, e.dialect.QuoteIdent(idx.Name),
+							e.dialect.QuoteIdent(table), idxType, strings.Join(cols, ", "),
+						),
+						Description: fmt.Sprintf("create index %s", idx.Name),
+						Concurrent:  true,
+					})
+				} else {
+					stmts = append(stmts, DDLStatement{
+						SQL: fmt.Sprintf(
+							"CREATE %sINDEX IF NOT EXISTS %s ON %s (%s);",
+							unique, e.dialect.QuoteIdent(idx.Name),
+							e.dialect.QuoteIdent(table), strings.Join(cols, ", "),
+						),
+						Description: fmt.Sprintf("create index %s", idx.Name),
+					})
+				}
 			}
 		}
 	}
@@ -117,13 +127,8 @@ func (e *Engine) Diff(ctx context.Context) ([]DDLStatement, error) {
 	return stmts, nil
 }
 
-// fetchTables returns a set of existing table names.
 func (e *Engine) fetchTables(ctx context.Context) (map[string]bool, error) {
-	rows, err := e.pool.Query(ctx, `
-		SELECT table_name
-		FROM information_schema.tables
-		WHERE table_schema = 'public' AND table_type = 'BASE TABLE'
-	`)
+	rows, err := e.db.QueryContext(ctx, e.dialect.ListTablesQuery(""))
 	if err != nil {
 		return nil, err
 	}
@@ -140,13 +145,13 @@ func (e *Engine) fetchTables(ctx context.Context) (map[string]bool, error) {
 	return result, rows.Err()
 }
 
-// fetchColumns returns a map of "table.column" → DBColumn.
 func (e *Engine) fetchColumns(ctx context.Context) (map[string]DBColumn, error) {
-	rows, err := e.pool.Query(ctx, `
-		SELECT table_name, column_name, data_type, is_nullable, column_default
-		FROM information_schema.columns
-		WHERE table_schema = 'public'
-	`)
+	// SQLite requires per-table PRAGMA — handled specially
+	if e.dialect.Name() == "sqlite" {
+		return e.fetchColumnsSQLite(ctx)
+	}
+
+	rows, err := e.db.QueryContext(ctx, e.dialect.ListColumnsQuery(""))
 	if err != nil {
 		return nil, err
 	}
@@ -167,11 +172,46 @@ func (e *Engine) fetchColumns(ctx context.Context) (map[string]DBColumn, error) 
 	return result, rows.Err()
 }
 
-// fetchIndexes returns a set of "table.indexname" keys.
+func (e *Engine) fetchColumnsSQLite(ctx context.Context) (map[string]DBColumn, error) {
+	tables, err := e.fetchTables(ctx)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]DBColumn)
+	for table := range tables {
+		rows, err := e.db.QueryContext(ctx,
+			fmt.Sprintf("PRAGMA table_info(%s)", e.dialect.QuoteIdent(table)))
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var cid int
+			var name, colType string
+			var notNull int
+			var dfltValue *string
+			var pk int
+			if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			col := DBColumn{TableName: table, ColumnName: name, DataType: colType}
+			if notNull == 0 {
+				col.IsNullable = "YES"
+			} else {
+				col.IsNullable = "NO"
+			}
+			if dfltValue != nil {
+				col.Default = *dfltValue
+			}
+			result[table+"."+name] = col
+		}
+		rows.Close()
+	}
+	return result, nil
+}
+
 func (e *Engine) fetchIndexes(ctx context.Context) (map[string]bool, error) {
-	rows, err := e.pool.Query(ctx, `
-		SELECT tablename, indexname FROM pg_indexes WHERE schemaname = 'public'
-	`)
+	rows, err := e.db.QueryContext(ctx, e.dialect.ListIndexesQuery(""))
 	if err != nil {
 		return nil, err
 	}
@@ -194,20 +234,19 @@ func (e *Engine) createTableSQL(entity *schema.Entity) string {
 	var fkConstraints []string
 
 	for _, f := range entity.Fields {
-		cols = append(cols, "  "+columnDef(f))
+		cols = append(cols, "  "+e.columnDef(f))
 
 		if f.Reference != nil {
-			// Resolve entity name → table name via the registry.
 			refTable := f.Reference.Entity
 			if refEntity, ok := e.registry.GetEntity(f.Reference.Entity); ok {
 				refTable = refEntity.Table
 			}
 			fk := fmt.Sprintf(
 				"  CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s) ON DELETE %s ON UPDATE %s",
-				quoteIdent(fmt.Sprintf("fk_%s_%s", entity.Table, f.ColumnName)),
-				quoteIdent(f.ColumnName),
-				quoteIdent(refTable),
-				quoteIdent(f.Reference.Field),
+				e.dialect.QuoteIdent(fmt.Sprintf("fk_%s_%s", entity.Table, f.ColumnName)),
+				e.dialect.QuoteIdent(f.ColumnName),
+				e.dialect.QuoteIdent(refTable),
+				e.dialect.QuoteIdent(f.Reference.Field),
 				string(f.Reference.OnDelete),
 				string(f.Reference.OnUpdate),
 			)
@@ -216,21 +255,20 @@ func (e *Engine) createTableSQL(entity *schema.Entity) string {
 	}
 
 	for _, c := range entity.Constraints {
+		quotedCols := make([]string, len(c.Columns))
+		for i, col := range c.Columns {
+			quotedCols[i] = e.dialect.QuoteIdent(col)
+		}
 		switch c.Type {
 		case "check":
-			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s CHECK (%s)", quoteIdent(c.Name), c.Check))
+			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s CHECK (%s)",
+				e.dialect.QuoteIdent(c.Name), c.Check))
 		case "unique":
-			quotedCols := make([]string, len(c.Columns))
-			for i, col := range c.Columns {
-				quotedCols[i] = quoteIdent(col)
-			}
-			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s UNIQUE (%s)", quoteIdent(c.Name), strings.Join(quotedCols, ", ")))
+			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s UNIQUE (%s)",
+				e.dialect.QuoteIdent(c.Name), strings.Join(quotedCols, ", ")))
 		case "primary_key":
-			quotedCols := make([]string, len(c.Columns))
-			for i, col := range c.Columns {
-				quotedCols[i] = quoteIdent(col)
-			}
-			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s PRIMARY KEY (%s)", quoteIdent(c.Name), strings.Join(quotedCols, ", ")))
+			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s PRIMARY KEY (%s)",
+				e.dialect.QuoteIdent(c.Name), strings.Join(quotedCols, ", ")))
 		}
 	}
 
@@ -238,14 +276,14 @@ func (e *Engine) createTableSQL(entity *schema.Entity) string {
 
 	return fmt.Sprintf(
 		"CREATE TABLE IF NOT EXISTS %s (\n%s\n);",
-		quoteIdent(entity.Table),
+		e.dialect.QuoteIdent(entity.Table),
 		strings.Join(cols, ",\n"),
 	)
 }
 
 // columnDef generates a SQL column definition for a field.
-func columnDef(f schema.Field) string {
-	def := quoteIdent(f.ColumnName) + " " + fieldTypeToSQL(f)
+func (e *Engine) columnDef(f schema.Field) string {
+	def := e.dialect.QuoteIdent(f.ColumnName) + " " + e.dialect.FieldTypeToSQL(f)
 
 	if f.PrimaryKey {
 		def += " PRIMARY KEY"
@@ -265,69 +303,15 @@ func columnDef(f schema.Field) string {
 	return def
 }
 
-// fieldTypeToSQL converts a schema.Field type to a PostgreSQL type string.
-func fieldTypeToSQL(f schema.Field) string {
-	switch f.Type {
-	case "uuid":
-		return "uuid"
-	case "string":
-		if f.Length > 0 {
-			return fmt.Sprintf("varchar(%d)", f.Length)
-		}
-		return "varchar(255)"
-	case "text":
-		return "text"
-	case "integer":
-		return "integer"
-	case "bigint":
-		return "bigint"
-	case "float":
-		return "double precision"
-	case "decimal":
-		if f.Precision > 0 {
-			return fmt.Sprintf("numeric(%d,%d)", f.Precision, f.Scale)
-		}
-		return "numeric"
-	case "boolean":
-		return "boolean"
-	case "timestamptz":
-		return "timestamptz"
-	case "date":
-		return "date"
-	case "jsonb":
-		return "jsonb"
-	case "enum":
-		return "text" // enums use text with CHECK constraint in this implementation
-	case "array":
-		return "text[]"
-	case "bytea":
-		return "bytea"
-	default:
-		return "text"
-	}
-}
-
-// quoteIdent safely double-quotes a PostgreSQL identifier.
-func quoteIdent(ident string) string {
-	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
-}
-
-// topoSortEntities returns entities ordered so that referenced (parent) tables
-// are always created before the entities that hold a FK pointing at them.
-// Any entity with no FK dependencies comes first; self-referential FKs are
-// handled by placing the entity as early as possible and relying on
-// DEFERRABLE constraints or post-creation ALTER TABLE when needed (not
-// currently emitted, but the ordering prevents hard failures for normal cases).
+// topoSortEntities returns entities ordered so referenced tables come first.
 func topoSortEntities(entities []*schema.Entity) []*schema.Entity {
-	// Build name→entity index
 	byName := make(map[string]*schema.Entity, len(entities))
 	for _, e := range entities {
 		byName[e.Name] = e
 	}
 
-	// Kahn's algorithm
 	inDegree := make(map[string]int, len(entities))
-	deps := make(map[string][]string, len(entities)) // name → names it depends on
+	deps := make(map[string][]string, len(entities))
 
 	for _, e := range entities {
 		if _, ok := inDegree[e.Name]; !ok {
@@ -335,19 +319,18 @@ func topoSortEntities(entities []*schema.Entity) []*schema.Entity {
 		}
 		for _, f := range e.Fields {
 			if f.Reference == nil || f.Reference.Entity == e.Name {
-				continue // no dep or self-ref
+				continue
 			}
 			ref := f.Reference.Entity
 			if _, ok := byName[ref]; !ok {
-				continue // references an entity we don't manage
+				continue
 			}
 			deps[e.Name] = append(deps[e.Name], ref)
-			inDegree[ref] = inDegree[ref] // ensure key exists
+			inDegree[ref] = inDegree[ref]
 			inDegree[e.Name]++
 		}
 	}
 
-	// Seed queue with zero-indegree nodes (stable order via slice)
 	var queue []string
 	for _, e := range entities {
 		if inDegree[e.Name] == 0 {
@@ -360,7 +343,6 @@ func topoSortEntities(entities []*schema.Entity) []*schema.Entity {
 		name := queue[0]
 		queue = queue[1:]
 		sorted = append(sorted, byName[name])
-		// For every entity that depends on this one, reduce its in-degree
 		for _, e := range entities {
 			for _, dep := range deps[e.Name] {
 				if dep == name {
@@ -373,7 +355,6 @@ func topoSortEntities(entities []*schema.Entity) []*schema.Entity {
 		}
 	}
 
-	// Append any remaining (cyclic deps — shouldn't happen with FK schemas)
 	seen := make(map[string]bool, len(sorted))
 	for _, e := range sorted {
 		seen[e.Name] = true

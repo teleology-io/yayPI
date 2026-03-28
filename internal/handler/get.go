@@ -26,13 +26,13 @@ func (f *Factory) Get(entity *schema.Entity, opts *schema.GetOpts) http.HandlerF
 			}
 		}
 
-		pool, err := f.db.ForEntity(entity.Name)
+		dbc, err := f.db.ForEntity(entity.Name)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "database unavailable")
 			return
 		}
 
-		builder := query.NewBuilder(entity, pool)
+		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
 		row, err := builder.Get(r.Context(), id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "query failed")

@@ -2,15 +2,30 @@ package db
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
+	"time"
+
+	// Postgres via pgx stdlib shim
+	_ "github.com/jackc/pgx/v5/stdlib"
+	// MySQL
+	_ "github.com/go-sql-driver/mysql"
+	// SQLite (pure Go)
+	_ "modernc.org/sqlite"
 
 	"github.com/csullivan/yaypi/internal/config"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/csullivan/yaypi/internal/dialect"
 )
 
-// Manager manages multiple named database connection pools.
+// DB wraps a *sql.DB together with its dialect.
+type DB struct {
+	SQL     *sql.DB
+	Dialect dialect.Dialect
+}
+
+// Manager manages multiple named database connections.
 type Manager struct {
-	pools     map[string]*pgxpool.Pool
+	dbs       map[string]*DB
 	defaultDB string
 	entityDB  map[string]string // entity name → db name
 }
@@ -18,31 +33,50 @@ type Manager struct {
 // NewManager creates a Manager from a list of DBConfig entries and connects to each.
 func NewManager(cfg []config.DBConfig) (*Manager, error) {
 	m := &Manager{
-		pools:    make(map[string]*pgxpool.Pool),
+		dbs:      make(map[string]*DB),
 		entityDB: make(map[string]string),
 	}
 
 	for _, dbCfg := range cfg {
+		d, err := dialect.FromDriver(dbCfg.Driver)
+		if err != nil {
+			return nil, fmt.Errorf("database %q: %w", dbCfg.Name, err)
+		}
+
 		dsn := NewSecretString(dbCfg.DSN)
 
-		poolCfg, err := pgxpool.ParseConfig(dsn.Value())
+		// pgx uses its own driver name when registered via stdlib shim
+		driverName := dbCfg.Driver
+		if driverName == "" || driverName == "postgres" || driverName == "postgresql" {
+			driverName = "pgx"
+		}
+		if driverName == "sqlite3" {
+			driverName = "sqlite"
+		}
+
+		sqlDB, err := sql.Open(driverName, dsn.Value())
 		if err != nil {
-			return nil, fmt.Errorf("parsing DSN for database %q (%s): %w", dbCfg.Name, dsn, err)
+			return nil, fmt.Errorf("opening database %q (%s): %w", dbCfg.Name, dsn, err)
 		}
 
 		if dbCfg.MaxOpenConns > 0 {
-			poolCfg.MaxConns = int32(dbCfg.MaxOpenConns)
+			sqlDB.SetMaxOpenConns(dbCfg.MaxOpenConns)
+		}
+		if dbCfg.MaxIdleConns > 0 {
+			sqlDB.SetMaxIdleConns(dbCfg.MaxIdleConns)
 		}
 		if dbCfg.ConnMaxLifetime > 0 {
-			poolCfg.MaxConnLifetime = dbCfg.ConnMaxLifetime
+			sqlDB.SetConnMaxLifetime(dbCfg.ConnMaxLifetime)
 		}
 
-		pool, err := pgxpool.NewWithConfig(context.Background(), poolCfg)
-		if err != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := sqlDB.PingContext(ctx); err != nil {
+			cancel()
 			return nil, fmt.Errorf("connecting to database %q (%s): %w", dbCfg.Name, dsn, err)
 		}
+		cancel()
 
-		m.pools[dbCfg.Name] = pool
+		m.dbs[dbCfg.Name] = &DB{SQL: sqlDB, Dialect: d}
 
 		if dbCfg.Default || m.defaultDB == "" {
 			m.defaultDB = dbCfg.Name
@@ -56,23 +90,23 @@ func NewManager(cfg []config.DBConfig) (*Manager, error) {
 	return m, nil
 }
 
-// Get returns a pool by name.
-func (m *Manager) Get(name string) (*pgxpool.Pool, error) {
-	pool, ok := m.pools[name]
+// Get returns a DB by name.
+func (m *Manager) Get(name string) (*DB, error) {
+	db, ok := m.dbs[name]
 	if !ok {
 		return nil, fmt.Errorf("database %q not found", name)
 	}
-	return pool, nil
+	return db, nil
 }
 
-// Default returns the default connection pool.
-func (m *Manager) Default() *pgxpool.Pool {
-	return m.pools[m.defaultDB]
+// Default returns the default DB.
+func (m *Manager) Default() *DB {
+	return m.dbs[m.defaultDB]
 }
 
-// ForEntity returns the pool associated with a named entity.
-// Falls back to the default pool if no specific database is configured.
-func (m *Manager) ForEntity(entityName string) (*pgxpool.Pool, error) {
+// ForEntity returns the DB associated with a named entity.
+// Falls back to the default DB if no specific database is configured.
+func (m *Manager) ForEntity(entityName string) (*DB, error) {
 	if dbName, ok := m.entityDB[entityName]; ok {
 		return m.Get(dbName)
 	}
@@ -84,18 +118,18 @@ func (m *Manager) RegisterEntityDB(entityName, dbName string) {
 	m.entityDB[entityName] = dbName
 }
 
-// HealthCheck pings all pools and returns any errors.
+// HealthCheck pings all databases and returns any errors.
 func (m *Manager) HealthCheck(ctx context.Context) map[string]error {
 	results := make(map[string]error)
-	for name, pool := range m.pools {
-		results[name] = pool.Ping(ctx)
+	for name, db := range m.dbs {
+		results[name] = db.SQL.PingContext(ctx)
 	}
 	return results
 }
 
-// Close closes all connection pools.
+// Close closes all database connections.
 func (m *Manager) Close() {
-	for _, pool := range m.pools {
-		pool.Close()
+	for _, db := range m.dbs {
+		db.SQL.Close()
 	}
 }
