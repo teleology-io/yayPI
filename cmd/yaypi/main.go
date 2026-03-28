@@ -13,6 +13,7 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/csullivan/yaypi/internal/auth"
 	"github.com/csullivan/yaypi/internal/config"
 	"github.com/csullivan/yaypi/internal/cron"
 	"github.com/csullivan/yaypi/internal/db"
@@ -250,12 +251,20 @@ func runServer(configFile string) error {
 	secret := []byte(cfg.Auth.Secret)
 	factory := handler.NewFactory(reg, dbManager, policyEngine, dispatcher, secret)
 
+	// Build auth handler if a kind:auth file was loaded
+	var authHandler *auth.Handler
+	if cfg.AuthEndpoint != nil {
+		authHandler = auth.New(cfg.AuthEndpoint.Auth, reg, dbManager, secret, cfg.Auth.Algorithm)
+	}
+
 	// Build router
 	routerCfg := router.Config{
-		BaseURL:    cfg.Project.BaseURL,
-		AuthSecret: secret,
-		AuthAlg:    cfg.Auth.Algorithm,
-		Enforcer:   policyEngine,
+		BaseURL:        cfg.Project.BaseURL,
+		AuthSecret:     secret,
+		AuthAlg:        cfg.Auth.Algorithm,
+		Enforcer:       policyEngine,
+		AuthHandler:    authHandler,
+		AllowedOrigins: cfg.Server.AllowedOrigins,
 	}
 	httpHandler := router.Build(reg, factory, routerCfg)
 

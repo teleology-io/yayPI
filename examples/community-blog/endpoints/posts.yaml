@@ -24,8 +24,8 @@ endpoints:
         require: true
         roles: [editor, admin]
 
-  # Item: GET /posts/{id}, PATCH /posts/{id}, DELETE /posts/{id}
-  - path: /posts/{id}
+  # Item: GET /post/{id}, PATCH /post/{id}, DELETE /post/{id}
+  - path: /post/{id}
     entity: Post
     crud: [get, update, delete]
 

@@ -20,7 +20,7 @@ endpoints:
         require: true
         roles: [editor, admin]
 
-  - path: /posts/{id}
+  - path: /post/{id}
     entity: Post
     crud: [get, update, delete]
     auth:
@@ -53,7 +53,7 @@ endpoints:
         default_limit: 20
         max_limit: 50
 
-  - path: /users/{id}
+  - path: /user/{id}
     entity: User
     crud: [get, update, delete]
     auth:
@@ -78,7 +78,7 @@ endpoints:
         require: true
         roles: [editor, admin]
 
-  - path: /tags/{id}
+  - path: /tag/{id}
     entity: Tag
     crud: [get, update, delete]
     auth:

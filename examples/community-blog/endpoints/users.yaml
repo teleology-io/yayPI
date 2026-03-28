@@ -23,7 +23,7 @@ endpoints:
         require: true
         roles: [admin]
 
-  - path: /users/{id}
+  - path: /user/{id}
     entity: User
     crud: [get, update, delete]
     auth:

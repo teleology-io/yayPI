@@ -26,6 +26,7 @@ yaypi run
 | Configure `yaypi.yaml` | [Project Config](project-config.md) |
 | Define entities and fields | [Entities](entities.md) |
 | Configure REST endpoints | [Endpoints](endpoints.md) |
+| Add login, register, and OAuth2 endpoints | [Auth Endpoints](auth-endpoints.md) |
 | Set up JWT auth and roles | [Authorization](authorization.md) |
 | Generate and run migrations | [Migrations](migrations.md) |
 | Schedule background jobs | [Jobs](jobs.md) |

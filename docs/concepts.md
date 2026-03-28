@@ -29,6 +29,7 @@ Every YAML file (other than `yaypi.yaml` itself) must declare a `kind`. The load
 |---|---|
 | `entity` | Defines a data model and its database table |
 | `endpoints` | Defines REST routes for one or more entities |
+| `auth` | Defines register, login, me, and OAuth2 routes |
 | `jobs` | Defines background cron jobs |
 | `policy` | Defines RBAC roles and permissions |
 

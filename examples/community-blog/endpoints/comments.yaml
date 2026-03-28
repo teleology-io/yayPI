@@ -29,8 +29,8 @@ endpoints:
         require: true
         roles: [member, editor, admin]  # any authenticated user can comment
 
-  # Item: GET /comments/{id}, PATCH /comments/{id}, DELETE /comments/{id}
-  - path: /comments/{id}
+  # Item: GET /comment/{id}, PATCH /comment/{id}, DELETE /comment/{id}
+  - path: /comment/{id}
     entity: Comment
     crud: [get, update, delete]
 

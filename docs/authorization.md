@@ -2,6 +2,8 @@
 
 yayPi uses two independent security layers: **JWT** for identity and **Casbin RBAC** for permissions.
 
+> **Need a `/login` or `/register` endpoint?** See [Auth Endpoints](auth-endpoints.md) — yayPi can generate these from a `kind: auth` YAML file.
+
 ## Two-layer model
 
 ```

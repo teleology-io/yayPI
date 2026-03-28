@@ -9,7 +9,7 @@ entity:
   fields:
     - name: post_id
       type: uuid
-      primary_key: true
+      nullable: false
       references:
         entity: Post
         field: id
@@ -18,15 +18,18 @@ entity:
 
     - name: tag_id
       type: uuid
-      primary_key: true
+      nullable: false
       references:
         entity: Tag
         field: id
         on_delete: CASCADE
         on_update: NO ACTION
 
+  constraints:
+    - name: pk_post_tags
+      type: primary_key
+      columns: [post_id, tag_id]
+
   indexes:
-    - name: idx_post_tags_post_id
-      columns: [post_id]
     - name: idx_post_tags_tag_id
       columns: [tag_id]

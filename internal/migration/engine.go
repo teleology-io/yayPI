@@ -63,7 +63,7 @@ func (e *Engine) Diff(ctx context.Context) ([]DDLStatement, error) {
 
 	var stmts []DDLStatement
 
-	for _, entity := range e.registry.Entities() {
+	for _, entity := range topoSortEntities(e.registry.Entities()) {
 		table := entity.Table
 
 		if !existingTables[table] {
@@ -197,11 +197,16 @@ func (e *Engine) createTableSQL(entity *schema.Entity) string {
 		cols = append(cols, "  "+columnDef(f))
 
 		if f.Reference != nil {
+			// Resolve entity name → table name via the registry.
+			refTable := f.Reference.Entity
+			if refEntity, ok := e.registry.GetEntity(f.Reference.Entity); ok {
+				refTable = refEntity.Table
+			}
 			fk := fmt.Sprintf(
 				"  CONSTRAINT %s FOREIGN KEY (%s) REFERENCES %s(%s) ON DELETE %s ON UPDATE %s",
 				quoteIdent(fmt.Sprintf("fk_%s_%s", entity.Table, f.ColumnName)),
 				quoteIdent(f.ColumnName),
-				quoteIdent(f.Reference.Entity),
+				quoteIdent(refTable),
 				quoteIdent(f.Reference.Field),
 				string(f.Reference.OnDelete),
 				string(f.Reference.OnUpdate),
@@ -220,6 +225,12 @@ func (e *Engine) createTableSQL(entity *schema.Entity) string {
 				quotedCols[i] = quoteIdent(col)
 			}
 			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s UNIQUE (%s)", quoteIdent(c.Name), strings.Join(quotedCols, ", ")))
+		case "primary_key":
+			quotedCols := make([]string, len(c.Columns))
+			for i, col := range c.Columns {
+				quotedCols[i] = quoteIdent(col)
+			}
+			cols = append(cols, fmt.Sprintf("  CONSTRAINT %s PRIMARY KEY (%s)", quoteIdent(c.Name), strings.Join(quotedCols, ", ")))
 		}
 	}
 
@@ -299,4 +310,79 @@ func fieldTypeToSQL(f schema.Field) string {
 // quoteIdent safely double-quotes a PostgreSQL identifier.
 func quoteIdent(ident string) string {
 	return `"` + strings.ReplaceAll(ident, `"`, `""`) + `"`
+}
+
+// topoSortEntities returns entities ordered so that referenced (parent) tables
+// are always created before the entities that hold a FK pointing at them.
+// Any entity with no FK dependencies comes first; self-referential FKs are
+// handled by placing the entity as early as possible and relying on
+// DEFERRABLE constraints or post-creation ALTER TABLE when needed (not
+// currently emitted, but the ordering prevents hard failures for normal cases).
+func topoSortEntities(entities []*schema.Entity) []*schema.Entity {
+	// Build name→entity index
+	byName := make(map[string]*schema.Entity, len(entities))
+	for _, e := range entities {
+		byName[e.Name] = e
+	}
+
+	// Kahn's algorithm
+	inDegree := make(map[string]int, len(entities))
+	deps := make(map[string][]string, len(entities)) // name → names it depends on
+
+	for _, e := range entities {
+		if _, ok := inDegree[e.Name]; !ok {
+			inDegree[e.Name] = 0
+		}
+		for _, f := range e.Fields {
+			if f.Reference == nil || f.Reference.Entity == e.Name {
+				continue // no dep or self-ref
+			}
+			ref := f.Reference.Entity
+			if _, ok := byName[ref]; !ok {
+				continue // references an entity we don't manage
+			}
+			deps[e.Name] = append(deps[e.Name], ref)
+			inDegree[ref] = inDegree[ref] // ensure key exists
+			inDegree[e.Name]++
+		}
+	}
+
+	// Seed queue with zero-indegree nodes (stable order via slice)
+	var queue []string
+	for _, e := range entities {
+		if inDegree[e.Name] == 0 {
+			queue = append(queue, e.Name)
+		}
+	}
+
+	var sorted []*schema.Entity
+	for len(queue) > 0 {
+		name := queue[0]
+		queue = queue[1:]
+		sorted = append(sorted, byName[name])
+		// For every entity that depends on this one, reduce its in-degree
+		for _, e := range entities {
+			for _, dep := range deps[e.Name] {
+				if dep == name {
+					inDegree[e.Name]--
+					if inDegree[e.Name] == 0 {
+						queue = append(queue, e.Name)
+					}
+				}
+			}
+		}
+	}
+
+	// Append any remaining (cyclic deps — shouldn't happen with FK schemas)
+	seen := make(map[string]bool, len(sorted))
+	for _, e := range sorted {
+		seen[e.Name] = true
+	}
+	for _, e := range entities {
+		if !seen[e.Name] {
+			sorted = append(sorted, e)
+		}
+	}
+
+	return sorted
 }

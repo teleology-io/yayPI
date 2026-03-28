@@ -1,0 +1,40 @@
+version: "1"
+kind: auth
+
+auth:
+  base_path: /auth
+  user_entity: User
+
+  register:
+    enabled: true
+    credential_field: email     # field used as the login identifier
+    password_field: password    # field sent in the request body (never stored)
+    hash_field: password_hash   # entity field where the bcrypt hash is stored
+    default_role: member        # role assigned to new registrations
+
+  login:
+    enabled: true
+    credential_field: email
+    password_field: password
+    hash_field: password_hash
+
+  me:
+    enabled: true               # GET /auth/me — returns the current user
+
+  # OAuth2 providers — uncomment and configure as needed
+  #
+  # oauth2:
+  #   providers:
+  #     - name: google
+  #       client_id: ${GOOGLE_CLIENT_ID}
+  #       client_secret: ${GOOGLE_CLIENT_SECRET}
+  #       redirect_uri: ${APP_URL:-http://localhost:8080}/api/v1/auth/callback/google
+  #       success_redirect: ${APP_URL:-http://localhost:3000}   # redirect after login (SPA)
+  #       error_redirect: ${APP_URL:-http://localhost:3000}/login
+  #
+  #     - name: github
+  #       client_id: ${GITHUB_CLIENT_ID}
+  #       client_secret: ${GITHUB_CLIENT_SECRET}
+  #       redirect_uri: ${APP_URL:-http://localhost:8080}/api/v1/auth/callback/github
+  #       success_redirect: ${APP_URL:-http://localhost:3000}
+  #       error_redirect: ${APP_URL:-http://localhost:3000}/login

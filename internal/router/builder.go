@@ -2,9 +2,11 @@ package router
 
 import (
 	"net/http"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/csullivan/yaypi/internal/auth"
 	"github.com/csullivan/yaypi/internal/handler"
 	"github.com/csullivan/yaypi/internal/middleware"
 	"github.com/csullivan/yaypi/internal/policy"
@@ -13,10 +15,12 @@ import (
 
 // Config holds router-building configuration.
 type Config struct {
-	BaseURL    string
-	AuthSecret []byte
-	AuthAlg    string
-	Enforcer   *policy.Engine
+	BaseURL        string
+	AuthSecret     []byte
+	AuthAlg        string
+	Enforcer       *policy.Engine
+	AuthHandler    *auth.Handler // optional; mounts register/login/me/oauth2 routes
+	AllowedOrigins []string      // CORS: permitted origins; ["*"] allows all
 }
 
 // Build constructs a chi.Router from the schema registry and config.
@@ -32,6 +36,16 @@ func Build(
 	r.Use(middleware.RequestID)
 	r.Use(middleware.DefaultLogger())
 	r.Use(middleware.Recover)
+	if len(cfg.AllowedOrigins) > 0 {
+		r.Use(middleware.CORS(cfg.AllowedOrigins))
+	}
+
+	// Global OPTIONS catch-all so chi never returns 405 for CORS preflight.
+	// The CORS middleware above has already written the Allow-* headers before
+	// this handler is reached.
+	r.Options("/*", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
 
 	baseURL := cfg.BaseURL
 	if baseURL == "" {
@@ -39,6 +53,9 @@ func Build(
 	}
 
 	r.Route(baseURL, func(r chi.Router) {
+		if cfg.AuthHandler != nil {
+			cfg.AuthHandler.Mount(r)
+		}
 		registerEndpoints(r, reg, factory, cfg)
 	})
 
@@ -88,6 +105,12 @@ func registerCRUDOp(
 	// Build per-endpoint middleware chain
 	mws := buildMiddlewareChain(ep, entity, cfg, requireAuth, op)
 
+	// itemPath appends /{id} only when the path doesn't already contain a param.
+	itemPath := path
+	if !strings.Contains(path, "{") {
+		itemPath = path + "/{id}"
+	}
+
 	switch op {
 	case "list":
 		opts := ep.List
@@ -101,7 +124,7 @@ func registerCRUDOp(
 		if opts == nil {
 			opts = &schema.GetOpts{}
 		}
-		r.With(mws...).Get(path+"/{id}", factory.Get(entity, opts))
+		r.With(mws...).Get(itemPath, factory.Get(entity, opts))
 
 	case "create":
 		opts := ep.Create
@@ -115,14 +138,14 @@ func registerCRUDOp(
 		if opts == nil {
 			opts = &schema.UpdateOpts{}
 		}
-		r.With(mws...).Patch(path+"/{id}", factory.Update(entity, opts))
+		r.With(mws...).Patch(itemPath, factory.Update(entity, opts))
 
 	case "delete":
 		opts := ep.Delete
 		if opts == nil {
 			opts = &schema.DeleteOpts{}
 		}
-		r.With(mws...).Delete(path+"/{id}", factory.Delete(entity, opts))
+		r.With(mws...).Delete(itemPath, factory.Delete(entity, opts))
 	}
 }
 

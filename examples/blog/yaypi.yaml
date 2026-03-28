@@ -31,3 +31,4 @@ include:
   - entities/**/*.yaml
   - endpoints/**/*.yaml
   - policies/**/*.yaml
+  - auth.yaml

@@ -22,7 +22,7 @@ endpoints:
         require: true
         roles: [admin]
 
-  - path: /tags/{id}
+  - path: /tag/{id}
     entity: Tag
     crud: [get, update, delete]
 

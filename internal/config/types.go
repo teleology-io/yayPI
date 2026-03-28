@@ -14,9 +14,10 @@ type RootConfig struct {
 	Plugins     []PluginConfig  `yaml:"plugins"`
 	Include     []string        `yaml:"include"`
 	// Loaded from included files:
-	Entities  []*EntityConfig      `yaml:"-"`
-	Endpoints []*EndpointFileConfig `yaml:"-"`
-	Jobs      []*JobConfig         `yaml:"-"`
+	Entities     []*EntityConfig          `yaml:"-"`
+	Endpoints    []*EndpointFileConfig    `yaml:"-"`
+	Jobs         []*JobConfig             `yaml:"-"`
+	AuthEndpoint *AuthEndpointFileConfig  `yaml:"-"`
 }
 
 // ProjectConfig holds project-level metadata.
@@ -34,6 +35,7 @@ type ServerConfig struct {
 	MaxRequestBodySize string        `yaml:"max_request_body_size"`
 	MaxHeaderBytes     string        `yaml:"max_header_bytes"`
 	TLS                *TLSConfig    `yaml:"tls"`
+	AllowedOrigins     []string      `yaml:"allowed_origins"`
 }
 
 // TLSConfig holds TLS certificate settings.
@@ -288,4 +290,68 @@ type PolicyFileConfig struct {
 	Version string       `yaml:"version"`
 	Kind    string       `yaml:"kind"`
 	Roles   []RoleConfig `yaml:"roles"`
+}
+
+// AuthEndpointFileConfig represents a "kind: auth" YAML file.
+type AuthEndpointFileConfig struct {
+	Version  string         `yaml:"version"`
+	Kind     string         `yaml:"kind"`
+	Auth     AuthEndpointDef `yaml:"auth"`
+	FilePath string         `yaml:"-"`
+}
+
+// AuthEndpointDef is the auth block inside an AuthEndpointFileConfig.
+type AuthEndpointDef struct {
+	BasePath   string          `yaml:"base_path"`   // URL prefix, default: /auth
+	UserEntity string          `yaml:"user_entity"` // entity name (e.g. "User")
+	Register   *RegisterDef    `yaml:"register"`
+	Login      *LoginDef       `yaml:"login"`
+	Me         *MeDef          `yaml:"me"`
+	OAuth2     *OAuth2Def      `yaml:"oauth2"`
+}
+
+// RegisterDef configures the POST /auth/register endpoint.
+type RegisterDef struct {
+	Enabled         bool   `yaml:"enabled"`
+	CredentialField string `yaml:"credential_field"` // entity field used as login ID (e.g. "email")
+	PasswordField   string `yaml:"password_field"`   // field sent in the request (e.g. "password") — never stored
+	HashField       string `yaml:"hash_field"`       // entity field that stores the bcrypt hash (e.g. "password_hash")
+	DefaultRole     string `yaml:"default_role"`     // role assigned to new users (e.g. "member")
+}
+
+// LoginDef configures the POST /auth/login endpoint.
+type LoginDef struct {
+	Enabled         bool   `yaml:"enabled"`
+	CredentialField string `yaml:"credential_field"`
+	PasswordField   string `yaml:"password_field"`
+	HashField       string `yaml:"hash_field"`
+}
+
+// MeDef configures the GET /auth/me endpoint.
+type MeDef struct {
+	Enabled bool `yaml:"enabled"`
+}
+
+// OAuth2Def holds OAuth2 provider configurations.
+type OAuth2Def struct {
+	Providers []OAuth2ProviderDef `yaml:"providers"`
+}
+
+// OAuth2ProviderDef configures a single OAuth2 provider.
+type OAuth2ProviderDef struct {
+	Name            string   `yaml:"name"`             // "google", "github", or custom
+	ClientID        string   `yaml:"client_id"`
+	ClientSecret    string   `yaml:"client_secret"`
+	Scopes          []string `yaml:"scopes"`
+	RedirectURI     string   `yaml:"redirect_uri"`     // where the provider sends the auth code
+	SuccessRedirect string   `yaml:"success_redirect"` // where to redirect after success (optional)
+	ErrorRedirect   string   `yaml:"error_redirect"`   // where to redirect on failure (optional)
+	// For custom providers (not needed for "google" or "github"):
+	AuthURL     string `yaml:"auth_url"`
+	TokenURL    string `yaml:"token_url"`
+	UserInfoURL string `yaml:"userinfo_url"`
+	// Mapping from provider userinfo JSON to entity fields:
+	EmailField      string `yaml:"email_field"`       // default: "email"
+	NameField       string `yaml:"name_field"`        // default: "name"
+	UsernameField   string `yaml:"username_field"`    // provider field to use as username
 }

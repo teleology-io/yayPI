@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -58,7 +59,7 @@ func Load(rootFile string) (*RootConfig, error) {
 		if !filepath.IsAbs(pattern) {
 			pattern = filepath.Join(rootDir, pattern)
 		}
-		matches, err := filepath.Glob(pattern)
+		matches, err := globDoubleStar(pattern)
 		if err != nil {
 			return nil, fmt.Errorf("expanding include pattern %q: %w", pattern, err)
 		}
@@ -128,6 +129,14 @@ func loadInclude(cfg *RootConfig, path string) error {
 		}
 		cfg.Jobs = append(cfg.Jobs, &jc)
 
+	case "auth":
+		var ac AuthEndpointFileConfig
+		if err := yaml.Unmarshal(raw, &ac); err != nil {
+			return fmt.Errorf("parsing auth file %s: %w", path, err)
+		}
+		ac.FilePath = path
+		cfg.AuthEndpoint = &ac
+
 	case "policy":
 		// Policies are handled by the policy package; skip here.
 
@@ -171,6 +180,44 @@ func isSensitivePlain(v string) bool {
 		}
 	}
 	return false
+}
+
+// globDoubleStar expands a glob pattern that may contain ** (double-star).
+// Go's filepath.Glob does not support **, so we walk the directory tree when
+// ** is present and match each file against the pattern segments manually.
+func globDoubleStar(pattern string) ([]string, error) {
+	if !strings.Contains(pattern, "**") {
+		return filepath.Glob(pattern)
+	}
+
+	// Split pattern at the first ** segment to get a root dir to walk.
+	parts := strings.SplitN(pattern, "**", 2)
+	root := filepath.Clean(parts[0])
+	suffix := strings.TrimPrefix(parts[1], string(filepath.Separator))
+
+	var matches []string
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip unreadable entries
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if suffix == "" {
+			matches = append(matches, path)
+			return nil
+		}
+		// Match only the filename (or relative tail) against the suffix pattern.
+		ok, merr := filepath.Match(suffix, filepath.Base(path))
+		if merr != nil {
+			return merr
+		}
+		if ok {
+			matches = append(matches, path)
+		}
+		return nil
+	})
+	return matches, err
 }
 
 // hasSensitiveKey checks if a key name contains a sensitive substring.
