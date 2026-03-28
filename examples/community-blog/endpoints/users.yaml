@@ -1,0 +1,47 @@
+version: "1"
+kind: endpoints
+
+endpoints:
+  - path: /users
+    entity: User
+    crud: [list, create]
+    auth:
+      require: true
+      roles: [admin]
+
+    list:
+      allow_filter_by: [role]
+      allow_sort_by: [created_at, username, display_name]
+      default_sort: created_at:desc
+      pagination:
+        style: cursor
+        default_limit: 20
+        max_limit: 100
+
+    create:
+      auth:
+        require: true
+        roles: [admin]
+
+  - path: /users/{id}
+    entity: User
+    crud: [get, update, delete]
+    auth:
+      require: true
+      roles: [admin]
+
+    get:
+      auth:
+        require: false   # public profiles
+
+    update:
+      allowed_fields: [display_name, bio, avatar_url, role]
+      auth:
+        require: true
+        roles: [admin]
+
+    delete:
+      soft_delete: true
+      auth:
+        require: true
+        roles: [admin]

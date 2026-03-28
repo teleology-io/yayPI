@@ -1,0 +1,84 @@
+version: "1"
+kind: entity
+
+entity:
+  name: Comment
+  table: comments
+  timestamps: true
+  soft_delete: true
+
+  fields:
+    - name: id
+      type: uuid
+      primary_key: true
+      default: gen_random_uuid()
+
+    - name: post_id
+      type: uuid
+      nullable: false
+      references:
+        entity: Post
+        field: id
+        on_delete: CASCADE
+        on_update: NO ACTION
+
+    - name: author_id
+      type: uuid
+      nullable: false
+      references:
+        entity: User
+        field: id
+        on_delete: CASCADE
+        on_update: NO ACTION
+
+    # Nullable FK to self — enables threaded replies.
+    # A top-level comment has parent_id = NULL.
+    # A reply has parent_id pointing to its parent comment.
+    - name: parent_id
+      type: uuid
+      nullable: true
+      references:
+        entity: Comment
+        field: id
+        on_delete: CASCADE
+        on_update: NO ACTION
+
+    - name: body
+      type: text
+      nullable: false
+
+    - name: edited
+      type: boolean
+      default: "false"
+      nullable: false
+
+  relations:
+    - name: post
+      type: belongs_to
+      entity: Post
+      foreign_key: post_id
+
+    - name: author
+      type: belongs_to
+      entity: User
+      foreign_key: author_id
+
+    - name: parent
+      type: belongs_to
+      entity: Comment
+      foreign_key: parent_id
+
+    - name: replies
+      type: has_many
+      entity: Comment
+      foreign_key: parent_id
+
+  indexes:
+    - name: idx_comments_post_id
+      columns: [post_id]
+    - name: idx_comments_author_id
+      columns: [author_id]
+    - name: idx_comments_parent_id
+      columns: [parent_id]
+    - name: idx_comments_post_created
+      columns: [post_id, created_at]

@@ -1,0 +1,42 @@
+version: "1"
+kind: entity
+
+entity:
+  name: Tag
+  table: tags
+  timestamps: true
+
+  fields:
+    - name: id
+      type: uuid
+      primary_key: true
+      default: gen_random_uuid()
+
+    - name: name
+      type: string
+      length: 64
+      unique: true
+      nullable: false
+
+    - name: slug
+      type: string
+      length: 64
+      unique: true
+      nullable: false
+
+    - name: description
+      type: text
+      nullable: true
+
+  relations:
+    - name: posts
+      type: many_to_many
+      entity: Post
+      through: PostTag
+      foreign_key: tag_id
+      other_key: post_id
+
+  indexes:
+    - name: idx_tags_slug
+      columns: [slug]
+      unique: true

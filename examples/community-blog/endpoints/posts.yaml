@@ -1,0 +1,47 @@
+version: "1"
+kind: endpoints
+
+endpoints:
+  # Collection: GET /posts, POST /posts
+  - path: /posts
+    entity: Post
+    crud: [list, create]
+
+    list:
+      allow_filter_by: [status, author_id]
+      allow_sort_by: [created_at, published_at, title, view_count]
+      default_sort: published_at:desc
+      pagination:
+        style: cursor
+        default_limit: 20
+        max_limit: 100
+      include: [author, tags]
+      auth:
+        require: false        # public read
+
+    create:
+      auth:
+        require: true
+        roles: [editor, admin]
+
+  # Item: GET /posts/{id}, PATCH /posts/{id}, DELETE /posts/{id}
+  - path: /posts/{id}
+    entity: Post
+    crud: [get, update, delete]
+
+    get:
+      include: [author, tags]   # comments fetched separately via GET /comments?post_id=
+      auth:
+        require: false
+
+    update:
+      allowed_fields: [title, slug, excerpt, body, status, published_at, metadata]
+      auth:
+        require: true
+        roles: [editor, admin]
+
+    delete:
+      soft_delete: true
+      auth:
+        require: true
+        roles: [admin]

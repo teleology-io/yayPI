@@ -1,0 +1,42 @@
+version: "1"
+kind: endpoints
+
+endpoints:
+  - path: /tags
+    entity: Tag
+    crud: [list, create]
+
+    list:
+      allow_filter_by: [name]
+      allow_sort_by: [name, created_at]
+      default_sort: name:asc
+      pagination:
+        style: cursor
+        default_limit: 100
+        max_limit: 500
+      auth:
+        require: false
+
+    create:
+      auth:
+        require: true
+        roles: [admin]
+
+  - path: /tags/{id}
+    entity: Tag
+    crud: [get, update, delete]
+
+    get:
+      auth:
+        require: false
+
+    update:
+      allowed_fields: [name, slug, description]
+      auth:
+        require: true
+        roles: [admin]
+
+    delete:
+      auth:
+        require: true
+        roles: [admin]

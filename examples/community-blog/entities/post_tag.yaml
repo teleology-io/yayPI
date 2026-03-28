@@ -1,0 +1,32 @@
+version: "1"
+kind: entity
+
+entity:
+  name: PostTag
+  table: post_tags
+  timestamps: false
+
+  fields:
+    - name: post_id
+      type: uuid
+      primary_key: true
+      references:
+        entity: Post
+        field: id
+        on_delete: CASCADE
+        on_update: NO ACTION
+
+    - name: tag_id
+      type: uuid
+      primary_key: true
+      references:
+        entity: Tag
+        field: id
+        on_delete: CASCADE
+        on_update: NO ACTION
+
+  indexes:
+    - name: idx_post_tags_post_id
+      columns: [post_id]
+    - name: idx_post_tags_tag_id
+      columns: [tag_id]

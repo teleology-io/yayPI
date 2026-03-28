@@ -1,0 +1,89 @@
+version: "1"
+kind: entity
+
+entity:
+  name: Post
+  table: posts
+  timestamps: true
+  soft_delete: true
+
+  fields:
+    - name: id
+      type: uuid
+      primary_key: true
+      default: gen_random_uuid()
+
+    - name: author_id
+      type: uuid
+      nullable: false
+      references:
+        entity: User
+        field: id
+        on_delete: CASCADE
+        on_update: NO ACTION
+
+    - name: title
+      type: string
+      length: 512
+      nullable: false
+
+    - name: slug
+      type: string
+      length: 512
+      unique: true
+      nullable: false
+
+    - name: excerpt
+      type: text
+      nullable: true
+
+    - name: body
+      type: text
+      nullable: false
+
+    - name: status
+      type: enum
+      values: [draft, published, archived]
+      default: "'draft'"
+
+    - name: published_at
+      type: timestamptz
+      nullable: true
+
+    - name: view_count
+      type: bigint
+      default: "0"
+      nullable: false
+
+    - name: metadata
+      type: jsonb
+      nullable: true
+
+  relations:
+    - name: author
+      type: belongs_to
+      entity: User
+      foreign_key: author_id
+
+    - name: tags
+      type: many_to_many
+      entity: Tag
+      through: PostTag
+      foreign_key: post_id
+      other_key: tag_id
+
+    - name: comments
+      type: has_many
+      entity: Comment
+      foreign_key: post_id
+
+  indexes:
+    - name: idx_posts_author_id
+      columns: [author_id]
+    - name: idx_posts_slug
+      columns: [slug]
+      unique: true
+    - name: idx_posts_status
+      columns: [status]
+    - name: idx_posts_published_at
+      columns: [published_at]

@@ -1,0 +1,54 @@
+version: "1"
+kind: jobs
+
+jobs:
+  # Purge posts that were soft-deleted more than 90 days ago.
+  # Runs at midnight every day.
+  - name: purge-soft-deleted-posts
+    description: Permanently remove posts soft-deleted over 90 days ago
+    schedule: "@daily"
+    handler: sql
+    timeout: 120s
+    retry:
+      max_attempts: 3
+      backoff: exponential
+      initial_delay: 10s
+      max_delay: 60s
+    config:
+      sql: |
+        DELETE FROM posts
+        WHERE deleted_at IS NOT NULL
+          AND deleted_at < now() - INTERVAL '90 days'
+      database: primary
+
+  # Purge user accounts that were soft-deleted more than 180 days ago.
+  # Runs every Sunday at midnight.
+  - name: purge-soft-deleted-users
+    description: Permanently remove user accounts soft-deleted over 180 days ago
+    schedule: "@weekly"
+    handler: sql
+    timeout: 120s
+    retry:
+      max_attempts: 3
+      backoff: exponential
+      initial_delay: 10s
+      max_delay: 60s
+    config:
+      sql: |
+        DELETE FROM users
+        WHERE deleted_at IS NOT NULL
+          AND deleted_at < now() - INTERVAL '180 days'
+      database: primary
+
+  # Ping an external uptime monitor every 5 minutes.
+  # Replace the URL with your actual uptime monitor endpoint.
+  - name: uptime-ping
+    description: Ping uptime monitor to confirm the service is healthy
+    schedule: "@every 5m"
+    handler: http
+    timeout: 10s
+    config:
+      url: https://uptime.example.com/ping/replace-with-your-monitor-id
+      method: GET
+      allowed_hosts:
+        - uptime.example.com

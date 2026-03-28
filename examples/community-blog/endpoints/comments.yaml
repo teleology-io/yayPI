@@ -1,0 +1,52 @@
+version: "1"
+kind: endpoints
+
+endpoints:
+  # Collection: GET /comments, POST /comments
+  #
+  # Fetch comments for a post:   GET /comments?post_id=<uuid>
+  # Fetch replies to a comment:  GET /comments?parent_id=<uuid>
+  # Fetch comments by author:    GET /comments?author_id=<uuid>
+  #
+  - path: /comments
+    entity: Comment
+    crud: [list, create]
+
+    list:
+      allow_filter_by: [post_id, author_id, parent_id]
+      allow_sort_by: [created_at]
+      default_sort: created_at:asc
+      pagination:
+        style: cursor
+        default_limit: 50
+        max_limit: 200
+      include: [author]
+      auth:
+        require: false
+
+    create:
+      auth:
+        require: true
+        roles: [member, editor, admin]  # any authenticated user can comment
+
+  # Item: GET /comments/{id}, PATCH /comments/{id}, DELETE /comments/{id}
+  - path: /comments/{id}
+    entity: Comment
+    crud: [get, update, delete]
+
+    get:
+      include: [author]
+      auth:
+        require: false
+
+    update:
+      allowed_fields: [body, edited]
+      auth:
+        require: true
+        roles: [member, editor, admin]
+
+    delete:
+      soft_delete: true
+      auth:
+        require: true
+        roles: [admin]

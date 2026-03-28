@@ -1,0 +1,40 @@
+version: "1"
+
+project:
+  name: community-blog
+  base_url: /api/v1
+
+server:
+  port: 8080
+  read_timeout: 30s
+  write_timeout: 30s
+  shutdown_timeout: 10s
+  max_request_body_size: 4mb
+
+databases:
+  - name: primary
+    driver: postgres
+    dsn: ${DATABASE_URL:-postgres://localhost/community_blog}
+    max_open_conns: 25
+    max_idle_conns: 5
+    conn_max_lifetime: 5m
+    default: true
+
+auth:
+  provider: jwt
+  secret: ${JWT_SECRET:-changeme-in-production}
+  expiry: 24h
+  algorithm: HS256
+  reject_algorithms: [none]
+
+policy:
+  engine: casbin
+  model: ./policies/model.conf
+  adapter: file
+
+auto_migrate: false
+
+include:
+  - entities/**/*.yaml
+  - endpoints/**/*.yaml
+  - policies/**/*.yaml

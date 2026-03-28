@@ -1,0 +1,28 @@
+version: "1"
+kind: policy
+
+roles:
+  # admin: full access to everything, inherits all editor permissions
+  - name: admin
+    inherits: [editor]
+    permissions:
+      - { resource: User,    actions: [list, get, create, update, delete] }
+      - { resource: Post,    actions: [list, get, create, update, delete] }
+      - { resource: Tag,     actions: [list, get, create, update, delete] }
+      - { resource: Comment, actions: [list, get, create, update, delete] }
+
+  # editor: can publish posts and manage tags; inherits member permissions
+  - name: editor
+    inherits: [member]
+    permissions:
+      - { resource: Post,    actions: [list, get, create, update] }
+      - { resource: Tag,     actions: [list, get] }
+      - { resource: Comment, actions: [list, get, create, update] }
+
+  # member: authenticated user — can read everything and participate in comments
+  - name: member
+    permissions:
+      - { resource: Post,    actions: [list, get] }
+      - { resource: Tag,     actions: [list, get] }
+      - { resource: Comment, actions: [list, get, create, update] }
+      - { resource: User,    actions: [get] }

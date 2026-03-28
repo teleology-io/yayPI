@@ -1,0 +1,18 @@
+version: "1"
+kind: policy
+roles:
+  - name: admin
+    inherits: [editor]
+    permissions:
+      - { resource: Post, actions: [list, get, create, update, delete] }
+      - { resource: User, actions: [list, get, create, update, delete] }
+      - { resource: Tag, actions: [list, get, create, update, delete] }
+  - name: editor
+    inherits: [viewer]
+    permissions:
+      - { resource: Post, actions: [list, get, create, update] }
+      - { resource: Tag, actions: [list, get] }
+  - name: viewer
+    permissions:
+      - { resource: Post, actions: [list, get] }
+      - { resource: Tag, actions: [list, get] }

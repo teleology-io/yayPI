@@ -1,0 +1,94 @@
+version: "1"
+kind: endpoints
+endpoints:
+  - path: /posts
+    entity: Post
+    crud: [list, create]
+    auth:
+      require: false
+    list:
+      allow_filter_by: [status, author_id]
+      allow_sort_by: [created_at, published_at, title]
+      default_sort: created_at:desc
+      pagination:
+        style: cursor
+        default_limit: 20
+        max_limit: 100
+      include: [author]
+    create:
+      auth:
+        require: true
+        roles: [editor, admin]
+
+  - path: /posts/{id}
+    entity: Post
+    crud: [get, update, delete]
+    auth:
+      require: false
+    get:
+      include: [author, tags]
+    update:
+      allowed_fields: [title, body, status, slug, published_at, metadata]
+      auth:
+        require: true
+        roles: [editor, admin]
+    delete:
+      auth:
+        require: true
+        roles: [admin]
+      soft_delete: true
+
+  - path: /users
+    entity: User
+    crud: [list, create]
+    auth:
+      require: true
+      roles: [admin]
+    list:
+      allow_filter_by: [role]
+      allow_sort_by: [created_at, username, email]
+      default_sort: created_at:desc
+      pagination:
+        style: cursor
+        default_limit: 20
+        max_limit: 50
+
+  - path: /users/{id}
+    entity: User
+    crud: [get, update, delete]
+    auth:
+      require: true
+      roles: [admin]
+    update:
+      allowed_fields: [username, bio, role]
+    delete:
+      soft_delete: true
+
+  - path: /tags
+    entity: Tag
+    crud: [list, create]
+    auth:
+      require: false
+    list:
+      allow_filter_by: [name]
+      allow_sort_by: [name, created_at]
+      default_sort: name:asc
+    create:
+      auth:
+        require: true
+        roles: [editor, admin]
+
+  - path: /tags/{id}
+    entity: Tag
+    crud: [get, update, delete]
+    auth:
+      require: false
+    update:
+      allowed_fields: [name, slug]
+      auth:
+        require: true
+        roles: [admin]
+    delete:
+      auth:
+        require: true
+        roles: [admin]
