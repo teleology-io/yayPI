@@ -10,22 +10,48 @@ import (
 type Registry struct {
 	entities  map[string]*Entity
 	endpoints []*Endpoint
+	Specs     []SpecMeta
+}
+
+// SpecMeta holds the resolved metadata for a named OpenAPI spec.
+type SpecMeta struct {
+	Name        string
+	Title       string
+	Description string
+	Version     string
+	Servers     []SpecServerMeta
+}
+
+// SpecServerMeta is a single server entry in a SpecMeta.
+type SpecServerMeta struct {
+	URL         string
+	Description string
+}
+
+// EndpointSpecMembership holds per-endpoint OpenAPI documentation overrides.
+type EndpointSpecMembership struct {
+	Names       []string // empty = all specs
+	Description string
+	Tags        []string
+	Summary     string
 }
 
 // Endpoint represents a resolved API endpoint.
 type Endpoint struct {
-	Path       string
-	Entity     string
-	CRUD       []string
-	Method     string
-	Handler    string
-	Middleware []string
-	Auth       *Auth
-	List       *ListOpts
-	Get        *GetOpts
-	Create     *CreateOpts
-	Update     *UpdateOpts
-	Delete     *DeleteOpts
+	Path            string
+	Entity          string
+	CRUD            []string
+	Method          string
+	Handler         string
+	Middleware      []string
+	Auth            *Auth
+	List            *ListOpts
+	Get             *GetOpts
+	Create          *CreateOpts
+	Update          *UpdateOpts
+	Delete          *DeleteOpts
+	ExcludeFromSpec bool                    // true when spec: false
+	Specs           *EndpointSpecMembership // nil = include in all specs with no metadata override
 }
 
 // Auth holds authentication/authorization requirements for an endpoint.
@@ -134,6 +160,20 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 		}
 	}
 
+	// Populate named spec metadata
+	for _, sc := range cfg.Specs {
+		sm := SpecMeta{
+			Name:        sc.Name,
+			Title:       sc.Title,
+			Description: sc.Description,
+			Version:     sc.Version,
+		}
+		for _, srv := range sc.Servers {
+			sm.Servers = append(sm.Servers, SpecServerMeta{URL: srv.URL, Description: srv.Description})
+		}
+		reg.Specs = append(reg.Specs, sm)
+	}
+
 	return reg, nil
 }
 
@@ -162,6 +202,17 @@ func buildEndpoint(def *config.EndpointDef) *Endpoint {
 	}
 	if def.Delete != nil {
 		ep.Delete = buildDeleteOpts(def.Delete)
+	}
+	if def.Spec != nil && !*def.Spec {
+		ep.ExcludeFromSpec = true
+	}
+	if def.Specs != nil {
+		ep.Specs = &EndpointSpecMembership{
+			Names:       def.Specs.Names,
+			Description: def.Specs.Description,
+			Tags:        def.Specs.Tags,
+			Summary:     def.Specs.Summary,
+		}
 	}
 	return ep
 }

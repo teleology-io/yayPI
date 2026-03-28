@@ -9,6 +9,7 @@ import (
 	"github.com/csullivan/yaypi/internal/auth"
 	"github.com/csullivan/yaypi/internal/handler"
 	"github.com/csullivan/yaypi/internal/middleware"
+	"github.com/csullivan/yaypi/internal/openapi"
 	"github.com/csullivan/yaypi/internal/policy"
 	"github.com/csullivan/yaypi/internal/schema"
 )
@@ -19,8 +20,9 @@ type Config struct {
 	AuthSecret     []byte
 	AuthAlg        string
 	Enforcer       *policy.Engine
-	AuthHandler    *auth.Handler // optional; mounts register/login/me/oauth2 routes
-	AllowedOrigins []string      // CORS: permitted origins; ["*"] allows all
+	AuthHandler    *auth.Handler    // optional; mounts register/login/me/oauth2 routes
+	OpenAPIHandler *openapi.Handler // optional; serves /openapi/{name}.json
+	AllowedOrigins []string         // CORS: permitted origins; ["*"] allows all
 }
 
 // Build constructs a chi.Router from the schema registry and config.
@@ -55,6 +57,9 @@ func Build(
 	r.Route(baseURL, func(r chi.Router) {
 		if cfg.AuthHandler != nil {
 			cfg.AuthHandler.Mount(r)
+		}
+		if cfg.OpenAPIHandler != nil {
+			cfg.OpenAPIHandler.Mount(r)
 		}
 		registerEndpoints(r, reg, factory, cfg)
 	})

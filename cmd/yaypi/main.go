@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/csullivan/yaypi/internal/db"
 	"github.com/csullivan/yaypi/internal/handler"
 	"github.com/csullivan/yaypi/internal/migration"
+	"github.com/csullivan/yaypi/internal/openapi"
 	"github.com/csullivan/yaypi/internal/plugin"
 	"github.com/csullivan/yaypi/internal/policy"
 	"github.com/csullivan/yaypi/internal/router"
@@ -42,6 +44,7 @@ func main() {
 		newValidateCmd(&configFile),
 		newMigrateCmd(&configFile),
 		newInitCmd(),
+		newSpecCmd(&configFile),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -257,6 +260,16 @@ func runServer(configFile string) error {
 		authHandler = auth.New(cfg.AuthEndpoint.Auth, reg, dbManager, secret, cfg.Auth.Algorithm)
 	}
 
+	// Build OpenAPI specs if any are defined
+	var openapiHandler *openapi.Handler
+	if len(cfg.Specs) > 0 {
+		specs := openapi.Build(reg, cfg.Project.Name, cfg.Auth.Secret != "")
+		openapiHandler, err = openapi.NewHandler(specs)
+		if err != nil {
+			log.Warn().Err(err).Msg("building OpenAPI handler")
+		}
+	}
+
 	// Build router
 	routerCfg := router.Config{
 		BaseURL:        cfg.Project.BaseURL,
@@ -264,6 +277,7 @@ func runServer(configFile string) error {
 		AuthAlg:        cfg.Auth.Algorithm,
 		Enforcer:       policyEngine,
 		AuthHandler:    authHandler,
+		OpenAPIHandler: openapiHandler,
 		AllowedOrigins: cfg.Server.AllowedOrigins,
 	}
 	httpHandler := router.Build(reg, factory, routerCfg)
@@ -497,6 +511,68 @@ func runMigrateVerify(configFile string) error {
 	}
 
 	log.Info().Msg("all migration checksums verified")
+	return nil
+}
+
+// newSpecCmd creates the `yaypi spec` subcommand.
+func newSpecCmd(configFile *string) *cobra.Command {
+	specCmd := &cobra.Command{
+		Use:   "spec",
+		Short: "OpenAPI spec commands",
+	}
+
+	var (
+		specName   string
+		outputPath string
+	)
+
+	generateCmd := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate an OpenAPI 3.1 spec file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSpecGenerate(*configFile, specName, outputPath)
+		},
+	}
+	generateCmd.Flags().StringVar(&specName, "name", "", "spec name to generate (required)")
+	generateCmd.Flags().StringVar(&outputPath, "output", "openapi.json", "output file path")
+	_ = generateCmd.MarkFlagRequired("name")
+
+	specCmd.AddCommand(generateCmd)
+	return specCmd
+}
+
+// runSpecGenerate generates a named OpenAPI spec to a file.
+func runSpecGenerate(configFile, specName, outputPath string) error {
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	reg, err := schema.Build(cfg)
+	if err != nil {
+		return fmt.Errorf("building schema registry: %w", err)
+	}
+
+	specs := openapi.Build(reg, cfg.Project.Name, cfg.Auth.Secret != "")
+	spec, ok := specs[specName]
+	if !ok {
+		available := make([]string, 0, len(specs))
+		for k := range specs {
+			available = append(available, k)
+		}
+		return fmt.Errorf("spec %q not found; available: %v", specName, available)
+	}
+
+	b, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling spec: %w", err)
+	}
+
+	if err := os.WriteFile(outputPath, b, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", outputPath, err)
+	}
+
+	log.Info().Str("spec", specName).Str("output", outputPath).Msg("spec generated")
 	return nil
 }
 

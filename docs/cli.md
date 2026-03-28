@@ -210,3 +210,25 @@ ERR checksum mismatch for migration "20240315120000_create_users"
 ```
 
 In production, always run `verify` after deploying to confirm migration files have not been modified.
+
+## `yaypi spec`
+
+Commands for generating OpenAPI specs. Requires at least one `spec:` entry in `yaypi.yaml`. See [OpenAPI](openapi.md) for configuration details.
+
+### `yaypi spec generate`
+
+Generate an OpenAPI 3.1 JSON spec to a file.
+
+```bash
+yaypi spec generate --name api
+yaypi spec generate --name api --output docs/openapi.json
+yaypi spec generate --name sdk --output sdk-spec.json --config path/to/yaypi.yaml
+```
+
+| Flag | Default | Description |
+|---|---|---|
+| `--name` | required | Name of the spec to generate (must match a `spec[].name` in `yaypi.yaml`) |
+| `--output` | `openapi.json` | Output file path |
+| `--config` | `yaypi.yaml` | Path to `yaypi.yaml` |
+
+The generated file is valid OpenAPI 3.1 JSON that can be used with tools like Swagger UI, Redoc, or OpenAPI Generator.

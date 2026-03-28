@@ -194,6 +194,43 @@ auth:
 
 When `roles:` is omitted, any authenticated user is allowed (subject only to Casbin enforcement). When `roles:` is set, the JWT `role` claim must match one of the listed values.
 
+## OpenAPI spec integration
+
+When you define named specs in `yaypi.yaml` (see [OpenAPI](openapi.md)), all endpoints are automatically included in all specs. You can override this per endpoint.
+
+### Exclude an endpoint from all specs
+
+```yaml
+- path: /internal/admin
+  entity: AdminLog
+  crud: [list]
+  spec: false    # never appears in any OpenAPI spec
+```
+
+### Add metadata or restrict to specific specs
+
+```yaml
+- path: /posts
+  entity: Post
+  crud: [list, create]
+  specs:
+    names: [api]               # only in the "api" spec; omit to include in all specs
+    description: "Manage blog posts"
+    tags: [posts, content]     # extra tags; entity name ("Post") is always prepended
+    summary: "List or create posts"
+```
+
+### `specs` field reference
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `names` | list | all specs | Restrict this endpoint to only the named specs |
+| `description` | string | — | Operation description in the spec |
+| `tags` | list | — | Extra tags; entity name is always the first tag |
+| `summary` | string | `"{op} {Entity}"` | Short operation summary |
+
+Each CRUD operation on the endpoint gets its own Operation in the spec. Tags are shared across all operations generated from the same endpoint block.
+
 ## Complete examples
 
 See the community-blog example:
@@ -202,3 +239,4 @@ See the community-blog example:
 - [`endpoints/comments.yaml`](../examples/community-blog/endpoints/comments.yaml)
 - [`endpoints/tags.yaml`](../examples/community-blog/endpoints/tags.yaml)
 - [`endpoints/users.yaml`](../examples/community-blog/endpoints/users.yaml)
+

@@ -28,10 +28,16 @@ server:
     cert_file: /etc/ssl/certs/server.crt
     key_file:  /etc/ssl/private/server.key
 
+  # CORS — allowed origins for cross-origin requests
+  # Use ["*"] to allow all origins (not recommended in production)
+  allowed_origins:
+    - https://app.example.com
+    - http://localhost:3000
+
 # ── Databases ─────────────────────────────────────────────────────────────────
 databases:
   - name: primary
-    driver: postgres
+    driver: postgres           # postgres/postgresql, mysql/mariadb, sqlite/sqlite3
     dsn: ${DATABASE_URL:-postgres://localhost/myapp}
     max_open_conns: 25
     max_idle_conns: 5
@@ -57,7 +63,22 @@ auth:
 policy:
   engine: casbin
   model: ./policies/model.conf    # Casbin model file path
-  adapter: file                   # only "file" is supported in v1
+  adapter: file                   # "file" or "database"
+  adapter_table: casbin_rules     # table name when adapter: database
+
+# ── OpenAPI spec generation ───────────────────────────────────────────────────
+# Define one or more named specs. Endpoints are included in all specs by default.
+# See docs/openapi.md for the full guide.
+spec:
+  - name: api
+    title: "My API"
+    description: "Public REST API"
+    version: "1.0.0"
+    servers:
+      - url: https://api.example.com
+        description: Production
+      - url: http://localhost:8080
+        description: Local
 
 # ── Auto-migrate ──────────────────────────────────────────────────────────────
 # When true, yayPi applies any pending schema diff on startup.
@@ -126,6 +147,7 @@ include:
 | `shutdown_timeout` | duration | `10s` | Graceful shutdown window |
 | `max_request_body_size` | string | — | e.g. `4MB` |
 | `max_header_bytes` | string | — | e.g. `1MB` |
+| `allowed_origins` | list | `[]` | CORS allowed origins; `["*"]` allows all |
 | `tls.cert_file` | string | — | TLS certificate path |
 | `tls.key_file` | string | — | TLS private key path |
 
@@ -134,8 +156,8 @@ include:
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `name` | string | — | Logical name referenced by entities |
-| `driver` | string | — | Only `postgres` is supported |
-| `dsn` | string | — | Connection string (URL or key=value) |
+| `driver` | string | — | `postgres`/`postgresql`, `mysql`/`mariadb`, `sqlite`/`sqlite3` |
+| `dsn` | string | — | Connection string — Postgres: URL; MySQL: `user:pass@tcp(host)/db`; SQLite: file path or `:memory:` |
 | `max_open_conns` | integer | `0` (unlimited) | Max open connections in pool |
 | `max_idle_conns` | integer | `0` | Max idle connections |
 | `conn_max_lifetime` | duration | `0` (no limit) | Max connection lifetime |
@@ -159,7 +181,8 @@ include:
 |---|---|---|
 | `engine` | string | Only `casbin` is supported |
 | `model` | string | Path to `model.conf` |
-| `adapter` | string | Only `file` is supported in v1 |
+| `adapter` | string | `file` or `database` |
+| `adapter_table` | string | Table name when `adapter: database` (default: `casbin_rules`) |
 
 ### Top-level fields
 
@@ -168,6 +191,18 @@ include:
 | `auto_migrate` | boolean | `false` | Apply schema diff on startup |
 | `plugins` | list | `[]` | Plugins to load (see [Plugins](plugins.md)) |
 | `include` | list | `[]` | Glob patterns for entity/endpoint/job/policy files |
+| `spec` | list | `[]` | Named OpenAPI specs to generate (see [OpenAPI](openapi.md)) |
+
+### `spec[]`
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | string | Unique spec identifier used in the URL (`/openapi/{name}.json`) |
+| `title` | string | API title in the spec `info` block |
+| `description` | string | API description |
+| `version` | string | API version string (e.g. `"1.0.0"`) |
+| `servers[].url` | string | Server base URL |
+| `servers[].description` | string | Server label (e.g. `"Production"`) |
 
 ## Secret hygiene
 

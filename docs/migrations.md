@@ -92,22 +92,40 @@ CREATE TABLE IF NOT EXISTS yaypi_migrations (
 
 ## Type mapping
 
-| YAML type | PostgreSQL type |
-|---|---|
-| `uuid` | `uuid` |
-| `string` | `varchar(255)` (or `varchar(N)` with `length:`) |
-| `text` | `text` |
-| `integer` | `integer` |
-| `bigint` | `bigint` |
-| `float` | `double precision` |
-| `decimal` | `numeric` (or `numeric(P,S)` with `precision`/`scale`) |
-| `boolean` | `boolean` |
-| `timestamptz` | `timestamptz` |
-| `date` | `date` |
-| `jsonb` | `jsonb` |
-| `enum` | `text` (with a CHECK constraint for allowed values) |
-| `array` | `text[]` |
-| `bytea` | `bytea` |
+yayPi maps YAML field types to the appropriate SQL type for the target database.
+
+| YAML type | PostgreSQL | MySQL | SQLite |
+|---|---|---|---|
+| `uuid` | `uuid` | `CHAR(36)` | `TEXT` |
+| `string` | `varchar(255)` / `varchar(N)` | `VARCHAR(255)` / `VARCHAR(N)` | `TEXT` |
+| `text` | `text` | `TEXT` | `TEXT` |
+| `integer` | `integer` | `INT` | `INTEGER` |
+| `bigint` | `bigint` | `BIGINT` | `INTEGER` |
+| `float` | `double precision` | `DOUBLE` | `REAL` |
+| `decimal` | `numeric(P,S)` | `DECIMAL(P,S)` | `REAL` |
+| `boolean` | `boolean` | `TINYINT(1)` | `INTEGER` |
+| `timestamptz` | `timestamptz` | `DATETIME` | `TEXT` |
+| `date` | `date` | `DATE` | `TEXT` |
+| `jsonb` | `jsonb` | `JSON` | `TEXT` |
+| `enum` | `text` + CHECK constraint | `ENUM(values)` | `TEXT` + CHECK constraint |
+| `array` | `text[]` | `TEXT` (serialized) | `TEXT` |
+| `bytea` | `bytea` | `BLOB` | `BLOB` |
+
+`length:`, `precision:`, and `scale:` are respected where the target type supports them.
+
+### Switching databases
+
+The migration engine automatically uses the correct type mapping based on the `driver` field in your database config:
+
+```yaml
+databases:
+  - name: primary
+    driver: sqlite        # generates SQLite-compatible DDL
+    dsn: ./dev.db
+    default: true
+```
+
+Running `yaypi migrate generate` against a SQLite database produces SQLite-compatible `CREATE TABLE` statements, while PostgreSQL produces PostgreSQL DDL.
 
 ## Full CLI workflow
 

@@ -13,11 +13,27 @@ type RootConfig struct {
 	AutoMigrate bool            `yaml:"auto_migrate"`
 	Plugins     []PluginConfig  `yaml:"plugins"`
 	Include     []string        `yaml:"include"`
+	Specs       []SpecConfig    `yaml:"spec"`
 	// Loaded from included files:
 	Entities     []*EntityConfig          `yaml:"-"`
 	Endpoints    []*EndpointFileConfig    `yaml:"-"`
 	Jobs         []*JobConfig             `yaml:"-"`
 	AuthEndpoint *AuthEndpointFileConfig  `yaml:"-"`
+}
+
+// SpecConfig defines a named OpenAPI spec in yaypi.yaml under spec:.
+type SpecConfig struct {
+	Name        string       `yaml:"name"`
+	Title       string       `yaml:"title"`
+	Description string       `yaml:"description"`
+	Version     string       `yaml:"version"`
+	Servers     []SpecServer `yaml:"servers"`
+}
+
+// SpecServer is a single server entry in an OpenAPI spec.
+type SpecServer struct {
+	URL         string `yaml:"url"`
+	Description string `yaml:"description"`
 }
 
 // ProjectConfig holds project-level metadata.
@@ -193,6 +209,16 @@ type EndpointDef struct {
 	Create     *CreateConfig    `yaml:"create"`
 	Update     *UpdateConfig    `yaml:"update"`
 	Delete     *DeleteConfig    `yaml:"delete"`
+	Spec       *bool            `yaml:"spec"`  // nil = include in all specs; false = exclude
+	Specs      *EndpointSpecRef `yaml:"specs"` // optional metadata / per-spec filter
+}
+
+// EndpointSpecRef holds per-endpoint OpenAPI documentation overrides.
+type EndpointSpecRef struct {
+	Names       []string `yaml:"names"`       // restrict to these spec names; empty = all
+	Description string   `yaml:"description"`
+	Tags        []string `yaml:"tags"`
+	Summary     string   `yaml:"summary"`
 }
 
 // AuthRequirement describes authentication/authorization requirements.
