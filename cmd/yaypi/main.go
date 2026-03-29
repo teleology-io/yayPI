@@ -4,28 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
-	"os/signal"
-	"path/filepath"
-	"syscall"
-	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/csullivan/yaypi/internal/auth"
 	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/cron"
 	"github.com/csullivan/yaypi/internal/db"
-	"github.com/csullivan/yaypi/internal/handler"
 	"github.com/csullivan/yaypi/internal/migration"
 	"github.com/csullivan/yaypi/internal/openapi"
-	"github.com/csullivan/yaypi/internal/plugin"
-	"github.com/csullivan/yaypi/internal/policy"
-	"github.com/csullivan/yaypi/internal/router"
 	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/csullivan/yaypi/pkg/server"
 )
 
 func main() {
@@ -46,7 +36,6 @@ func main() {
 		newMigrateCmd(&configFile),
 		newInitCmd(),
 		newSpecCmd(&configFile),
-		newBuildCmd(&configFile),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -60,7 +49,7 @@ func newRunCmd(configFile *string) *cobra.Command {
 		Use:   "run",
 		Short: "Start the API server",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runServer(*configFile)
+			return server.New(*configFile).Run()
 		},
 	}
 }
@@ -168,334 +157,66 @@ func newInitCmd() *cobra.Command {
 	}
 }
 
-// newBuildCmd creates the `yaypi build` subcommand.
-func newBuildCmd(configFile *string) *cobra.Command {
-	var outputBin string
-	cmd := &cobra.Command{
-		Use:   "build",
-		Short: "Compile a server binary with plugins baked in",
-		Long: `Build generates a standalone server binary that includes all plugins
-declared in yaypi.yaml with a path: field. The resulting binary behaves
-identically to 'yaypi run' but with plugins automatically wired to entities.
+// newSpecCmd creates the `yaypi spec` subcommand.
+func newSpecCmd(configFile *string) *cobra.Command {
+	specCmd := &cobra.Command{
+		Use:   "spec",
+		Short: "OpenAPI spec commands",
+	}
 
-Example:
-  yaypi build --output ./my-api-server
-  ./my-api-server run`,
+	var (
+		specName   string
+		outputPath string
+	)
+
+	generateCmd := &cobra.Command{
+		Use:   "generate",
+		Short: "Generate an OpenAPI 3.1 spec file",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runBuild(*configFile, outputBin)
+			return runSpecGenerate(*configFile, specName, outputPath)
 		},
 	}
-	cmd.Flags().StringVarP(&outputBin, "output", "o", "./yaypi-server", "output binary path")
-	return cmd
+	generateCmd.Flags().StringVar(&specName, "name", "", "spec name to generate (required)")
+	generateCmd.Flags().StringVar(&outputPath, "output", "openapi.json", "output file path")
+	_ = generateCmd.MarkFlagRequired("name")
+
+	specCmd.AddCommand(generateCmd)
+	return specCmd
 }
 
-// runBuild resolves plugin source paths, generates a temp module, compiles, and
-// writes the resulting binary to outputBin.
-func runBuild(configFile, outputBin string) error {
+// runSpecGenerate generates a named OpenAPI spec to a file.
+func runSpecGenerate(configFile, specName, outputPath string) error {
 	cfg, err := config.Load(configFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
 	}
 
-	// Check that at least one plugin has a path.
-	hasPath := false
-	for _, p := range cfg.Plugins {
-		if p.Path != "" {
-			hasPath = true
-			break
-		}
-	}
-	if !hasPath {
-		return fmt.Errorf("no plugins with path: configured in yaypi.yaml — nothing to build")
-	}
-
-	// Find the yaypi module root so the generated go.mod can replace it.
-	exe, err := os.Executable()
-	if err != nil {
-		return fmt.Errorf("resolving executable path: %w", err)
-	}
-	yaypiRoot, yaypiMod, goVer, err := plugin.FindYaypiRoot(filepath.Dir(exe))
-	if err != nil {
-		// Fallback: try the working directory (useful when running from the repo).
-		wd, _ := os.Getwd()
-		yaypiRoot, yaypiMod, goVer, err = plugin.FindYaypiRoot(wd)
-		if err != nil {
-			return fmt.Errorf("finding yaypi module root: %w", err)
-		}
-	}
-
-	configDir := filepath.Dir(configFile)
-	if !filepath.IsAbs(configDir) {
-		wd, _ := os.Getwd()
-		configDir = filepath.Join(wd, configDir)
-	}
-
-	bctx, err := plugin.ResolvePlugins(cfg, configDir, yaypiRoot, yaypiMod, goVer)
-	if err != nil {
-		return fmt.Errorf("resolving plugins: %w", err)
-	}
-
-	buildDir, err := os.MkdirTemp("", "yaypi-build-*")
-	if err != nil {
-		return fmt.Errorf("creating build dir: %w", err)
-	}
-	defer os.RemoveAll(buildDir)
-
-	log.Info().Str("build_dir", buildDir).Msg("generating plugin build")
-	if err := plugin.GenerateBuildDir(bctx, buildDir); err != nil {
-		return fmt.Errorf("generating build directory: %w", err)
-	}
-
-	absOutput := outputBin
-	if !filepath.IsAbs(absOutput) {
-		wd, _ := os.Getwd()
-		absOutput = filepath.Join(wd, absOutput)
-	}
-
-	log.Info().Str("output", absOutput).Msg("compiling")
-	if err := plugin.RunBuild(buildDir, absOutput); err != nil {
-		return fmt.Errorf("build failed: %w", err)
-	}
-
-	log.Info().Str("binary", absOutput).Msg("build complete")
-	return nil
-}
-
-// pluginPathsConfigured reports whether any plugins in cfg have a non-empty path.
-func pluginPathsConfigured(cfg *config.RootConfig) bool {
-	for _, p := range cfg.Plugins {
-		if p.Path != "" {
-			return true
-		}
-	}
-	return false
-}
-
-// runServer loads config and starts the HTTP server.
-func runServer(configFile string) error {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	// If plugins with path: are configured and this is not already a plugin-built
-	// binary (detected via YAYPI_PLUGIN_BUILD env var), build a plugin binary and
-	// exec into it — replacing the current process.
-	if pluginPathsConfigured(cfg) && os.Getenv("YAYPI_PLUGIN_BUILD") == "" {
-		log.Info().Msg("plugin paths detected — building plugin binary")
-		tmpBin, err := os.CreateTemp("", "yaypi-server-*")
-		if err != nil {
-			return fmt.Errorf("creating temp binary: %w", err)
-		}
-		tmpBin.Close()
-		tmpBinPath := tmpBin.Name()
-		// Ensure it's executable and cleaned up on exit.
-		defer os.Remove(tmpBinPath)
-
-		if err := runBuild(configFile, tmpBinPath); err != nil {
-			return fmt.Errorf("building plugin binary: %w", err)
-		}
-		if err := os.Chmod(tmpBinPath, 0755); err != nil {
-			return fmt.Errorf("chmod plugin binary: %w", err)
-		}
-
-		// Re-exec the plugin binary with the same args, marking it as pre-built.
-		log.Info().Str("binary", tmpBinPath).Msg("exec plugin binary")
-		args := append([]string{tmpBinPath}, os.Args[1:]...)
-		env := append(os.Environ(), "YAYPI_PLUGIN_BUILD=1")
-		return syscall.Exec(tmpBinPath, args, env)
-	}
-
-	// Warn about sensitive plain-text values
-	for _, w := range config.WarnSensitiveValues(cfg) {
-		log.Warn().Msg(w)
-	}
-
-	// Validate config
-	if errs := config.Validate(cfg); len(errs) > 0 {
-		for _, e := range errs {
-			log.Error().Str("file", e.File).Msg(e.Message)
-		}
-		return fmt.Errorf("configuration validation failed")
-	}
-
-	// Build schema registry
 	reg, err := schema.Build(cfg)
 	if err != nil {
 		return fmt.Errorf("building schema registry: %w", err)
 	}
 
-	// Register entity→database mappings
-	var dbManager *db.Manager
-	if len(cfg.Databases) > 0 {
-		dbManager, err = db.NewManager(cfg.Databases)
-		if err != nil {
-			return fmt.Errorf("initializing database connections: %w", err)
+	specs := openapi.Build(reg, cfg.Project.Name, cfg.Auth.Secret != "")
+	spec, ok := specs[specName]
+	if !ok {
+		available := make([]string, 0, len(specs))
+		for k := range specs {
+			available = append(available, k)
 		}
-		defer dbManager.Close()
-
-		for _, entity := range reg.Entities() {
-			if entity.Database != "" {
-				dbManager.RegisterEntityDB(entity.Name, entity.Database)
-			}
-		}
-
-		// Auto-migrate if configured
-		if cfg.AutoMigrate {
-			engine := migration.NewEngine(dbManager.Default().SQL, dbManager.Default().Dialect, reg)
-			stmts, err := engine.Diff(context.Background())
-			if err != nil {
-				log.Warn().Err(err).Msg("schema diff failed; skipping auto-migrate")
-			} else if len(stmts) > 0 {
-				gen := migration.NewGenerator("migrations")
-				m, err := gen.Generate("auto", stmts)
-				if err != nil {
-					log.Warn().Err(err).Msg("auto-migrate generation failed")
-				} else {
-					runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
-					if err := runner.Up(context.Background(), 0); err != nil {
-						log.Warn().Err(err).Str("up", m.UpPath).Msg("auto-migrate failed")
-					}
-				}
-			}
-		}
+		return fmt.Errorf("spec %q not found; available: %v", specName, available)
 	}
 
-	// Load policy engine
-	var policyEngine *policy.Engine
-	if cfg.Policy.Engine == "casbin" && cfg.Policy.Model != "" {
-		roles, err := policy.LoadRolesDir("policies")
-		if err != nil {
-			log.Warn().Err(err).Msg("loading roles")
-		}
-
-		if cfg.Policy.Adapter == "file" {
-			// Use in-memory policy from YAML roles
-			pe, err := buildInMemoryPolicy(cfg.Policy.Model, roles)
-			if err != nil {
-				log.Warn().Err(err).Msg("initializing policy engine")
-			} else {
-				policyEngine = pe
-			}
-		}
+	b, err := json.MarshalIndent(spec, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshaling spec: %w", err)
 	}
 
-	// Initialize plugin dispatcher
-	dispatcher := plugin.NewDispatcher()
-
-	// Build handler factory
-	secret := []byte(cfg.Auth.Secret)
-	factory := handler.NewFactory(reg, dbManager, policyEngine, dispatcher, secret)
-
-	// Build auth handler if a kind:auth file was loaded
-	var authHandler *auth.Handler
-	if cfg.AuthEndpoint != nil {
-		authHandler = auth.New(cfg.AuthEndpoint.Auth, reg, dbManager, secret, cfg.Auth.Algorithm)
+	if err := os.WriteFile(outputPath, b, 0644); err != nil {
+		return fmt.Errorf("writing %s: %w", outputPath, err)
 	}
 
-	// Build OpenAPI specs if any are defined
-	var openapiHandler *openapi.Handler
-	if len(cfg.Specs) > 0 {
-		specs := openapi.Build(reg, cfg.Project.Name, cfg.Auth.Secret != "")
-		openapiHandler, err = openapi.NewHandler(specs)
-		if err != nil {
-			log.Warn().Err(err).Msg("building OpenAPI handler")
-		}
-	}
-
-	// Build router
-	routerCfg := router.Config{
-		BaseURL:        cfg.Project.BaseURL,
-		AuthSecret:     secret,
-		AuthAlg:        cfg.Auth.Algorithm,
-		Enforcer:       policyEngine,
-		AuthHandler:    authHandler,
-		OpenAPIHandler: openapiHandler,
-		AllowedOrigins: cfg.Server.AllowedOrigins,
-	}
-	httpHandler := router.Build(reg, factory, routerCfg)
-
-	// Start cron scheduler
-	if jobDefs := cfg.AllJobDefs(); len(jobDefs) > 0 {
-		var sched *cron.Scheduler
-		if dbManager != nil {
-			sched, err = cron.New(jobDefs, dbManager)
-		} else {
-			sched, err = cron.New(jobDefs, nil)
-		}
-		if err != nil {
-			log.Warn().Err(err).Msg("initializing cron scheduler")
-		} else {
-			sched.Start()
-			defer sched.Stop()
-		}
-	}
-
-	// Configure HTTP server
-	addr := fmt.Sprintf(":%d", cfg.Server.Port)
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      httpHandler,
-		ReadTimeout:  cfg.Server.ReadTimeout,
-		WriteTimeout: cfg.Server.WriteTimeout,
-	}
-
-	// Graceful shutdown
-	shutdown := make(chan os.Signal, 1)
-	signal.Notify(shutdown, os.Interrupt, syscall.SIGTERM)
-
-	serverErr := make(chan error, 1)
-	go func() {
-		log.Info().Str("addr", addr).Str("base_url", cfg.Project.BaseURL).Msg("server starting")
-		if cfg.Server.TLS != nil {
-			serverErr <- srv.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
-		} else {
-			serverErr <- srv.ListenAndServe()
-		}
-	}()
-
-	select {
-	case err := <-serverErr:
-		if err != nil && err != http.ErrServerClosed {
-			return fmt.Errorf("server error: %w", err)
-		}
-	case sig := <-shutdown:
-		log.Info().Str("signal", sig.String()).Msg("shutting down")
-		timeout := cfg.Server.ShutdownTimeout
-		if timeout == 0 {
-			timeout = 10 * time.Second
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		defer cancel()
-		if err := srv.Shutdown(ctx); err != nil {
-			return fmt.Errorf("shutdown error: %w", err)
-		}
-	}
-
+	log.Info().Str("spec", specName).Str("output", outputPath).Msg("spec generated")
 	return nil
-}
-
-// buildInMemoryPolicy loads a Casbin model from file and populates it from roles.
-func buildInMemoryPolicy(modelPath string, roles []policy.RoleConfig) (*policy.Engine, error) {
-	// Use a file-based policy adapter with a temp file, or use string adapter
-	// For simplicity, write a temp CSV and load it
-	tmpFile, err := os.CreateTemp("", "yaypi-policy-*.csv")
-	if err != nil {
-		return nil, err
-	}
-	defer os.Remove(tmpFile.Name())
-	tmpFile.Close()
-
-	pe, err := policy.NewEngine(modelPath, tmpFile.Name())
-	if err != nil {
-		return nil, err
-	}
-
-	if err := pe.LoadFromRolesConfig(roles); err != nil {
-		return nil, err
-	}
-
-	return pe, nil
 }
 
 // runMigrateGenerate generates migration files from a schema diff.
@@ -644,68 +365,6 @@ func runMigrateVerify(configFile string) error {
 	}
 
 	log.Info().Msg("all migration checksums verified")
-	return nil
-}
-
-// newSpecCmd creates the `yaypi spec` subcommand.
-func newSpecCmd(configFile *string) *cobra.Command {
-	specCmd := &cobra.Command{
-		Use:   "spec",
-		Short: "OpenAPI spec commands",
-	}
-
-	var (
-		specName   string
-		outputPath string
-	)
-
-	generateCmd := &cobra.Command{
-		Use:   "generate",
-		Short: "Generate an OpenAPI 3.1 spec file",
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return runSpecGenerate(*configFile, specName, outputPath)
-		},
-	}
-	generateCmd.Flags().StringVar(&specName, "name", "", "spec name to generate (required)")
-	generateCmd.Flags().StringVar(&outputPath, "output", "openapi.json", "output file path")
-	_ = generateCmd.MarkFlagRequired("name")
-
-	specCmd.AddCommand(generateCmd)
-	return specCmd
-}
-
-// runSpecGenerate generates a named OpenAPI spec to a file.
-func runSpecGenerate(configFile, specName, outputPath string) error {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return fmt.Errorf("loading config: %w", err)
-	}
-
-	reg, err := schema.Build(cfg)
-	if err != nil {
-		return fmt.Errorf("building schema registry: %w", err)
-	}
-
-	specs := openapi.Build(reg, cfg.Project.Name, cfg.Auth.Secret != "")
-	spec, ok := specs[specName]
-	if !ok {
-		available := make([]string, 0, len(specs))
-		for k := range specs {
-			available = append(available, k)
-		}
-		return fmt.Errorf("spec %q not found; available: %v", specName, available)
-	}
-
-	b, err := json.MarshalIndent(spec, "", "  ")
-	if err != nil {
-		return fmt.Errorf("marshaling spec: %w", err)
-	}
-
-	if err := os.WriteFile(outputPath, b, 0644); err != nil {
-		return fmt.Errorf("writing %s: %w", outputPath, err)
-	}
-
-	log.Info().Str("spec", specName).Str("output", outputPath).Msg("spec generated")
 	return nil
 }
 

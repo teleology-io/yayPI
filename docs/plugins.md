@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins let you add custom logic that runs during entity lifecycle events (before/after create, update, delete). They are compiled into your binary and registered via `yaypi.yaml` in yayPi.
+Plugins let you add custom logic that runs during entity lifecycle events (before/after create, update, delete). When you need plugins, you use yaypi as a library inside your own `main.go` rather than the standalone `yaypi` binary.
 
 ## When to use plugins
 
@@ -65,6 +65,13 @@ type InitContext struct {
 type HookContext struct {
     Ctx       context.Context
     RequestID string
+    Subject   *Subject        // authenticated user, nil if unauthenticated
+}
+
+type Subject struct {
+    ID    string
+    Role  string
+    Email string
 }
 
 type Logger interface {
@@ -88,90 +95,26 @@ type Logger interface {
 
 **After hooks** that return a non-nil error are logged but do not affect the response. The database operation is not rolled back. Use this for side effects like emails or audit logs.
 
-## Example: HashPasswordPlugin
+## Project layout
 
-This plugin hashes the `password` field before creating or updating a User.
+When you need plugins, your project has its own `go.mod` and a `main.go` that uses yaypi as a library. Everything else — entities, endpoints, `yaypi.yaml` — stays the same.
 
-```go
-package main
-
-import (
-    "context"
-    "fmt"
-
-    "golang.org/x/crypto/bcrypt"
-
-    "github.com/csullivan/yaypi/pkg/sdk"
-)
-
-type HashPasswordPlugin struct {
-    cost int
-}
-
-func (p *HashPasswordPlugin) Info() sdk.PluginInfo {
-    return sdk.PluginInfo{
-        Name:        "hash-password",
-        Version:     "1.0.0",
-        Description: "Hashes the password field before saving",
-    }
-}
-
-func (p *HashPasswordPlugin) Init(ctx sdk.InitContext) error {
-    cost := bcrypt.DefaultCost
-    if v, ok := ctx.Config["bcrypt_cost"].(int); ok {
-        cost = v
-    }
-    p.cost = cost
-    ctx.Logger.Info("hash-password plugin initialized", "cost", cost)
-    return nil
-}
-
-func (p *HashPasswordPlugin) Shutdown(_ context.Context) error {
-    return nil
-}
-
-func (p *HashPasswordPlugin) BeforeCreate(ctx sdk.HookContext, entity string, data map[string]any) (map[string]any, error) {
-    return p.hashPasswordField(data)
-}
-
-func (p *HashPasswordPlugin) AfterCreate(_ sdk.HookContext, _ string, _ map[string]any) error {
-    return nil
-}
-
-func (p *HashPasswordPlugin) BeforeUpdate(ctx sdk.HookContext, entity string, id string, data map[string]any) (map[string]any, error) {
-    return p.hashPasswordField(data)
-}
-
-func (p *HashPasswordPlugin) AfterUpdate(_ sdk.HookContext, _ string, _ map[string]any) error {
-    return nil
-}
-
-func (p *HashPasswordPlugin) BeforeDelete(_ sdk.HookContext, _ string, _ string) error {
-    return nil
-}
-
-func (p *HashPasswordPlugin) AfterDelete(_ sdk.HookContext, _ string, _ string) error {
-    return nil
-}
-
-func (p *HashPasswordPlugin) hashPasswordField(data map[string]any) (map[string]any, error) {
-    raw, ok := data["password"].(string)
-    if !ok || raw == "" {
-        return data, nil
-    }
-    hashed, err := bcrypt.GenerateFromPassword([]byte(raw), p.cost)
-    if err != nil {
-        return nil, fmt.Errorf("hashing password: %w", err)
-    }
-    data["password_hash"] = string(hashed)
-    delete(data, "password")
-    return data, nil
-}
+```
+my-api/
+├── go.mod
+├── go.sum
+├── main.go              ← your entry point; registers plugins and starts yaypi
+├── yaypi.yaml
+├── entities/
+├── endpoints/
+└── plugins/
+    └── hashpassword/
+        └── plugin.go
 ```
 
 ## Writing a plugin
 
-Each plugin lives in its own directory as a standard Go package. The only requirement is that it exports a `New` function:
+Each plugin is a regular Go package. The only convention is to export a `New` constructor:
 
 ```go
 func New(cfg map[string]any) sdk.EntityHookPlugin
@@ -237,31 +180,49 @@ func (p *plugin) hashPasswordField(data map[string]any) (map[string]any, error) 
 }
 ```
 
-## Registering a plugin
+## Wiring plugins in main.go
 
-**Step 1 — put the plugin in its own directory:**
+Import `github.com/csullivan/yaypi/pkg/server`, create a `Server`, call `RegisterHook` for each entity that should receive the plugin's hooks, then call `Run`.
+
+**`main.go`:**
+
+```go
+package main
+
+import (
+    "log"
+
+    "github.com/csullivan/yaypi/pkg/server"
+    "myproject/plugins/hashpassword"
+)
+
+func main() {
+    srv := server.New("yaypi.yaml")
+
+    // Register the hash-password plugin for the User entity.
+    srv.RegisterHook("User", hashpassword.New(nil))
+
+    if err := srv.Run(); err != nil {
+        log.Fatal(err)
+    }
+}
+```
+
+`server.New` loads `yaypi.yaml`, `RegisterHook` wires the plugin to the named entity, and `Run` starts the HTTP server and blocks until interrupted.
+
+**`go.mod`:**
 
 ```
-your-project/
-├── yaypi.yaml
-├── entities/
-├── endpoints/
-└── plugins/
-    └── hashpassword/
-        └── plugin.go   ← package hashpassword; func New(...) sdk.EntityHookPlugin
+module myproject
+
+go 1.22
+
+require github.com/csullivan/yaypi v0.0.0
 ```
 
-**Step 2 — declare in `yaypi.yaml` with `path:` pointing at the directory:**
+## Wiring hooks to entities in YAML
 
-```yaml
-plugins:
-  - name: hash-password
-    path: ./plugins/hashpassword   # relative to yaypi.yaml
-    config:
-      bcrypt_cost: 12
-```
-
-**Step 3 — wire to entity hooks in the entity file:**
+Declare which hooks fire for each entity in the entity file. yaypi uses these to filter and dispatch — only hooks registered for the entity in `main.go` are called:
 
 ```yaml
 entity:
@@ -271,43 +232,33 @@ entity:
     before_update: [hash-password]
 ```
 
-**Step 4 — build and run:**
-
-```bash
-# Compile a standalone binary with the plugin baked in:
-yaypi build --output ./my-api-server
-
-# Run it:
-./my-api-server run
-```
-
-Or just use `yaypi run` — when `path:` entries are detected, it automatically builds a plugin binary and re-execs into it before starting:
-
-```bash
-yaypi run   # detects plugin paths, builds, then starts
-```
-
-> **How auto-run works:** `yaypi run` checks whether any `plugins[].path` is set. If so, it builds a temporary binary (same as `yaypi build`) and replaces itself via `exec()`. The new binary starts with the plugins wired in. The build happens in a temporary directory and is cleaned up automatically.
-
-> **Package convention:** The directory name becomes the Go package import alias. Use a short, alphanumeric name — `hashpassword`, `auditlog`, `ratelimit`. Hyphens and dots are replaced with underscores.
+The hook names in YAML are informational labels. What matters for dispatch is which entity name you pass to `RegisterHook`.
 
 ## Plugin config
 
-Values in the `config:` map of the plugin declaration in `yaypi.yaml` are available in `InitContext.Config`:
-
-```yaml
-plugins:
-  - name: hash-password
-    config:
-      bcrypt_cost: 12
-      algorithm: argon2id
-```
+Pass plugin configuration through `InitContext.Config`. Call `Init` yourself before `RegisterHook` if you need config values from `yaypi.yaml`, or pass them directly when constructing the plugin:
 
 ```go
-func (p *MyPlugin) Init(ctx sdk.InitContext) error {
-    if cost, ok := ctx.Config["bcrypt_cost"].(int); ok {
-        p.cost = cost
-    }
-    return nil
-}
+import (
+    "github.com/csullivan/yaypi/pkg/sdk"
+    "myproject/plugins/hashpassword"
+)
+
+p := hashpassword.New(map[string]any{"bcrypt_cost": 12})
+_ = p.Init(sdk.InitContext{Config: map[string]any{"bcrypt_cost": 12}})
+srv.RegisterHook("User", p)
 ```
+
+## Building and running
+
+Because your project is a standard Go program, build and run it like any other Go binary:
+
+```bash
+go build -o ./my-api-server .
+./my-api-server
+
+# Or just:
+go run .
+```
+
+Use `yaypi migrate`, `yaypi validate`, and `yaypi spec` commands as usual — those don't need plugins.

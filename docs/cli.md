@@ -96,56 +96,7 @@ INF shutting down signal=interrupt
 
 The server waits up to `server.shutdown_timeout` for in-flight requests to complete before exiting.
 
-**Plugins:** When any `plugins[].path` entry is set in `yaypi.yaml`, `yaypi run` automatically compiles a plugin binary (same as `yaypi build`) and replaces itself with that binary before starting. The build happens in a temporary directory and is cleaned up automatically. If no `path:` entries are present, startup proceeds as normal with no build step.
-
----
-
-### `yaypi build`
-
-Compile a standalone binary with plugins baked in. Use this when you have one or more `plugins[].path` entries in `yaypi.yaml` and want a deployable artifact.
-
-```bash
-yaypi build
-yaypi build --output ./my-api-server
-yaypi build --output ./dist/server --config path/to/yaypi.yaml
-```
-
-**Flags:**
-
-| Flag | Default | Description |
-|---|---|---|
-| `--output` | `./yaypi-server` | Output path for the compiled binary |
-| `--config` | `yaypi.yaml` | Path to `yaypi.yaml` |
-
-**What it does:**
-
-1. Loads `yaypi.yaml` and collects all `plugins[]` entries with a `path:` set
-2. Creates a temporary Go module directory
-3. Copies each plugin source directory into `<tmp>/plugins/<pkgname>/`
-4. Generates `registry_gen.go` — imports each plugin package and calls `New()` + `Init()` + `RegisterHook()` for every entity that references it
-5. Patches `main.go` to call `initPlugins(dispatcher, cfg)` after the dispatcher is created
-6. Runs `go mod tidy && go build -o <output>` to produce the binary
-7. Prints the output path on success
-
-**Requirements:**
-
-- Go toolchain must be on `$PATH`
-- Each plugin directory must export a `New` function:
-  ```go
-  func New(cfg map[string]any) sdk.EntityHookPlugin
-  ```
-- Plugin directory names must be valid Go identifiers (hyphens and dots are replaced with underscores)
-
-**Output:**
-```
-INF building plugin binary output=./my-api-server
-INF plugin binary built output=./my-api-server
-```
-
-If no `plugins[].path` entries are configured, the command exits with an error:
-```
-ERR no plugin paths configured; nothing to build
-```
+**Plugins:** When you need plugins, use yaypi as a library in your own `main.go` instead of this command. See [Plugins](plugins.md) for details.
 
 ---
 
