@@ -1,4 +1,4 @@
-module github.com/csullivan/yaypi
+module github.com/teleology-io/yayPI
 
 go 1.25.0
 

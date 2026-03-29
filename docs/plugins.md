@@ -12,7 +12,7 @@ Plugins let you add custom logic that runs during entity lifecycle events (befor
 ## SDK import path
 
 ```go
-import "github.com/csullivan/yaypi/pkg/sdk"
+import "github.com/teleology-io/yayPI/pkg/sdk"
 ```
 
 ## Interfaces
@@ -130,7 +130,7 @@ import (
     "fmt"
 
     "golang.org/x/crypto/bcrypt"
-    "github.com/csullivan/yaypi/pkg/sdk"
+    "github.com/teleology-io/yayPI/pkg/sdk"
 )
 
 type plugin struct{ cost int }
@@ -182,7 +182,7 @@ func (p *plugin) hashPasswordField(data map[string]any) (map[string]any, error) 
 
 ## Wiring plugins in main.go
 
-Import `github.com/csullivan/yaypi/pkg/server`, create a `Server`, call `RegisterHook` for each entity that should receive the plugin's hooks, then call `Run`.
+Import `github.com/teleology-io/yayPI/pkg/server`, create a `Server`, call `RegisterHook` for each entity that should receive the plugin's hooks, then call `Run`.
 
 **`main.go`:**
 
@@ -192,7 +192,7 @@ package main
 import (
     "log"
 
-    "github.com/csullivan/yaypi/pkg/server"
+    "github.com/teleology-io/yayPI/pkg/server"
     "myproject/plugins/hashpassword"
 )
 
@@ -217,7 +217,7 @@ module myproject
 
 go 1.22
 
-require github.com/csullivan/yaypi v0.0.0
+require github.com/teleology-io/yayPI v0.0.0
 ```
 
 ## Wiring hooks to entities in YAML
@@ -240,7 +240,7 @@ Pass plugin configuration through `InitContext.Config`. Call `Init` yourself bef
 
 ```go
 import (
-    "github.com/csullivan/yaypi/pkg/sdk"
+    "github.com/teleology-io/yayPI/pkg/sdk"
     "myproject/plugins/hashpassword"
 )
 

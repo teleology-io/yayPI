@@ -6,8 +6,8 @@ package plugin
 import (
 	"context"
 
-	"github.com/csullivan/yaypi/internal/middleware"
-	"github.com/csullivan/yaypi/pkg/sdk"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
 // Dispatcher manages entity lifecycle hooks and dispatches them to registered plugins.

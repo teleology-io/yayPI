@@ -5,8 +5,8 @@ import (
 	"strings"
 	"unicode"
 
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/pkg/types"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/pkg/types"
 )
 
 // buildEntity converts a config.EntityConfig to a schema.Entity.

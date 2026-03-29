@@ -10,8 +10,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/db"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/db"
 )
 
 // sqlHandler executes a SQL statement on a named database.

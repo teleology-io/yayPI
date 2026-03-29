@@ -5,7 +5,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/middleware"
 )
 
 // EvalConditions returns true only if ALL conditions pass against the subject.

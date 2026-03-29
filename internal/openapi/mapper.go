@@ -1,6 +1,6 @@
 package openapi
 
-import "github.com/csullivan/yaypi/pkg/types"
+import "github.com/teleology-io/yayPI/pkg/types"
 
 // fieldSchema returns an OpenAPI Schema for the given field type and metadata.
 func fieldSchema(ft types.FieldType, enumValues []string) *Schema {

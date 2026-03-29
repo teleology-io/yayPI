@@ -3,7 +3,7 @@ package schema
 import (
 	"fmt"
 
-	"github.com/csullivan/yaypi/internal/config"
+	"github.com/teleology-io/yayPI/internal/config"
 )
 
 // Registry holds all resolved entities and endpoints.

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // SQLite implements Dialect for SQLite (via modernc.org/sqlite — pure Go, no CGO).

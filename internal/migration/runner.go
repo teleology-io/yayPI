@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/csullivan/yaypi/internal/dialect"
+	"github.com/teleology-io/yayPI/internal/dialect"
 )
 
 const migrationsTable = "yaypi_migrations"

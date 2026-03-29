@@ -1,6 +1,6 @@
 package schema
 
-import "github.com/csullivan/yaypi/pkg/types"
+import "github.com/teleology-io/yayPI/pkg/types"
 
 // Entity represents a fully resolved entity from YAML configuration.
 type Entity struct {

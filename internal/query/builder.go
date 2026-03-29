@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/csullivan/yaypi/internal/dialect"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/dialect"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // Builder generates parameterized SQL for a given entity.

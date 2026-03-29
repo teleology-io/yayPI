@@ -9,8 +9,8 @@ import (
 	"github.com/go-co-op/gocron/v2"
 	"github.com/rs/zerolog/log"
 
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/db"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/db"
 )
 
 // Scheduler manages background cron jobs.

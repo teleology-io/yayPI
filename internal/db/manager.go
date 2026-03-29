@@ -13,8 +13,8 @@ import (
 	// SQLite (pure Go)
 	_ "modernc.org/sqlite"
 
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/dialect"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/dialect"
 )
 
 // DB wraps a *sql.DB together with its dialect.

@@ -1,7 +1,7 @@
 // Package dialect abstracts SQL syntax differences between database engines.
 package dialect
 
-import "github.com/csullivan/yaypi/internal/schema"
+import "github.com/teleology-io/yayPI/internal/schema"
 
 // Dialect encapsulates all database-engine-specific SQL behaviour.
 type Dialect interface {

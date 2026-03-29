@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/middleware"
-	"github.com/csullivan/yaypi/internal/policy"
-	"github.com/csullivan/yaypi/internal/query"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/policy"
+	"github.com/teleology-io/yayPI/internal/query"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // List creates a handler that lists records for the given entity.

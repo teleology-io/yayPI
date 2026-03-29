@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // Postgres implements Dialect for PostgreSQL (via pgx/v5 stdlib or pgx directly).

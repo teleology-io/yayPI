@@ -1,8 +1,8 @@
 package handler
 
 import (
-	"github.com/csullivan/yaypi/internal/middleware"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // applyFieldAccess strips read-restricted fields from a record map based on the

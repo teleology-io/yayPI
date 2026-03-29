@@ -19,10 +19,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
 
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/db"
-	"github.com/csullivan/yaypi/internal/dialect"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/internal/dialect"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 const bcryptCost = 12

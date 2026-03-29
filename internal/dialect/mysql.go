@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // MySQL implements Dialect for MySQL / MariaDB.

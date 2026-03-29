@@ -1,10 +1,10 @@
 package handler
 
 import (
-	"github.com/csullivan/yaypi/internal/db"
-	"github.com/csullivan/yaypi/internal/plugin"
-	"github.com/csullivan/yaypi/internal/policy"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/internal/plugin"
+	"github.com/teleology-io/yayPI/internal/policy"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // Factory creates HTTP handler functions from entity and endpoint configuration.

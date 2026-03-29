@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/csullivan/yaypi/internal/middleware"
-	"github.com/csullivan/yaypi/internal/query"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/query"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // Create creates a handler that inserts a new record.

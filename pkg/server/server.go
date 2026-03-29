@@ -13,18 +13,18 @@ import (
 
 	"github.com/rs/zerolog/log"
 
-	"github.com/csullivan/yaypi/internal/auth"
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/cron"
-	"github.com/csullivan/yaypi/internal/db"
-	"github.com/csullivan/yaypi/internal/handler"
-	"github.com/csullivan/yaypi/internal/migration"
-	"github.com/csullivan/yaypi/internal/openapi"
-	"github.com/csullivan/yaypi/internal/plugin"
-	"github.com/csullivan/yaypi/internal/policy"
-	"github.com/csullivan/yaypi/internal/router"
-	"github.com/csullivan/yaypi/internal/schema"
-	"github.com/csullivan/yaypi/pkg/sdk"
+	"github.com/teleology-io/yayPI/internal/auth"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/cron"
+	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/internal/handler"
+	"github.com/teleology-io/yayPI/internal/migration"
+	"github.com/teleology-io/yayPI/internal/openapi"
+	"github.com/teleology-io/yayPI/internal/plugin"
+	"github.com/teleology-io/yayPI/internal/policy"
+	"github.com/teleology-io/yayPI/internal/router"
+	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
 // Server is a yaypi API server instance. Create one with New, optionally register

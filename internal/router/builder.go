@@ -6,12 +6,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
-	"github.com/csullivan/yaypi/internal/auth"
-	"github.com/csullivan/yaypi/internal/handler"
-	"github.com/csullivan/yaypi/internal/middleware"
-	"github.com/csullivan/yaypi/internal/openapi"
-	"github.com/csullivan/yaypi/internal/policy"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/auth"
+	"github.com/teleology-io/yayPI/internal/handler"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/openapi"
+	"github.com/teleology-io/yayPI/internal/policy"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // Config holds router-building configuration.

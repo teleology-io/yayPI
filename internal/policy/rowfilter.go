@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/middleware"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // ErrRowAccessDenied is returned when row_access rules are defined but none match the subject.

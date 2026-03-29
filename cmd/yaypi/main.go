@@ -10,12 +10,12 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
-	"github.com/csullivan/yaypi/internal/config"
-	"github.com/csullivan/yaypi/internal/db"
-	"github.com/csullivan/yaypi/internal/migration"
-	"github.com/csullivan/yaypi/internal/openapi"
-	"github.com/csullivan/yaypi/internal/schema"
-	"github.com/csullivan/yaypi/pkg/server"
+	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/internal/migration"
+	"github.com/teleology-io/yayPI/internal/openapi"
+	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/pkg/server"
 )
 
 func main() {

@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/dialect"
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/dialect"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // DBColumn represents a column as reported by information_schema.

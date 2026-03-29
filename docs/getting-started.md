@@ -6,7 +6,7 @@ This guide walks you from zero to a running REST API in about 10 minutes.
 
 - **Go 1.23+** — `go version`
 - **PostgreSQL** — running locally or accessible via URL
-- **yayPi** installed — `go install github.com/csullivan/yaypi/cmd/yaypi@latest`
+- **yayPi** installed — `go install github.com/teleology-io/yayPI/cmd/yaypi@latest`
 
 ## 1. Scaffold a new project
 

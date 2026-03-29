@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/csullivan/yaypi/internal/schema"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 // Build generates one OpenAPI 3.1 Spec per named spec in the registry.
