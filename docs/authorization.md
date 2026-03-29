@@ -162,6 +162,128 @@ The enforcement call is: `Enforce(jwt.role, EntityName, action)`.
 
 If the role does not have permission, the request returns 403.
 
+## Layer 3: ABAC — Attribute-Based Access Control
+
+ABAC is an optional, additive layer on top of JWT + Casbin. It lets you write fine-grained rules based on who the caller is (role, email, id) rather than just whether they have a permission string.
+
+There are three independent sub-layers. Use only what you need.
+
+---
+
+### 3a. Route-level conditions (`auth.conditions`)
+
+Evaluated **before** the handler runs. All conditions must pass (AND logic). Failing conditions return 403.
+
+```yaml
+create:
+  auth:
+    require: true
+    roles: [editor, admin]              # shorthand role allowlist
+    conditions:
+      - subject.email ends_with "@company.com"
+      - subject.role in ["editor", "admin"]
+```
+
+**Subject attributes available in conditions:**
+
+| Attribute | Description |
+|---|---|
+| `subject.id` | JWT `sub` claim — user ID |
+| `subject.role` | JWT `role` claim |
+| `subject.email` | JWT `email` claim |
+
+**Supported operators:**
+
+| Operator | Example |
+|---|---|
+| `==` | `subject.role == "admin"` |
+| `!=` | `subject.role != "guest"` |
+| `>` `<` `>=` `<=` | `subject.level >= "5"` (numeric when both sides parse as numbers) |
+| `in` | `subject.role in ["editor", "admin"]` |
+| `not_in` | `subject.role not_in ["guest", "banned"]` |
+| `starts_with` | `subject.email starts_with "alice"` |
+| `ends_with` | `subject.email ends_with "@company.com"` |
+| `*` | always true (catch-all) |
+
+`auth.roles` is an allowed shorthand that is now fully enforced (equivalent to `subject.role in [...]`). Adding both `roles:` and `conditions:` is valid — both are checked.
+
+---
+
+### 3b. Row-level filters (`row_access`)
+
+Injects a SQL `WHERE` fragment so users only see rows they're allowed to access. Rules are evaluated in order — the first matching rule wins.
+
+**Opt-in:** if `row_access` is omitted, all rows are accessible. If `row_access` is defined but no rule matches the current subject, the request returns **403**.
+
+Use `when: "*"` as a catch-all to avoid accidental 403s for any role you don't explicitly restrict.
+
+```yaml
+list:
+  row_access:
+    - when: "subject.role == \"admin\""
+      filter: ""                              # admins see all rows (no filter)
+    - when: "subject.role == \"editor\""
+      filter: "author_id = :subject.id OR status = 'published'"
+    - when: "*"
+      filter: "status = 'published'"          # everyone else: published only
+```
+
+**Bind variables in `filter`:**
+
+| Placeholder | Resolved to |
+|---|---|
+| `:subject.id` | JWT `sub` value |
+| `:subject.role` | JWT `role` value |
+| `:subject.email` | JWT `email` value |
+
+`row_access` is supported on `list`, `get`, `update`, and `delete` operations. On `get`/`update`/`delete`, a non-matching row is returned as **404** (indistinguishable from "not found").
+
+---
+
+### 3c. Field-level access (`field.access`)
+
+Controls which roles can read or write specific fields. Opt-in — omitting `access` means the field is fully open.
+
+**In an entity definition:**
+
+```yaml
+fields:
+  - name: internal_notes
+    type: text
+    access:
+      read_roles: [admin, editor]   # other roles get field stripped from responses
+      write_roles: [admin]          # other roles' values silently ignored on create/update
+```
+
+| Key | Behavior when set |
+|---|---|
+| `read_roles` | Field is stripped from all responses for callers not in the list |
+| `write_roles` | Field is silently ignored in request bodies for callers not in the list |
+
+Omitting `read_roles` → field is readable by everyone.
+Omitting `write_roles` → field is writable by everyone.
+
+---
+
+### ABAC evaluation order
+
+For every request:
+
+```
+1. JWT validation           (middleware)
+2. Casbin RBAC              (middleware)
+3. auth.roles check         (middleware)  ← now enforced
+4. auth.conditions check    (middleware)
+5. Handler runs
+6. row_access filter        (injected into SQL WHERE)
+7. write_roles stripping    (on create/update, before DB call)
+8. read_roles masking       (on all responses, after DB call)
+```
+
+Each layer is independent. You can use one, two, or all three sub-layers.
+
+---
+
 ## Common patterns
 
 ### Fully public endpoint
@@ -208,6 +330,47 @@ delete:
   auth:
     require: true
     roles: [admin]
+```
+
+### Row ownership (users can only update their own records)
+
+```yaml
+update:
+  auth:
+    require: true
+    roles: [member, editor, admin]
+  row_access:
+    - when: "subject.role == \"admin\""
+      filter: ""                          # admins can edit any record
+    - when: "*"
+      filter: "author_id = :subject.id"  # everyone else: only their own
+```
+
+### Company-only access via email domain
+
+```yaml
+create:
+  auth:
+    require: true
+    conditions:
+      - subject.email ends_with "@acme.com"
+```
+
+### Hide sensitive fields from non-admins
+
+```yaml
+# In entities/user.yaml
+fields:
+  - name: password_hash
+    type: string
+    serialization:
+      omit_response: true     # always hidden (not in any response)
+
+  - name: internal_notes
+    type: text
+    access:
+      read_roles: [admin]     # admins only; members get null/absent field
+      write_roles: [admin]
 ```
 
 ## Complete example

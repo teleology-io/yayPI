@@ -132,6 +132,11 @@ func buildField(fd config.FieldDef) (Field, error) {
 		}
 	}
 
+	if fd.Access != nil {
+		f.ReadRoles = fd.Access.ReadRoles
+		f.WriteRoles = fd.Access.WriteRoles
+	}
+
 	return f, nil
 }
 

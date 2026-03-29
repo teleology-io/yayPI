@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -32,8 +33,31 @@ type ListQuery struct {
 	AllowedCols map[string]struct{} // validated allowed columns for filter/sort
 }
 
+// reindexFilter shifts $N placeholders in a filter string by offset.
+// e.g. offset=2, filter="user_id = $1 OR team = $2" → "user_id = $3 OR team = $4"
+// This ensures the extra-filter placeholders don't collide with those already in the query.
+func reindexFilter(filter string, offset int) string {
+	var b strings.Builder
+	i := 0
+	for i < len(filter) {
+		if filter[i] == '$' && i+1 < len(filter) && filter[i+1] >= '1' && filter[i+1] <= '9' {
+			j := i + 1
+			for j < len(filter) && filter[j] >= '0' && filter[j] <= '9' {
+				j++
+			}
+			n, _ := strconv.Atoi(filter[i+1 : j])
+			b.WriteString(fmt.Sprintf("$%d", n+offset))
+			i = j
+		} else {
+			b.WriteByte(filter[i])
+			i++
+		}
+	}
+	return b.String()
+}
+
 // List queries the database and returns matching rows.
-func (b *Builder) List(ctx context.Context, q ListQuery) ([]map[string]interface{}, error) {
+func (b *Builder) List(ctx context.Context, q ListQuery, extraFilter string, extraArgs []interface{}) ([]map[string]interface{}, error) {
 	cols := b.selectColumns()
 	table := b.entity.Table
 
@@ -58,6 +82,12 @@ func (b *Builder) List(ctx context.Context, q ListQuery) ([]map[string]interface
 
 	if b.entity.SoftDelete {
 		whereClauses = append(whereClauses, "deleted_at IS NULL")
+	}
+
+	if extraFilter != "" {
+		whereClauses = append(whereClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
+		args = append(args, extraArgs...)
+		argIdx += len(extraArgs)
 	}
 
 	sqlStr := fmt.Sprintf("SELECT %s FROM %s", cols, b.qi(table))
@@ -92,17 +122,29 @@ func (b *Builder) List(ctx context.Context, q ListQuery) ([]map[string]interface
 }
 
 // Get retrieves a single record by ID.
-func (b *Builder) Get(ctx context.Context, id string) (map[string]interface{}, error) {
+func (b *Builder) Get(ctx context.Context, id string, extraFilter string, extraArgs []interface{}) (map[string]interface{}, error) {
 	cols := b.selectColumns()
 	table := b.entity.Table
 
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE id = $1", cols, b.qi(table))
+	args := []interface{}{id}
+	argIdx := 2 // id is $1
+
+	var extraClauses []string
 	if b.entity.SoftDelete {
-		sqlStr += " AND deleted_at IS NULL"
+		extraClauses = append(extraClauses, "deleted_at IS NULL")
+	}
+	if extraFilter != "" {
+		extraClauses = append(extraClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
+		args = append(args, extraArgs...)
+	}
+
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE id = $1", cols, b.qi(table))
+	for _, c := range extraClauses {
+		sqlStr += " AND " + c
 	}
 	sqlStr = b.dialect.Rebind(sqlStr)
 
-	rows, err := b.db.QueryContext(ctx, sqlStr, id)
+	rows, err := b.db.QueryContext(ctx, sqlStr, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get query: %w", err)
 	}
@@ -184,11 +226,11 @@ func (b *Builder) Create(ctx context.Context, data map[string]interface{}) (map[
 	if err != nil {
 		return nil, fmt.Errorf("create: getting last insert id: %w", err)
 	}
-	return b.Get(ctx, fmt.Sprintf("%d", lastID))
+	return b.Get(ctx, fmt.Sprintf("%d", lastID), "", nil)
 }
 
 // Update modifies an existing record and returns the updated row.
-func (b *Builder) Update(ctx context.Context, id string, data map[string]interface{}) (map[string]interface{}, error) {
+func (b *Builder) Update(ctx context.Context, id string, data map[string]interface{}, extraFilter string, extraArgs []interface{}) (map[string]interface{}, error) {
 	var setClauses []string
 	var args []interface{}
 	argIdx := 1
@@ -222,10 +264,18 @@ func (b *Builder) Update(ctx context.Context, id string, data map[string]interfa
 	args = append(args, id)
 	table := b.entity.Table
 
+	whereClause := fmt.Sprintf("id = %s", b.ph(argIdx))
+	argIdx++
+	if extraFilter != "" {
+		whereClause += " AND (" + reindexFilter(extraFilter, argIdx-1) + ")"
+		args = append(args, extraArgs...)
+		argIdx += len(extraArgs)
+	}
+
 	if b.dialect.SupportsReturning() {
 		sqlStr := b.dialect.Rebind(fmt.Sprintf(
-			"UPDATE %s SET %s WHERE id = %s RETURNING %s",
-			b.qi(table), strings.Join(setClauses, ", "), b.ph(argIdx), b.selectColumns(),
+			"UPDATE %s SET %s WHERE %s RETURNING %s",
+			b.qi(table), strings.Join(setClauses, ", "), whereClause, b.selectColumns(),
 		))
 		rows, err := b.db.QueryContext(ctx, sqlStr, args...)
 		if err != nil {
@@ -244,29 +294,41 @@ func (b *Builder) Update(ctx context.Context, id string, data map[string]interfa
 
 	// MySQL fallback: UPDATE then SELECT
 	sqlStr := b.dialect.Rebind(fmt.Sprintf(
-		"UPDATE %s SET %s WHERE id = %s",
-		b.qi(table), strings.Join(setClauses, ", "), b.ph(argIdx),
+		"UPDATE %s SET %s WHERE %s",
+		b.qi(table), strings.Join(setClauses, ", "), whereClause,
 	))
 	if _, err := b.db.ExecContext(ctx, sqlStr, args...); err != nil {
 		return nil, fmt.Errorf("update query: %w", err)
 	}
-	return b.Get(ctx, id)
+	return b.Get(ctx, id, "", nil)
 }
 
 // Delete removes a record by ID (hard or soft delete).
-func (b *Builder) Delete(ctx context.Context, id string, soft bool) error {
+func (b *Builder) Delete(ctx context.Context, id string, soft bool, extraFilter string, extraArgs []interface{}) error {
 	table := b.entity.Table
 	var sqlStr string
 	var args []interface{}
 
 	if soft && b.entity.SoftDelete {
+		argIdx := 3 // $1=now, $2=id, extra starts at $3
+		whereClause := "id = $2 AND deleted_at IS NULL"
+		if extraFilter != "" {
+			whereClause += " AND (" + reindexFilter(extraFilter, argIdx-1) + ")"
+		}
 		sqlStr = b.dialect.Rebind(fmt.Sprintf(
-			"UPDATE %s SET deleted_at = $1 WHERE id = $2 AND deleted_at IS NULL", b.qi(table),
+			"UPDATE %s SET deleted_at = $1 WHERE %s", b.qi(table), whereClause,
 		))
 		args = []interface{}{time.Now().UTC(), id}
+		args = append(args, extraArgs...)
 	} else {
-		sqlStr = b.dialect.Rebind(fmt.Sprintf("DELETE FROM %s WHERE id = $1", b.qi(table)))
+		argIdx := 2 // $1=id, extra starts at $2
+		whereClause := "id = $1"
+		if extraFilter != "" {
+			whereClause += " AND (" + reindexFilter(extraFilter, argIdx-1) + ")"
+		}
+		sqlStr = b.dialect.Rebind(fmt.Sprintf("DELETE FROM %s WHERE %s", b.qi(table), whereClause))
 		args = []interface{}{id}
+		args = append(args, extraArgs...)
 	}
 
 	result, err := b.db.ExecContext(ctx, sqlStr, args...)

@@ -21,10 +21,19 @@ type InitContext struct {
 	Logger Logger
 }
 
+// Subject holds the authenticated caller's identity, mirroring middleware.Subject
+// but defined here so plugins don't import internal packages.
+type Subject struct {
+	ID    string
+	Role  string
+	Email string
+}
+
 // HookContext is passed to each entity hook call.
 type HookContext struct {
 	Ctx       context.Context
 	RequestID string
+	Subject   *Subject // nil when the request is unauthenticated
 }
 
 // Plugin is the base interface all yaypi plugins must implement.

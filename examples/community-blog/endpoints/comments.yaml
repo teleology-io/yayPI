@@ -22,12 +22,14 @@ endpoints:
         max_limit: 200
       include: [author]
       auth:
-        require: false
+        require: false   # public read
+      # No row_access here — all comments are publicly visible.
+      # Soft-deleted comments are automatically excluded by the soft_delete filter.
 
     create:
       auth:
         require: true
-        roles: [member, editor, admin]  # any authenticated user can comment
+        roles: [member, editor, admin]   # any authenticated user can comment
 
   # Item: GET /comment/{id}, PATCH /comment/{id}, DELETE /comment/{id}
   - path: /comment/{id}
@@ -40,13 +42,27 @@ endpoints:
         require: false
 
     update:
-      allowed_fields: [body, edited]
+      allowed_fields: [body, edited, flagged]
       auth:
         require: true
         roles: [member, editor, admin]
+      # Authors can edit their own comments; admins can edit any.
+      # The "flagged" field is restricted at the entity level (write_roles: [admin]),
+      # so even if a member passes it in the request body it is silently ignored.
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "author_id = :subject.id"
 
     delete:
       soft_delete: true
       auth:
         require: true
-        roles: [admin]
+        roles: [member, editor, admin]
+      # Authors can delete their own comments; admins can delete any.
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "author_id = :subject.id"

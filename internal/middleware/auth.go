@@ -71,6 +71,29 @@ func GetSubject(r *http.Request) *Subject {
 	return s
 }
 
+// SubjectFromContext retrieves the authenticated Subject directly from a context.
+func SubjectFromContext(ctx context.Context) *Subject {
+	s, _ := ctx.Value(ctxKeySubject).(*Subject)
+	return s
+}
+
+// SubjectAttr returns a named attribute of the subject.
+// Supported keys: "id", "role", "email". Returns "" for nil subject or unknown key.
+func SubjectAttr(s *Subject, key string) string {
+	if s == nil {
+		return ""
+	}
+	switch key {
+	case "id":
+		return s.ID
+	case "role":
+		return s.Role
+	case "email":
+		return s.Email
+	}
+	return ""
+}
+
 // extractBearerToken extracts the token from the Authorization header.
 func extractBearerToken(r *http.Request) string {
 	auth := r.Header.Get("Authorization")

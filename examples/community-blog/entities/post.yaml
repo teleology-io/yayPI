@@ -59,6 +59,16 @@ entity:
       type: jsonb
       nullable: true
 
+    # Only admins and editors can see or set internal_notes.
+    # Members and unauthenticated callers never see this field in responses,
+    # and their values are silently ignored on create/update.
+    - name: internal_notes
+      type: text
+      nullable: true
+      access:
+        read_roles: [admin, editor]
+        write_roles: [admin, editor]
+
   relations:
     - name: author
       type: belongs_to

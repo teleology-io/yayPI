@@ -366,6 +366,154 @@ Note: You cannot filter or sort by JSONB sub-fields via the standard `allow_filt
 
 ---
 
+## 15. Row ownership — users can only modify their own records
+
+Authors can update/delete their own posts; admins can touch any post.
+
+**`endpoints/posts.yaml`:**
+```yaml
+- path: /post/{id}
+  entity: Post
+  crud: [update, delete]
+
+  update:
+    allowed_fields: [title, slug, excerpt, body, status, published_at]
+    auth:
+      require: true
+      roles: [member, editor, admin]
+    row_access:
+      - when: "subject.role == \"admin\""
+        filter: ""                             # admins: no restriction
+      - when: "*"
+        filter: "author_id = :subject.id"     # everyone else: only own posts
+
+  delete:
+    soft_delete: true
+    auth:
+      require: true
+      roles: [member, editor, admin]
+    row_access:
+      - when: "subject.role == \"admin\""
+        filter: ""
+      - when: "*"
+        filter: "author_id = :subject.id"
+```
+
+When a non-admin tries to update/delete a post they don't own, the row filter makes the SQL match zero rows — the handler returns **404** (indistinguishable from a missing record, which avoids leaking existence information).
+
+---
+
+## 16. Role-based row visibility (row-level security for lists)
+
+Admins see all posts (including drafts). Editors see their own drafts plus all published. Everyone else sees published only.
+
+```yaml
+list:
+  allow_filter_by: [status, author_id]
+  allow_sort_by: [published_at, title]
+  auth:
+    require: false   # public endpoint — sub may be nil
+  row_access:
+    - when: "subject.role == \"admin\""
+      filter: ""                                         # all rows
+    - when: "subject.role == \"editor\""
+      filter: "status = 'published' OR author_id = :subject.id"
+    - when: "*"
+      filter: "status = 'published'"                     # guests + members
+```
+
+The `*` catch-all is critical here: it handles unauthenticated callers (sub is nil — `subject.id` resolves to empty string, which won't match any valid UUID). Without a catch-all, unauthenticated requests would return **403**.
+
+---
+
+## 17. Attribute condition — restrict by email domain
+
+Only users from `@acme.com` can create records.
+
+```yaml
+create:
+  auth:
+    require: true
+    conditions:
+      - subject.email ends_with "@acme.com"
+```
+
+Combined with roles:
+
+```yaml
+create:
+  auth:
+    require: true
+    roles: [editor, admin]
+    conditions:
+      - subject.email ends_with "@acme.com"
+      - subject.role != "suspended"
+```
+
+Both `roles` and all `conditions` must pass — they are ANDed together.
+
+---
+
+## 18. Field-level access — admin-only fields
+
+Some fields should only be visible to or writable by specific roles.
+
+**Entity:**
+```yaml
+fields:
+  - name: internal_notes
+    type: text
+    nullable: true
+    access:
+      read_roles: [admin]       # members see null/absent for this field
+      write_roles: [admin]      # members' values silently ignored on create/update
+
+  - name: flagged
+    type: boolean
+    default: "false"
+    access:
+      read_roles: [admin, editor]
+      write_roles: [admin]      # only admins can flag a record
+```
+
+There is no error or warning when a restricted field is omitted from a response or dropped from a write — the behavior is transparent to the caller.
+
+---
+
+## 19. Self-service profile update (users can only edit their own profile)
+
+Users can edit their own profile fields. Admins can edit any field on any user.
+
+**Entity:**
+```yaml
+fields:
+  - name: role
+    type: enum
+    values: [admin, editor, member]
+    access:
+      write_roles: [admin]       # only admins can change a user's role
+```
+
+**Endpoint:**
+```yaml
+update:
+  allowed_fields: [display_name, bio, avatar_url, role]
+  auth:
+    require: true
+  row_access:
+    - when: "subject.role == \"admin\""
+      filter: ""                          # admins: any user
+    - when: "*"
+      filter: "id = :subject.id"          # everyone else: only themselves
+```
+
+With this config:
+- A member can `PATCH /user/{their-own-id}` and change `display_name`, `bio`, `avatar_url`. Their `role` value is silently dropped because `write_roles: [admin]`.
+- A member calling `PATCH /user/{someone-elses-id}` gets **404**.
+- An admin can update any field on any user.
+
+---
+
 ## 14. Composite primary key (junction table, no `id` column)
 
 When a table uses a composite primary key, mark both fields with `primary_key: true`. Do not add an `id` field.

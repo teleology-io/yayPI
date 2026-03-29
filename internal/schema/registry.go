@@ -56,8 +56,16 @@ type Endpoint struct {
 
 // Auth holds authentication/authorization requirements for an endpoint.
 type Auth struct {
-	Require bool
-	Roles   []string
+	Require    bool
+	Roles      []string
+	Conditions []string // ABAC: CEL-lite expressions evaluated against the subject
+}
+
+// RowAccessRule is a single rule in a row_access list.
+// The first matching rule wins. Filter "" means no restriction; no match means 403.
+type RowAccessRule struct {
+	When   string // condition expression or "*"
+	Filter string // SQL fragment with :subject.* bindings; "" = no filter
 }
 
 // ListOpts holds list endpoint options.
@@ -68,6 +76,7 @@ type ListOpts struct {
 	Pagination    Pagination
 	Include       []string
 	Auth          *Auth
+	RowAccess     []RowAccessRule // ABAC: row-level filter rules
 }
 
 // Pagination holds pagination settings.
@@ -79,8 +88,9 @@ type Pagination struct {
 
 // GetOpts holds get endpoint options.
 type GetOpts struct {
-	Include []string
-	Auth    *Auth
+	Include   []string
+	Auth      *Auth
+	RowAccess []RowAccessRule // ABAC: row-level filter rules
 }
 
 // CreateOpts holds create endpoint options.
@@ -94,12 +104,14 @@ type CreateOpts struct {
 type UpdateOpts struct {
 	AllowedFields []string
 	Auth          *Auth
+	RowAccess     []RowAccessRule // ABAC: row-level filter rules
 }
 
 // DeleteOpts holds delete endpoint options.
 type DeleteOpts struct {
 	Auth       *Auth
 	SoftDelete bool
+	RowAccess  []RowAccessRule // ABAC: row-level filter rules
 }
 
 // NewRegistry creates an empty Registry.
@@ -221,7 +233,18 @@ func buildAuth(a *config.AuthRequirement) *Auth {
 	if a == nil {
 		return nil
 	}
-	return &Auth{Require: a.Require, Roles: a.Roles}
+	return &Auth{Require: a.Require, Roles: a.Roles, Conditions: a.Conditions}
+}
+
+func buildRowAccess(rules []config.RowAccessRule) []RowAccessRule {
+	if len(rules) == 0 {
+		return nil
+	}
+	out := make([]RowAccessRule, len(rules))
+	for i, r := range rules {
+		out[i] = RowAccessRule{When: r.When, Filter: r.Filter}
+	}
+	return out
 }
 
 func buildListOpts(l *config.ListConfig) *ListOpts {
@@ -231,6 +254,7 @@ func buildListOpts(l *config.ListConfig) *ListOpts {
 		DefaultSort:   l.DefaultSort,
 		Include:       l.Include,
 		Auth:          buildAuth(l.Auth),
+		RowAccess:     buildRowAccess(l.RowAccess),
 	}
 	if l.Pagination != nil {
 		opts.Pagination = Pagination{
@@ -249,7 +273,7 @@ func buildListOpts(l *config.ListConfig) *ListOpts {
 }
 
 func buildGetOpts(g *config.GetConfig) *GetOpts {
-	return &GetOpts{Include: g.Include, Auth: buildAuth(g.Auth)}
+	return &GetOpts{Include: g.Include, Auth: buildAuth(g.Auth), RowAccess: buildRowAccess(g.RowAccess)}
 }
 
 func buildCreateOpts(c *config.CreateConfig) *CreateOpts {
@@ -261,9 +285,9 @@ func buildCreateOpts(c *config.CreateConfig) *CreateOpts {
 }
 
 func buildUpdateOpts(u *config.UpdateConfig) *UpdateOpts {
-	return &UpdateOpts{AllowedFields: u.AllowedFields, Auth: buildAuth(u.Auth)}
+	return &UpdateOpts{AllowedFields: u.AllowedFields, Auth: buildAuth(u.Auth), RowAccess: buildRowAccess(u.RowAccess)}
 }
 
 func buildDeleteOpts(d *config.DeleteConfig) *DeleteOpts {
-	return &DeleteOpts{Auth: buildAuth(d.Auth), SoftDelete: d.SoftDelete}
+	return &DeleteOpts{Auth: buildAuth(d.Auth), SoftDelete: d.SoftDelete, RowAccess: buildRowAccess(d.RowAccess)}
 }

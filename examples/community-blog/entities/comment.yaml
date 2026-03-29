@@ -52,6 +52,15 @@ entity:
       default: "false"
       nullable: false
 
+    # Admins can mark comments for review; regular users never see or set this.
+    - name: flagged
+      type: boolean
+      default: "false"
+      nullable: false
+      access:
+        read_roles: [admin, editor]
+        write_roles: [admin]
+
   relations:
     - name: post
       type: belongs_to

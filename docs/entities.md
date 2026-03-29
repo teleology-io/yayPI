@@ -68,6 +68,7 @@ entity:
 | `values` | list | Enum values (required when `type: enum`) |
 | `references` | object | Foreign key definition |
 | `serialization` | object | Controls API response and log behavior |
+| `access` | object | ABAC: per-role read and write restrictions (opt-in) |
 
 ### Column naming
 
@@ -126,6 +127,43 @@ The migration engine generates the FK constraint as `fk_{table}_{column}`.
 | `omit_log` | Field is stripped from structured log entries |
 
 Use `omit_response: true` for password hashes, internal flags, or any field that should never be exposed to API consumers. Use `omit_log: true` for any sensitive value you don't want appearing in log files.
+
+## Field access control (ABAC)
+
+The `access` key restricts which roles can read or write a field. It is **opt-in** — omitting `access` entirely means the field is fully unrestricted.
+
+```yaml
+- name: internal_notes
+  type: text
+  nullable: true
+  access:
+    read_roles: [admin, editor]   # members & unauthenticated callers get this field stripped
+    write_roles: [admin]          # only admins may set this field; others' values are ignored
+```
+
+| Key | Behavior |
+|---|---|
+| `read_roles` | Field is removed from all API responses for callers whose role is not in the list. Unauthenticated callers are treated as having an empty role. |
+| `write_roles` | Field is silently ignored in `create` and `update` request bodies for callers not in the list. No error is returned — the field is simply dropped. |
+
+Both keys are optional independently. You can restrict reads without restricting writes and vice versa.
+
+**Relationship to `omit_response`:** `omit_response: true` removes a field from *all* responses unconditionally (e.g. `password_hash`). `access.read_roles` removes it only for *some* callers. Use both if needed:
+
+```yaml
+- name: password_hash
+  type: string
+  serialization:
+    omit_response: true    # never in any response — absolute
+    omit_log: true
+
+- name: billing_tier
+  type: string
+  access:
+    read_roles: [admin]    # only admins see this; members don't
+```
+
+See [Authorization](authorization.md#3c-field-level-access-fieldaccess) for the full ABAC reference.
 
 ## Relations
 

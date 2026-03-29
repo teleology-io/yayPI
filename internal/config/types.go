@@ -135,6 +135,7 @@ type FieldDef struct {
 	Values        []string         `yaml:"values"` // for enum
 	References    *ReferenceDef    `yaml:"references"`
 	Serialization SerializationDef `yaml:"serialization"`
+	Access        *FieldAccessDef  `yaml:"access"` // ABAC: per-role read/write access
 }
 
 // ReferenceDef describes a foreign key reference.
@@ -223,8 +224,24 @@ type EndpointSpecRef struct {
 
 // AuthRequirement describes authentication/authorization requirements.
 type AuthRequirement struct {
-	Require bool     `yaml:"require"`
-	Roles   []string `yaml:"roles"`
+	Require    bool     `yaml:"require"`
+	Roles      []string `yaml:"roles"`
+	Conditions []string `yaml:"conditions"` // ABAC: CEL-lite expressions evaluated against subject
+}
+
+// RowAccessRule is a single rule in a row_access list.
+// Rules are evaluated in order; the first matching rule is applied.
+// If filter is empty the row set is unrestricted; if no rule matches the request is denied.
+type RowAccessRule struct {
+	When   string `yaml:"when"`   // condition expression or "*" (always matches)
+	Filter string `yaml:"filter"` // SQL fragment with :subject.id/:subject.role/:subject.email; "" = no filter
+}
+
+// FieldAccessDef controls per-role read/write access to a single field.
+// Omitting either list means no restriction for that direction.
+type FieldAccessDef struct {
+	ReadRoles  []string `yaml:"read_roles"`  // roles that may read this field
+	WriteRoles []string `yaml:"write_roles"` // roles that may write this field on create/update
 }
 
 // ListConfig describes list endpoint configuration.
@@ -235,6 +252,7 @@ type ListConfig struct {
 	Pagination    *PaginationConfig `yaml:"pagination"`
 	Include       []string          `yaml:"include"`
 	Auth          *AuthRequirement  `yaml:"auth"`
+	RowAccess     []RowAccessRule   `yaml:"row_access"` // ABAC: row-level filter rules
 }
 
 // PaginationConfig describes pagination settings.
@@ -246,8 +264,9 @@ type PaginationConfig struct {
 
 // GetConfig describes get endpoint configuration.
 type GetConfig struct {
-	Include []string         `yaml:"include"`
-	Auth    *AuthRequirement `yaml:"auth"`
+	Include   []string        `yaml:"include"`
+	Auth      *AuthRequirement `yaml:"auth"`
+	RowAccess []RowAccessRule  `yaml:"row_access"` // ABAC: row-level filter rules
 }
 
 // CreateConfig describes create endpoint configuration.
@@ -261,12 +280,14 @@ type CreateConfig struct {
 type UpdateConfig struct {
 	AllowedFields []string         `yaml:"allowed_fields"`
 	Auth          *AuthRequirement `yaml:"auth"`
+	RowAccess     []RowAccessRule  `yaml:"row_access"` // ABAC: row-level filter rules
 }
 
 // DeleteConfig describes delete endpoint configuration.
 type DeleteConfig struct {
 	Auth       *AuthRequirement `yaml:"auth"`
 	SoftDelete bool             `yaml:"soft_delete"`
+	RowAccess  []RowAccessRule  `yaml:"row_access"` // ABAC: row-level filter rules
 }
 
 // JobConfig represents a jobs YAML file.

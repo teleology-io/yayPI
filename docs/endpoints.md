@@ -127,6 +127,11 @@ list:
   include: [author, tags]               # relations to eager-load
   auth:
     require: false
+  row_access:                           # ABAC: row-level filter rules (opt-in)
+    - when: "subject.role == \"admin\""
+      filter: ""                        # empty = no extra WHERE (see all rows)
+    - when: "*"
+      filter: "status = 'published'"   # catch-all: unauthenticated/other roles see published only
 ```
 
 Clients filter and sort by passing query parameters:
@@ -145,6 +150,9 @@ get:
   include: [author, tags, comments]   # relations to eager-load
   auth:
     require: false
+  row_access:                         # ABAC: same syntax as list; no match → 404
+    - when: "*"
+      filter: "status = 'published'"
 ```
 
 ## `create` options
@@ -154,9 +162,13 @@ create:
   auth:
     require: true
     roles: [editor, admin]
+    conditions:                               # ABAC: all must pass; 403 on failure
+      - subject.email ends_with "@company.com"
+  before_hooks: [validate-post]              # plugin hook names
+  after_hooks: [notify-followers]
 ```
 
-The request body is `application/json`. All entity fields can be set on create (there is no field whitelist for create — use serialization if needed).
+The request body is `application/json`. All entity fields can be set on create (there is no field whitelist for create — use `serialization` or `access.write_roles` if needed).
 
 ## `update` options
 
@@ -166,9 +178,16 @@ update:
   auth:
     require: true
     roles: [editor, admin]
+  row_access:                             # ABAC: no match → 404 (row invisible to caller)
+    - when: "subject.role == \"admin\""
+      filter: ""                          # admins update anything
+    - when: "*"
+      filter: "author_id = :subject.id"  # others: only their own rows
 ```
 
 `allowed_fields` is a security-critical whitelist. Only the listed fields can be changed via PATCH. Fields not in the list are silently ignored from the request body. Without this whitelist, any field on the entity can be updated — which can allow callers to escalate privileges (e.g. by updating a `role` field).
+
+In addition, `access.write_roles` on individual fields provides a second layer: even if a field is in `allowed_fields`, callers whose role is not in `write_roles` have that field silently dropped before the DB call.
 
 ## `delete` options
 
@@ -178,6 +197,11 @@ delete:
   auth:
     require: true
     roles: [admin]
+  row_access:          # ABAC: prevents deleting rows the caller can't access
+    - when: "subject.role == \"admin\""
+      filter: ""
+    - when: "*"
+      filter: "author_id = :subject.id"
 ```
 
 `soft_delete: true` on the endpoint requires `soft_delete: true` on the entity. Hard deletes issue a real `DELETE FROM` statement.
@@ -189,10 +213,53 @@ Used at top-level and per-operation:
 ```yaml
 auth:
   require: true          # false = public access; true = JWT required
-  roles: [admin, editor] # optional; if set, role must be in this list (AND passes Casbin)
+  roles: [admin, editor] # ABAC: role must be in this list (enforced, returns 403 if not)
+  conditions:            # ABAC: ALL expressions must pass; 403 if any fails
+    - subject.email ends_with "@company.com"
+    - subject.role in ["editor", "admin"]
 ```
 
-When `roles:` is omitted, any authenticated user is allowed (subject only to Casbin enforcement). When `roles:` is set, the JWT `role` claim must match one of the listed values.
+| Field | Description |
+|---|---|
+| `require` | `false` = no JWT needed (public). `true` = JWT required; returns 401 if absent/invalid. |
+| `roles` | Allowlist of roles. JWT `role` claim must match one. Returns 403 if not in list. |
+| `conditions` | CEL-lite expressions evaluated against the JWT subject. All must pass (AND). Returns 403 if any fails. |
+
+**Condition operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `not_in`, `starts_with`, `ends_with`, `*` (always true)
+
+**Subject attributes:** `subject.id` (JWT `sub`), `subject.role`, `subject.email`
+
+When `roles:` is omitted, any authenticated role is accepted by that check. `conditions` are evaluated after `roles` — both must pass.
+
+## `row_access` rules
+
+Used on `list`, `get`, `update`, and `delete` operations:
+
+```yaml
+row_access:
+  - when: "subject.role == \"admin\""
+    filter: ""                           # empty = no extra WHERE condition (unrestricted)
+  - when: "subject.role == \"editor\""
+    filter: "author_id = :subject.id OR status = 'published'"
+  - when: "*"                            # catch-all — always include to avoid accidental 403
+    filter: "status = 'published'"
+```
+
+Rules are evaluated **in order** — the first matching `when` wins. If no rule matches, the request returns **403** (list/create) or **404** (get/update/delete).
+
+| `when` expression | Same operators as `auth.conditions` |
+|---|---|
+| `filter` | SQL fragment appended to `WHERE` with `AND`. Empty string = no filter (allow all rows). |
+
+**Bind variables in `filter`:**
+
+| Placeholder | Value |
+|---|---|
+| `:subject.id` | JWT `sub` |
+| `:subject.role` | JWT `role` |
+| `:subject.email` | JWT `email` |
+
+`row_access` is **opt-in**: omitting it means all rows are accessible. Defining it without a catch-all `when: "*"` means any caller not matched by a rule is denied.
 
 ## OpenAPI spec integration
 

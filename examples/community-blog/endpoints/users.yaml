@@ -2,6 +2,7 @@ version: "1"
 kind: endpoints
 
 endpoints:
+  # Admin-managed user list and creation
   - path: /users
     entity: User
     crud: [list, create]
@@ -23,22 +24,27 @@ endpoints:
         require: true
         roles: [admin]
 
+  # User profile — public read, self-service update, admin delete
   - path: /user/{id}
     entity: User
     crud: [get, update, delete]
-    auth:
-      require: true
-      roles: [admin]
 
     get:
       auth:
         require: false   # public profiles
 
     update:
+      # "role" is in the list so it reaches the DB layer, but the entity-level
+      # access.write_roles: [admin] on that field silently drops it for non-admins.
       allowed_fields: [display_name, bio, avatar_url, role]
       auth:
         require: true
-        roles: [admin]
+      # Row ownership: users can update their own profile; admins can update any.
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "id = :subject.id"
 
     delete:
       soft_delete: true

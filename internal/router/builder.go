@@ -76,15 +76,10 @@ func registerEndpoints(r chi.Router, reg *schema.Registry, factory *handler.Fact
 			continue
 		}
 
-		requireAuth := false
-		if ep.Auth != nil {
-			requireAuth = ep.Auth.Require
-		}
-
 		// Determine CRUD operations
 		if len(ep.CRUD) > 0 {
 			for _, op := range ep.CRUD {
-				registerCRUDOp(r, op, ep, entity, factory, cfg, requireAuth)
+				registerCRUDOp(r, op, ep, entity, factory, cfg)
 			}
 		} else if ep.Method != "" && ep.Handler != "" {
 			// Custom handler — not supported in v1 (YAML-driven only)
@@ -100,15 +95,14 @@ func registerCRUDOp(
 	entity *schema.Entity,
 	factory *handler.Factory,
 	cfg Config,
-	requireAuth bool,
 ) {
 	path := ep.Path
 	if path == "" {
 		return
 	}
 
-	// Build per-endpoint middleware chain
-	mws := buildMiddlewareChain(ep, entity, cfg, requireAuth, op)
+	// Build per-operation middleware chain
+	mws := buildMiddlewareChain(ep, entity, cfg, op)
 
 	// itemPath appends /{id} only when the path doesn't already contain a param.
 	itemPath := path
@@ -154,24 +148,64 @@ func registerCRUDOp(
 	}
 }
 
+// resolveOpAuth returns the effective Auth for the given CRUD operation.
+// Per-operation auth overrides the endpoint-level auth.
+func resolveOpAuth(ep *schema.Endpoint, op string) *schema.Auth {
+	var opAuth *schema.Auth
+	switch op {
+	case "list":
+		if ep.List != nil {
+			opAuth = ep.List.Auth
+		}
+	case "get":
+		if ep.Get != nil {
+			opAuth = ep.Get.Auth
+		}
+	case "create":
+		if ep.Create != nil {
+			opAuth = ep.Create.Auth
+		}
+	case "update":
+		if ep.Update != nil {
+			opAuth = ep.Update.Auth
+		}
+	case "delete":
+		if ep.Delete != nil {
+			opAuth = ep.Delete.Auth
+		}
+	}
+	if opAuth != nil {
+		return opAuth
+	}
+	return ep.Auth
+}
+
 // buildMiddlewareChain constructs the middleware chain for a route.
 func buildMiddlewareChain(
 	ep *schema.Endpoint,
 	entity *schema.Entity,
 	cfg Config,
-	requireAuth bool,
 	op string,
 ) []func(http.Handler) http.Handler {
 	var mws []func(http.Handler) http.Handler
+
+	auth := resolveOpAuth(ep, op)
+
+	requireAuth := auth != nil && auth.Require
 
 	// JWT auth middleware
 	if cfg.AuthSecret != nil && cfg.AuthAlg != "" {
 		mws = append(mws, middleware.RequireAuth(cfg.AuthSecret, cfg.AuthAlg, requireAuth))
 	}
 
-	// RBAC middleware
+	// RBAC + roles + conditions middleware
 	if cfg.Enforcer != nil && requireAuth {
-		mws = append(mws, middleware.RBAC(cfg.Enforcer, entity.Name, requireAuth))
+		opts := middleware.AuthOpts{Require: requireAuth}
+		if auth != nil {
+			opts.Roles = auth.Roles
+			opts.Conditions = auth.Conditions
+		}
+		mws = append(mws, middleware.RBAC(cfg.Enforcer, entity.Name, opts, policy.EvalConditions))
 	}
 
 	return mws

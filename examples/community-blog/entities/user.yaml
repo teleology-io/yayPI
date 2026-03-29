@@ -42,6 +42,9 @@ entity:
       type: enum
       values: [admin, editor, member]
       default: "'member'"
+      # Only admins can promote/demote a user's role.
+      access:
+        write_roles: [admin]
 
     - name: bio
       type: text

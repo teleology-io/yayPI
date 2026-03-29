@@ -53,7 +53,7 @@ auth:
 
 ## How a request is processed
 
-Every request goes through this middleware chain before reaching a handler:
+Every request goes through this pipeline:
 
 ```
 Request
@@ -61,24 +61,47 @@ Request
   → RequestID (generates/propagates X-Request-Id)
   → Logger (structured zerolog entry)
   → Recover (catches panics, returns 500)
-  → RequireAuth (JWT verification — per route)
-  → RBAC (Casbin enforcement — per route)
+  → RequireAuth (JWT verification — per route)          ← 401 on failure
+  → RBAC (Casbin enforcement — per route)               ← 403 on failure
+  → RBAC: auth.roles check                              ← 403 if role not in list
+  → RBAC: auth.conditions check                         ← 403 if any condition fails
   → Handler (list / get / create / update / delete)
-  → Query Builder (parameterized SQL)
-  → PostgreSQL
+      → write_roles: strip restricted fields from body  ← silent drop
+      → row_access: resolve SQL WHERE fragment
+      → Query Builder (parameterized SQL + row filter)
+      → Database
+      → read_roles: strip restricted fields from response
+  → Response
 ```
 
-## Auth: two independent layers
+## Auth: three layers
 
-yayPi enforces two separate security checks:
+yayPi enforces three independent security checks:
 
-1. **JWT middleware** — verifies the token is cryptographically valid, not expired, and uses the configured algorithm. Extracts `sub`, `role`, and `email` from claims and attaches them to the request context.
+### Layer 1 — JWT (`RequireAuth`)
+Verifies the token is cryptographically valid, not expired, and uses the configured algorithm. Extracts `sub`, `role`, and `email` from claims and attaches them to the request context as the *subject*.
 
-2. **Casbin RBAC** — checks whether the authenticated role has permission to perform the action on the entity. Uses `Enforce(role, EntityName, action)`.
+Returns **401** if the token is absent (when `require: true`), invalid, or expired.
 
-Both layers must pass. If JWT fails the request is rejected with 401. If Casbin fails it is rejected with 403.
+### Layer 2 — Casbin RBAC + roles + conditions
 
-An endpoint can have `auth.require: false` — this disables the JWT check for that operation (public access). Casbin is still consulted, but with an empty role, so public endpoints simply should not list any `roles:` that restrict access.
+Three checks happen in sequence in the RBAC middleware:
+
+1. **Casbin** — `Enforce(role, EntityName, action)` against `roles.yaml` permissions. Returns 403 if not allowed.
+2. **`auth.roles`** — if set, the subject's role must be in the list. Returns 403 if not.
+3. **`auth.conditions`** — if set, all CEL-lite expressions against the subject must be true. Returns 403 if any fails.
+
+An endpoint with `auth.require: false` skips all three checks entirely (public access).
+
+### Layer 3 — ABAC in the handler
+
+After the middleware, three more checks run inside the handler itself:
+
+4. **`access.write_roles`** — restricted fields are silently stripped from the request body before any DB write (no error).
+5. **`row_access`** — a SQL `WHERE` fragment is resolved from the rules and injected into the query. No match → 403/404.
+6. **`access.read_roles`** — restricted fields are stripped from the response JSON before it is sent.
+
+See [Authorization](authorization.md) for the full reference.
 
 ## Cursor pagination
 

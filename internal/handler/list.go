@@ -2,10 +2,13 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"github.com/csullivan/yaypi/internal/middleware"
+	"github.com/csullivan/yaypi/internal/policy"
 	"github.com/csullivan/yaypi/internal/query"
 	"github.com/csullivan/yaypi/internal/schema"
 )
@@ -92,6 +95,23 @@ func (f *Factory) List(entity *schema.Entity, opts *schema.ListOpts) http.Handle
 			cursor = c
 		}
 
+		// Resolve row-level access filter
+		sub := middleware.GetSubject(r)
+		var rowFilter string
+		var rowArgs []interface{}
+		if opts != nil && len(opts.RowAccess) > 0 {
+			var rowErr error
+			rowFilter, rowArgs, rowErr = policy.ResolveRowFilter(opts.RowAccess, sub)
+			if errors.Is(rowErr, policy.ErrRowAccessDenied) {
+				writeError(w, http.StatusForbidden, "access denied")
+				return
+			}
+			if rowErr != nil {
+				writeError(w, http.StatusInternalServerError, "row access evaluation failed")
+				return
+			}
+		}
+
 		lq := query.ListQuery{
 			Filters: filters,
 			Sort:    sortParam,
@@ -99,15 +119,16 @@ func (f *Factory) List(entity *schema.Entity, opts *schema.ListOpts) http.Handle
 			Cursor:  cursor,
 		}
 
-		rows, err := builder.List(r.Context(), lq)
+		rows, err := builder.List(r.Context(), lq, rowFilter, rowArgs)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "query failed")
 			return
 		}
 
-		// Strip omit_response fields
+		// Strip omit_response fields and apply field-level access control
 		for _, row := range rows {
 			stripOmitFields(entity, row)
+			applyFieldAccess(entity, row, sub)
 		}
 
 		// Build next cursor if results fill the page

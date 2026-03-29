@@ -1,9 +1,12 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/csullivan/yaypi/internal/middleware"
+	"github.com/csullivan/yaypi/internal/policy"
 	"github.com/csullivan/yaypi/internal/query"
 	"github.com/csullivan/yaypi/internal/schema"
 	"github.com/google/uuid"
@@ -32,8 +35,25 @@ func (f *Factory) Get(entity *schema.Entity, opts *schema.GetOpts) http.HandlerF
 			return
 		}
 
+		// Resolve row-level access filter
+		sub := middleware.GetSubject(r)
+		var rowFilter string
+		var rowArgs []interface{}
+		if opts != nil && len(opts.RowAccess) > 0 {
+			var rowErr error
+			rowFilter, rowArgs, rowErr = policy.ResolveRowFilter(opts.RowAccess, sub)
+			if errors.Is(rowErr, policy.ErrRowAccessDenied) {
+				writeError(w, http.StatusNotFound, "record not found")
+				return
+			}
+			if rowErr != nil {
+				writeError(w, http.StatusInternalServerError, "row access evaluation failed")
+				return
+			}
+		}
+
 		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
-		row, err := builder.Get(r.Context(), id)
+		row, err := builder.Get(r.Context(), id, rowFilter, rowArgs)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, "query failed")
 			return
@@ -44,6 +64,7 @@ func (f *Factory) Get(entity *schema.Entity, opts *schema.GetOpts) http.HandlerF
 		}
 
 		stripOmitFields(entity, row)
+		applyFieldAccess(entity, row, sub)
 
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"data": row,

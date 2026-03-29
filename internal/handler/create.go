@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/csullivan/yaypi/internal/middleware"
 	"github.com/csullivan/yaypi/internal/query"
 	"github.com/csullivan/yaypi/internal/schema"
 )
@@ -22,6 +23,10 @@ func (f *Factory) Create(entity *schema.Entity, opts *schema.CreateOpts) http.Ha
 			writeError(w, http.StatusBadRequest, "invalid JSON body")
 			return
 		}
+
+		// Enforce field-level write restrictions before touching the DB
+		sub := middleware.GetSubject(r)
+		applyWriteRoles(entity, data, sub)
 
 		// Run before hooks via plugin dispatcher
 		if f.plugins != nil {
@@ -55,6 +60,7 @@ func (f *Factory) Create(entity *schema.Entity, opts *schema.CreateOpts) http.Ha
 		}
 
 		stripOmitFields(entity, record)
+		applyFieldAccess(entity, record, sub)
 
 		writeJSON(w, http.StatusCreated, map[string]interface{}{
 			"data": record,

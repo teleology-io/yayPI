@@ -124,6 +124,12 @@ entity:
         omit_response: true     # never returned in API responses
         omit_log: true          # never logged
 
+    - name: internal_notes
+      type: text
+      access:                   # ABAC: field-level access control (opt-in)
+        read_roles: [admin, editor]   # roles that may see this field; omit = unrestricted
+        write_roles: [admin]          # roles that may set this field; omit = unrestricted
+
   relations:                    # eager-loadable joins (used by include: in endpoints)
     - name: author
       type: belongs_to          # belongs_to | has_many | has_one | many_to_many
@@ -200,7 +206,10 @@ endpoints:
     # Top-level auth applies to all ops unless overridden per-op
     auth:
       require: false
-      roles: [admin, editor]    # JWT role claim must match one of these
+      roles: [admin, editor]    # JWT role claim must match one of these (enforced)
+      conditions:               # ABAC: all must pass (AND logic); 403 on failure
+        - subject.email ends_with "@company.com"
+        - subject.role in ["admin", "editor"]
 
     # OpenAPI spec control
     spec: false                 # true (default) | false = exclude from all specs
@@ -221,16 +230,26 @@ endpoints:
       include: [author, tags]   # relation names to eager-load
       auth:                     # overrides top-level auth for list only
         require: false
+      row_access:               # ABAC: row-level filter rules (opt-in; absent = open)
+        - when: "subject.role == \"admin\""
+          filter: ""            # empty = no extra WHERE condition (see all rows)
+        - when: "*"             # catch-all; always include to avoid unexpected 403
+          filter: "status = 'published'"
 
     get:
       include: [author, tags, comments]
       auth:
         require: false
+      row_access:               # same syntax as list.row_access
+        - when: "*"
+          filter: "status = 'published'"
 
     create:
       auth:
         require: true
         roles: [editor, admin]
+        conditions:
+          - subject.email ends_with "@company.com"
       before_hooks: [validate-post]    # plugin hook names
       after_hooks: [notify-followers]
 
@@ -239,12 +258,22 @@ endpoints:
       auth:
         require: true
         roles: [editor, admin]
+      row_access:               # callers without a matching rule get 404
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "author_id = :subject.id"   # :subject.id | :subject.role | :subject.email
 
     delete:
       soft_delete: true         # sets deleted_at (entity must have soft_delete: true)
       auth:
         require: true
         roles: [admin]
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "author_id = :subject.id"
 ```
 
 ### CRUD → HTTP mapping

@@ -17,7 +17,19 @@ endpoints:
         max_limit: 100
       include: [author, tags]
       auth:
-        require: false        # public read
+        require: false   # public endpoint — no JWT needed
+      # Row-level access: what rows each caller can see.
+      # - Admins see all posts (drafts, archived, everything).
+      # - Editors see all published posts plus their own drafts.
+      # - Everyone else (members, guests) sees only published posts.
+      # The catch-all "*" handles unauthenticated callers (subject.id is empty string).
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "subject.role == \"editor\""
+          filter: "status = 'published' OR author_id = :subject.id"
+        - when: "*"
+          filter: "status = 'published'"
 
     create:
       auth:
@@ -33,15 +45,35 @@ endpoints:
       include: [author, tags]   # comments fetched separately via GET /comments?post_id=
       auth:
         require: false
+      # Same row visibility rules as list — a guest requesting a draft gets 404.
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "subject.role == \"editor\""
+          filter: "status = 'published' OR author_id = :subject.id"
+        - when: "*"
+          filter: "status = 'published'"
 
     update:
-      allowed_fields: [title, slug, excerpt, body, status, published_at, metadata]
+      allowed_fields: [title, slug, excerpt, body, status, published_at, metadata, internal_notes]
       auth:
         require: true
         roles: [editor, admin]
+      # Row ownership: admins can edit any post; editors can only edit their own.
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "author_id = :subject.id"
 
     delete:
       soft_delete: true
       auth:
         require: true
-        roles: [admin]
+        roles: [admin, editor]
+      # Admins can delete any post; editors can only delete their own.
+      row_access:
+        - when: "subject.role == \"admin\""
+          filter: ""
+        - when: "*"
+          filter: "author_id = :subject.id"
