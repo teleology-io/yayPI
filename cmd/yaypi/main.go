@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -45,6 +46,7 @@ func main() {
 		newMigrateCmd(&configFile),
 		newInitCmd(),
 		newSpecCmd(&configFile),
+		newBuildCmd(&configFile),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
@@ -166,11 +168,142 @@ func newInitCmd() *cobra.Command {
 	}
 }
 
+// newBuildCmd creates the `yaypi build` subcommand.
+func newBuildCmd(configFile *string) *cobra.Command {
+	var outputBin string
+	cmd := &cobra.Command{
+		Use:   "build",
+		Short: "Compile a server binary with plugins baked in",
+		Long: `Build generates a standalone server binary that includes all plugins
+declared in yaypi.yaml with a path: field. The resulting binary behaves
+identically to 'yaypi run' but with plugins automatically wired to entities.
+
+Example:
+  yaypi build --output ./my-api-server
+  ./my-api-server run`,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runBuild(*configFile, outputBin)
+		},
+	}
+	cmd.Flags().StringVarP(&outputBin, "output", "o", "./yaypi-server", "output binary path")
+	return cmd
+}
+
+// runBuild resolves plugin source paths, generates a temp module, compiles, and
+// writes the resulting binary to outputBin.
+func runBuild(configFile, outputBin string) error {
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// Check that at least one plugin has a path.
+	hasPath := false
+	for _, p := range cfg.Plugins {
+		if p.Path != "" {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		return fmt.Errorf("no plugins with path: configured in yaypi.yaml — nothing to build")
+	}
+
+	// Find the yaypi module root so the generated go.mod can replace it.
+	exe, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolving executable path: %w", err)
+	}
+	yaypiRoot, yaypiMod, goVer, err := plugin.FindYaypiRoot(filepath.Dir(exe))
+	if err != nil {
+		// Fallback: try the working directory (useful when running from the repo).
+		wd, _ := os.Getwd()
+		yaypiRoot, yaypiMod, goVer, err = plugin.FindYaypiRoot(wd)
+		if err != nil {
+			return fmt.Errorf("finding yaypi module root: %w", err)
+		}
+	}
+
+	configDir := filepath.Dir(configFile)
+	if !filepath.IsAbs(configDir) {
+		wd, _ := os.Getwd()
+		configDir = filepath.Join(wd, configDir)
+	}
+
+	bctx, err := plugin.ResolvePlugins(cfg, configDir, yaypiRoot, yaypiMod, goVer)
+	if err != nil {
+		return fmt.Errorf("resolving plugins: %w", err)
+	}
+
+	buildDir, err := os.MkdirTemp("", "yaypi-build-*")
+	if err != nil {
+		return fmt.Errorf("creating build dir: %w", err)
+	}
+	defer os.RemoveAll(buildDir)
+
+	log.Info().Str("build_dir", buildDir).Msg("generating plugin build")
+	if err := plugin.GenerateBuildDir(bctx, buildDir); err != nil {
+		return fmt.Errorf("generating build directory: %w", err)
+	}
+
+	absOutput := outputBin
+	if !filepath.IsAbs(absOutput) {
+		wd, _ := os.Getwd()
+		absOutput = filepath.Join(wd, absOutput)
+	}
+
+	log.Info().Str("output", absOutput).Msg("compiling")
+	if err := plugin.RunBuild(buildDir, absOutput); err != nil {
+		return fmt.Errorf("build failed: %w", err)
+	}
+
+	log.Info().Str("binary", absOutput).Msg("build complete")
+	return nil
+}
+
+// pluginPathsConfigured reports whether any plugins in cfg have a non-empty path.
+func pluginPathsConfigured(cfg *config.RootConfig) bool {
+	for _, p := range cfg.Plugins {
+		if p.Path != "" {
+			return true
+		}
+	}
+	return false
+}
+
 // runServer loads config and starts the HTTP server.
 func runServer(configFile string) error {
 	cfg, err := config.Load(configFile)
 	if err != nil {
 		return fmt.Errorf("loading config: %w", err)
+	}
+
+	// If plugins with path: are configured and this is not already a plugin-built
+	// binary (detected via YAYPI_PLUGIN_BUILD env var), build a plugin binary and
+	// exec into it — replacing the current process.
+	if pluginPathsConfigured(cfg) && os.Getenv("YAYPI_PLUGIN_BUILD") == "" {
+		log.Info().Msg("plugin paths detected — building plugin binary")
+		tmpBin, err := os.CreateTemp("", "yaypi-server-*")
+		if err != nil {
+			return fmt.Errorf("creating temp binary: %w", err)
+		}
+		tmpBin.Close()
+		tmpBinPath := tmpBin.Name()
+		// Ensure it's executable and cleaned up on exit.
+		defer os.Remove(tmpBinPath)
+
+		if err := runBuild(configFile, tmpBinPath); err != nil {
+			return fmt.Errorf("building plugin binary: %w", err)
+		}
+		if err := os.Chmod(tmpBinPath, 0755); err != nil {
+			return fmt.Errorf("chmod plugin binary: %w", err)
+		}
+
+		// Re-exec the plugin binary with the same args, marking it as pre-built.
+		log.Info().Str("binary", tmpBinPath).Msg("exec plugin binary")
+		args := append([]string{tmpBinPath}, os.Args[1:]...)
+		env := append(os.Environ(), "YAYPI_PLUGIN_BUILD=1")
+		return syscall.Exec(tmpBinPath, args, env)
 	}
 
 	// Warn about sensitive plain-text values

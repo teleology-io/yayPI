@@ -169,18 +169,99 @@ func (p *HashPasswordPlugin) hashPasswordField(data map[string]any) (map[string]
 }
 ```
 
+## Writing a plugin
+
+Each plugin lives in its own directory as a standard Go package. The only requirement is that it exports a `New` function:
+
+```go
+func New(cfg map[string]any) sdk.EntityHookPlugin
+```
+
+**`plugins/hashpassword/plugin.go`:**
+
+```go
+package hashpassword
+
+import (
+    "context"
+    "fmt"
+
+    "golang.org/x/crypto/bcrypt"
+    "github.com/csullivan/yaypi/pkg/sdk"
+)
+
+type plugin struct{ cost int }
+
+func New(_ map[string]any) sdk.EntityHookPlugin { return &plugin{} }
+
+func (p *plugin) Info() sdk.PluginInfo {
+    return sdk.PluginInfo{Name: "hash-password", Version: "1.0.0", Description: "Hashes the password field before saving"}
+}
+
+func (p *plugin) Init(ctx sdk.InitContext) error {
+    p.cost = bcrypt.DefaultCost
+    if v, ok := ctx.Config["bcrypt_cost"].(int); ok {
+        p.cost = v
+    }
+    return nil
+}
+
+func (p *plugin) Shutdown(_ context.Context) error { return nil }
+
+func (p *plugin) BeforeCreate(_ sdk.HookContext, _ string, data map[string]any) (map[string]any, error) {
+    return p.hashPasswordField(data)
+}
+
+func (p *plugin) AfterCreate(_ sdk.HookContext, _ string, _ map[string]any) error  { return nil }
+
+func (p *plugin) BeforeUpdate(_ sdk.HookContext, _ string, _ string, data map[string]any) (map[string]any, error) {
+    return p.hashPasswordField(data)
+}
+
+func (p *plugin) AfterUpdate(_ sdk.HookContext, _ string, _ map[string]any) error  { return nil }
+func (p *plugin) BeforeDelete(_ sdk.HookContext, _ string, _ string) error          { return nil }
+func (p *plugin) AfterDelete(_ sdk.HookContext, _ string, _ string) error           { return nil }
+
+func (p *plugin) hashPasswordField(data map[string]any) (map[string]any, error) {
+    raw, ok := data["password"].(string)
+    if !ok || raw == "" {
+        return data, nil
+    }
+    hashed, err := bcrypt.GenerateFromPassword([]byte(raw), p.cost)
+    if err != nil {
+        return nil, fmt.Errorf("hashing password: %w", err)
+    }
+    data["password_hash"] = string(hashed)
+    delete(data, "password")
+    return data, nil
+}
+```
+
 ## Registering a plugin
 
-**Step 1 — declare in `yaypi.yaml`:**
+**Step 1 — put the plugin in its own directory:**
+
+```
+your-project/
+├── yaypi.yaml
+├── entities/
+├── endpoints/
+└── plugins/
+    └── hashpassword/
+        └── plugin.go   ← package hashpassword; func New(...) sdk.EntityHookPlugin
+```
+
+**Step 2 — declare in `yaypi.yaml` with `path:` pointing at the directory:**
 
 ```yaml
 plugins:
   - name: hash-password
+    path: ./plugins/hashpassword   # relative to yaypi.yaml
     config:
       bcrypt_cost: 12
 ```
 
-**Step 2 — wire to entity hooks in the entity file:**
+**Step 3 — wire to entity hooks in the entity file:**
 
 ```yaml
 entity:
@@ -190,15 +271,25 @@ entity:
     before_update: [hash-password]
 ```
 
-**Step 3 — register in `main.go` (required — see note below):**
+**Step 4 — build and run:**
 
-Because v1 plugins are in-process Go code (not dynamically loaded), you register them programmatically in your application entrypoint. If you have a custom `main.go` that wraps yayPi, call:
+```bash
+# Compile a standalone binary with the plugin baked in:
+yaypi build --output ./my-api-server
 
-```go
-dispatcher.Register("User", myHashPasswordPlugin)
+# Run it:
+./my-api-server run
 ```
 
-> **Note:** The current v1 implementation uses an in-process plugin dispatcher. Plugin loading from external binaries (the `path:` field) is reserved for a future release. For now, plugins are registered in code.
+Or just use `yaypi run` — when `path:` entries are detected, it automatically builds a plugin binary and re-execs into it before starting:
+
+```bash
+yaypi run   # detects plugin paths, builds, then starts
+```
+
+> **How auto-run works:** `yaypi run` checks whether any `plugins[].path` is set. If so, it builds a temporary binary (same as `yaypi build`) and replaces itself via `exec()`. The new binary starts with the plugins wired in. The build happens in a temporary directory and is cleaned up automatically.
+
+> **Package convention:** The directory name becomes the Go package import alias. Use a short, alphanumeric name — `hashpassword`, `auditlog`, `ratelimit`. Hyphens and dots are replaced with underscores.
 
 ## Plugin config
 
