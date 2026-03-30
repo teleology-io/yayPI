@@ -19,6 +19,8 @@ type RootConfig struct {
 	Endpoints    []*EndpointFileConfig    `yaml:"-"`
 	Jobs         []*JobConfig             `yaml:"-"`
 	SeedFiles    []*SeedFileConfig        `yaml:"-"`
+	EmailFiles   []*EmailFileConfig       `yaml:"-"`
+	WebhookFiles []*WebhookFileConfig     `yaml:"-"`
 	AuthEndpoint *AuthEndpointFileConfig  `yaml:"-"`
 }
 
@@ -92,11 +94,29 @@ type DBConfig struct {
 
 // AuthConfig holds JWT authentication settings.
 type AuthConfig struct {
-	Provider         string   `yaml:"provider"`
-	Secret           string   `yaml:"secret"`
-	Expiry           string   `yaml:"expiry"`
-	Algorithm        string   `yaml:"algorithm"`
-	RejectAlgorithms []string `yaml:"reject_algorithms"`
+	Provider         string         `yaml:"provider"`
+	Secret           string         `yaml:"secret"`
+	Expiry           string         `yaml:"expiry"`
+	Algorithm        string         `yaml:"algorithm"`
+	RejectAlgorithms []string       `yaml:"reject_algorithms"`
+	APIKeys          *APIKeyConfig  `yaml:"api_keys"`
+}
+
+// APIKeyConfig holds API key authentication settings.
+type APIKeyConfig struct {
+	Header     string         `yaml:"header"`      // default: X-API-Key
+	QueryParam string         `yaml:"query_param"` // optional: also accept ?<param>=
+	Keys       []StaticAPIKey `yaml:"keys"`        // static key list
+	// DB-backed alternative (used when Keys is empty)
+	Entity    string `yaml:"entity"`     // entity name in registry
+	KeyField  string `yaml:"key_field"`  // column holding the key value, default: token
+	RoleField string `yaml:"role_field"` // column holding the role, default: role
+}
+
+// StaticAPIKey is a single hard-coded API key entry.
+type StaticAPIKey struct {
+	Key  string `yaml:"key"`
+	Role string `yaml:"role"`
 }
 
 // PolicyConfig holds RBAC policy engine settings.
@@ -304,9 +324,12 @@ type GetConfig struct {
 
 // CreateConfig describes create endpoint configuration.
 type CreateConfig struct {
-	Auth        *AuthRequirement `yaml:"auth"`
-	BeforeHooks []string         `yaml:"before_hooks"`
-	AfterHooks  []string         `yaml:"after_hooks"`
+	Auth           *AuthRequirement `yaml:"auth"`
+	BeforeHooks    []string         `yaml:"before_hooks"`
+	AfterHooks     []string         `yaml:"after_hooks"`
+	Bulk           bool             `yaml:"bulk"`            // accept array body
+	BulkMax        int              `yaml:"bulk_max"`        // default: 500
+	BulkErrorMode  string           `yaml:"bulk_error_mode"` // abort | partial (default: abort)
 }
 
 // UpdateConfig describes update endpoint configuration.
@@ -387,6 +410,7 @@ type AuthEndpointDef struct {
 	Register   *RegisterDef    `yaml:"register"`
 	Login      *LoginDef       `yaml:"login"`
 	Me         *MeDef          `yaml:"me"`
+	Refresh    *RefreshDef     `yaml:"refresh"`
 	OAuth2     *OAuth2Def      `yaml:"oauth2"`
 }
 
@@ -412,9 +436,59 @@ type MeDef struct {
 	Enabled bool `yaml:"enabled"`
 }
 
+// RefreshDef configures the POST /auth/refresh endpoint.
+type RefreshDef struct {
+	Enabled bool   `yaml:"enabled"`
+	Expiry  string `yaml:"expiry"` // refresh token TTL, e.g. "30d" (default: 30d)
+	Store   string `yaml:"store"`  // cookie | body (default: cookie)
+}
+
 // OAuth2Def holds OAuth2 provider configurations.
 type OAuth2Def struct {
 	Providers []OAuth2ProviderDef `yaml:"providers"`
+}
+
+// EmailFileConfig represents a "kind: email" YAML file.
+type EmailFileConfig struct {
+	Version  string      `yaml:"version"`
+	Kind     string      `yaml:"kind"`
+	Emails   []EmailDef  `yaml:"emails"`
+	FilePath string      `yaml:"-"`
+}
+
+// EmailDef defines a single email trigger.
+type EmailDef struct {
+	Name    string `yaml:"name"`
+	Entity  string `yaml:"entity"`
+	Trigger string `yaml:"trigger"` // after_create | after_update | after_delete
+	// Condition is an optional CEL-lite expression; if set, email only fires when it evaluates true.
+	// Supported bindings: record.<field>
+	Condition string `yaml:"condition"`
+	To        string `yaml:"to"`      // may contain {{record.field}}
+	Subject   string `yaml:"subject"` // may contain {{record.field}} and ${ENV_VAR}
+	Body      string `yaml:"body"`    // HTML; may contain {{record.field}} and ${ENV_VAR}
+}
+
+// WebhookFileConfig represents a "kind: webhooks" YAML file.
+type WebhookFileConfig struct {
+	Version  string       `yaml:"version"`
+	Kind     string       `yaml:"kind"`
+	Webhooks []WebhookDef `yaml:"webhooks"`
+	FilePath string       `yaml:"-"`
+}
+
+// WebhookDef defines a single outbound webhook trigger.
+type WebhookDef struct {
+	Name      string            `yaml:"name"`
+	Entity    string            `yaml:"entity"`
+	Trigger   string            `yaml:"trigger"` // after_create | after_update | after_delete
+	Condition string            `yaml:"condition"`
+	URL       string            `yaml:"url"`
+	Method    string            `yaml:"method"` // default: POST
+	Headers   map[string]string `yaml:"headers"`
+	Payload   string            `yaml:"payload"` // JSON template with {{record.field}}
+	Timeout   string            `yaml:"timeout"` // default: 5s
+	Retry     *RetryConfig      `yaml:"retry"`
 }
 
 // SeedFileConfig represents a "kind: seed" YAML file.

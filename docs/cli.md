@@ -96,7 +96,38 @@ INF shutting down signal=interrupt
 
 The server waits up to `server.shutdown_timeout` for in-flight requests to complete before exiting.
 
+On startup, seed files (`kind: seed`) are applied automatically before routes are registered.
+
 **Plugins:** When you need plugins, use yaypi as a library in your own `main.go` instead of this command. See [Plugins](plugins.md) for details.
+
+---
+
+### `yaypi seed`
+
+Run seed files manually (outside of server startup). Useful for populating a fresh database or re-seeding in CI.
+
+```bash
+yaypi seed
+yaypi seed --config path/to/yaypi.yaml
+```
+
+Seeds are **idempotent** — rows are only inserted if a row with the matching `key_field` value does not already exist. Running this multiple times is safe.
+
+**Output:**
+```
+INF seed applied entity=Role key=admin
+INF seed skipped (already exists) entity=Role key=editor
+INF seed complete
+```
+
+Seed files must be included via the `include:` globs in `yaypi.yaml`:
+
+```yaml
+include:
+  - seeds/**/*.yaml
+```
+
+See the seed YAML reference in [`.ai/config-reference.md`](../.ai/config-reference.md) for file format.
 
 ---
 
@@ -203,12 +234,13 @@ ERR checksum mismatch for migration "20240315120000_create_users"
 
 ```yaml
 # Example GitHub Actions step
-- name: Migrate
+- name: Migrate and verify
   run: |
     yaypi validate
     yaypi migrate generate --name ci_$(date +%Y%m%d)
     yaypi migrate up
     yaypi migrate verify
+    yaypi seed
 ```
 
 In production, always run `verify` after deploying to confirm migration files have not been modified.

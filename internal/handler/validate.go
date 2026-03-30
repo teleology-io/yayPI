@@ -47,7 +47,7 @@ func validateFields(entity *schema.Entity, data map[string]interface{}, isUpdate
 
 		if val == nil {
 			if v.Required {
-				errs[f.Name] = message(v, fmt.Sprintf("%s is required"))
+				errs[f.Name] = message(v, fmt.Sprintf("%s is required", f.Name))
 			}
 			continue
 		}

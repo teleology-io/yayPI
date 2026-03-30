@@ -1,24 +1,66 @@
 # Authorization
 
-yayPi uses two independent security layers: **JWT** for identity and **Casbin RBAC** for permissions.
+yayPi uses three independent security layers: **API keys** for service authentication, **JWT** for user identity, and **Casbin RBAC** for permissions. ABAC rules provide a fourth, optional layer for fine-grained attribute-based control.
 
 > **Need a `/login` or `/register` endpoint?** See [Auth Endpoints](auth-endpoints.md) — yayPi can generate these from a `kind: auth` YAML file.
 
-## Two-layer model
+## Security layers overview
 
 ```
 Request
   ↓
-JWT middleware          — "Who are you?"
-  validates token, extracts role
+API key middleware (optional)
+  checks X-API-Key header → sets Subject if valid
   ↓
-Casbin RBAC middleware  — "Are you allowed to do this?"
+JWT middleware
+  validates Bearer token → sets Subject if valid (skipped if API key already set)
+  ↓
+Casbin RBAC middleware
   Enforce(role, EntityName, action)
   ↓
 Handler
+  → row_access (SQL WHERE filter)
+  → write_roles (field stripping on write)
+  → read_roles (field stripping on response)
 ```
 
-Both layers must pass. They are independent — JWT doesn't know about roles, and Casbin doesn't know about tokens.
+## API key authentication
+
+API keys provide an alternative to JWTs for service-to-service calls, scripts, or integrations.
+
+Configure in `yaypi.yaml`:
+
+```yaml
+auth:
+  api_keys:
+    header: X-API-Key           # default header name
+    query_param: api_key        # also accept ?api_key= (optional)
+    keys:
+      - key: ${ADMIN_API_KEY}
+        role: admin
+      - key: ${SERVICE_API_KEY}
+        role: service
+```
+
+Or use DB-backed keys (looked up per request):
+
+```yaml
+auth:
+  api_keys:
+    entity: ApiKey              # entity holding key records
+    key_field: token            # column with the key value (default: token)
+    role_field: role            # column with the role (default: role)
+```
+
+### OR-logic with JWT
+
+API keys and JWTs are **or-logic** — a request authenticated by either is considered authenticated. If an `X-API-Key` header is present and valid, JWT is skipped entirely. If the key is present but invalid, the request is rejected with **401** even if a JWT is also present.
+
+### Security notes
+
+- API keys grant a static role. Choose roles with the minimum required permissions.
+- DB-backed keys support soft-delete for revocation without data loss.
+- Never log or expose API key values. Use `${ENV_VAR}` for static keys.
 
 ## Layer 1: JWT
 
@@ -63,11 +105,11 @@ auth:
 
 The `none` algorithm is **always rejected**, even if not listed in `reject_algorithms`, as a belt-and-suspenders defense against algorithm confusion attacks.
 
-### yayPi does not issue tokens
+### yayPi can issue tokens
 
-yayPi validates tokens but does not have a `/login` endpoint. Your auth service (or a plugin) is responsible for issuing JWTs.
+Use a `kind: auth` file to add `/register` and `/login` endpoints — yayPi will issue JWTs directly. See [Auth Endpoints](auth-endpoints.md).
 
-For testing, use [jwt.io](https://jwt.io):
+For testing without auth endpoints, use [jwt.io](https://jwt.io):
 1. Select **HS256** algorithm
 2. Set the payload with required claims
 3. Enter your `JWT_SECRET` as the "your-256-bit-secret" value
@@ -95,10 +137,6 @@ e = some(where (p.eft == allow))
 [matchers]
 m = g(r.sub, p.sub) && r.obj == p.obj && r.act == p.act
 ```
-
-- `r = sub, obj, act` — a request has a subject (role), object (entity), and action
-- `g = _, _` — role inheritance graph
-- The matcher checks that the subject's role graph includes a role that has the required `(obj, act)` permission
 
 Place this file at the path configured in `yaypi.yaml`'s `policy.model`.
 
@@ -134,7 +172,7 @@ roles:
 
 | Field | Description |
 |---|---|
-| `name` | Role name — must match the `role` claim in JWTs |
+| `name` | Role name — must match the `role` claim in JWTs and the `role` value in API keys |
 | `inherits` | List of roles whose permissions are also granted (additive, transitive) |
 | `permissions[].resource` | Entity name (must match `entity.name` exactly) |
 | `permissions[].actions` | List of: `list`, `get`, `create`, `update`, `delete` |
@@ -158,7 +196,7 @@ yayPi maps HTTP methods to Casbin actions:
 | `PATCH /entity/{id}` | `update` |
 | `DELETE /entity/{id}` | `delete` |
 
-The enforcement call is: `Enforce(jwt.role, EntityName, action)`.
+The enforcement call is: `Enforce(subject.role, EntityName, action)`.
 
 If the role does not have permission, the request returns 403.
 
@@ -188,8 +226,8 @@ create:
 
 | Attribute | Description |
 |---|---|
-| `subject.id` | JWT `sub` claim — user ID |
-| `subject.role` | JWT `role` claim |
+| `subject.id` | JWT `sub` claim or API key subject ID |
+| `subject.role` | JWT `role` claim or API key role |
 | `subject.email` | JWT `email` claim |
 
 **Supported operators:**
@@ -205,7 +243,7 @@ create:
 | `ends_with` | `subject.email ends_with "@company.com"` |
 | `*` | always true (catch-all) |
 
-`auth.roles` is an allowed shorthand that is now fully enforced (equivalent to `subject.role in [...]`). Adding both `roles:` and `conditions:` is valid — both are checked.
+`auth.roles` is a shorthand that is equivalent to `subject.role in [...]`. Adding both `roles:` and `conditions:` is valid — both are checked.
 
 ---
 
@@ -232,9 +270,9 @@ list:
 
 | Placeholder | Resolved to |
 |---|---|
-| `:subject.id` | JWT `sub` value |
-| `:subject.role` | JWT `role` value |
-| `:subject.email` | JWT `email` value |
+| `:subject.id` | JWT `sub` or API key subject ID |
+| `:subject.role` | JWT `role` or API key role |
+| `:subject.email` | JWT `email` |
 
 `row_access` is supported on `list`, `get`, `update`, and `delete` operations. On `get`/`update`/`delete`, a non-matching row is returned as **404** (indistinguishable from "not found").
 
@@ -270,17 +308,18 @@ Omitting `write_roles` → field is writable by everyone.
 For every request:
 
 ```
-1. JWT validation           (middleware)
-2. Casbin RBAC              (middleware)
-3. auth.roles check         (middleware)  ← now enforced
-4. auth.conditions check    (middleware)
-5. Handler runs
-6. row_access filter        (injected into SQL WHERE)
-7. write_roles stripping    (on create/update, before DB call)
-8. read_roles masking       (on all responses, after DB call)
+1. API key check            (middleware — sets Subject if key valid)
+2. JWT validation           (middleware — sets Subject if token valid)
+3. Casbin RBAC              (middleware)
+4. auth.roles check         (middleware)
+5. auth.conditions check    (middleware)
+6. Handler runs
+7. row_access filter        (injected into SQL WHERE)
+8. write_roles stripping    (on create/update, before DB call)
+9. read_roles masking       (on all responses, after DB call)
 ```
 
-Each layer is independent. You can use one, two, or all three sub-layers.
+Each layer is independent. You can use one, two, or all layers.
 
 ---
 
@@ -291,7 +330,7 @@ Each layer is independent. You can use one, two, or all three sub-layers.
 ```yaml
 get:
   auth:
-    require: false   # no JWT check; Casbin not enforced
+    require: false   # no JWT or API key check; Casbin not enforced
 ```
 
 ### Fully private (any authenticated user)
@@ -299,10 +338,10 @@ get:
 ```yaml
 create:
   auth:
-    require: true    # JWT required; no roles restriction
+    require: true    # JWT or API key required; no roles restriction
 ```
 
-Any valid JWT passes — Casbin still runs, so ensure the role has the permission or remove the roles list.
+Any valid JWT or API key passes — Casbin still runs, so ensure the role has the permission.
 
 ### Public read / authenticated write
 

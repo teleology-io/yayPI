@@ -145,6 +145,22 @@ func loadInclude(cfg *RootConfig, path string) error {
 		sf.FilePath = path
 		cfg.SeedFiles = append(cfg.SeedFiles, &sf)
 
+	case "email":
+		var ef EmailFileConfig
+		if err := yaml.Unmarshal(raw, &ef); err != nil {
+			return fmt.Errorf("parsing email file %s: %w", path, err)
+		}
+		ef.FilePath = path
+		cfg.EmailFiles = append(cfg.EmailFiles, &ef)
+
+	case "webhooks", "webhook":
+		var wf WebhookFileConfig
+		if err := yaml.Unmarshal(raw, &wf); err != nil {
+			return fmt.Errorf("parsing webhook file %s: %w", path, err)
+		}
+		wf.FilePath = path
+		cfg.WebhookFiles = append(cfg.WebhookFiles, &wf)
+
 	case "policy":
 		// Policies are handled by the policy package; skip here.
 
@@ -255,4 +271,22 @@ func (cfg *RootConfig) AllSeedDefs() []SeedDef {
 		seeds = append(seeds, sf.Seeds...)
 	}
 	return seeds
+}
+
+// AllEmailDefs returns a flat list of all email definitions from all loaded email files.
+func (cfg *RootConfig) AllEmailDefs() []EmailDef {
+	var emails []EmailDef
+	for _, ef := range cfg.EmailFiles {
+		emails = append(emails, ef.Emails...)
+	}
+	return emails
+}
+
+// AllWebhookDefs returns a flat list of all webhook definitions from all loaded webhook files.
+func (cfg *RootConfig) AllWebhookDefs() []WebhookDef {
+	var webhooks []WebhookDef
+	for _, wf := range cfg.WebhookFiles {
+		webhooks = append(webhooks, wf.Webhooks...)
+	}
+	return webhooks
 }

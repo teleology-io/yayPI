@@ -77,7 +77,7 @@ Only users with the `admin` role can access this endpoint at all.
 
 ## 3. Any authenticated user (no role restriction)
 
-Any valid JWT is accepted. The role in the token is not checked by the endpoint (Casbin still runs).
+Any valid JWT or API key is accepted. The role in the token is not checked by the endpoint.
 
 ```yaml
 create:
@@ -113,9 +113,306 @@ Soft-deleted posts are excluded from `GET /posts`, `GET /posts/{id}`, and all up
 
 ---
 
-## 5. Filtering related records via query param
+## 5. Field validation
 
-Instead of nested routes (`/posts/{id}/comments`), use a flat path with a filter parameter. This works with the existing `allow_filter_by` mechanism.
+```yaml
+entity:
+  name: Product
+  fields:
+    - name: name
+      type: string
+      validate:
+        required: true
+        min_length: 2
+        max_length: 100
+
+    - name: sku
+      type: string
+      validate:
+        required: true
+        pattern: "^[A-Z0-9-]+$"
+        message: "SKU must be uppercase letters, numbers, and hyphens only"
+
+    - name: price
+      type: decimal
+      validate:
+        min: 0.01
+        max: 99999.99
+
+    - name: website
+      type: string
+      nullable: true
+      validate:
+        format: url
+        message: "must be a valid https:// URL"
+```
+
+Validation errors return 422 with a field-keyed map:
+```json
+{ "errors": { "sku": "SKU must be uppercase letters, numbers, and hyphens only" } }
+```
+
+---
+
+## 6. Immutable fields
+
+Fields you want to set once and never change:
+
+```yaml
+entity:
+  name: Order
+  fields:
+    - name: order_number
+      type: string
+      immutable: true        # silently ignored on PATCH
+
+    - name: created_by
+      type: uuid
+      immutable: true
+```
+
+---
+
+## 7. Per-endpoint rate limiting
+
+Protect sensitive endpoints like registration and login from abuse:
+
+```yaml
+- path: /auth/register
+  entity: User
+  crud: [create]
+  rate_limit:
+    requests_per_minute: 5
+    burst: 2
+    key_by: ip
+
+- path: /auth/login
+  entity: User
+  crud: [create]
+  rate_limit:
+    requests_per_minute: 10
+    burst: 3
+    key_by: ip
+```
+
+---
+
+## 8. Offset pagination with total count
+
+Good for admin dashboards that need "page N of M":
+
+```yaml
+list:
+  pagination:
+    style: offset
+    default_limit: 25
+    max_limit: 100
+    include_total: true   # adds "total" to meta (extra COUNT(*) query)
+```
+
+Response:
+```json
+{
+  "data": [...],
+  "meta": { "count": 25, "limit": 25, "offset": 0, "page": 1, "total": 312 }
+}
+```
+
+Navigate: `GET /posts?limit=25&offset=25` for page 2.
+
+---
+
+## 9. Bulk create (all-or-nothing)
+
+```yaml
+- path: /products/import
+  entity: Product
+  crud: [create]
+  create:
+    bulk: true
+    bulk_max: 500
+    bulk_error_mode: abort    # stop on first error
+    auth:
+      require: true
+      roles: [admin]
+```
+
+POST body: `[{"name":"A","price":9.99}, {"name":"B","price":14.99}]`
+
+---
+
+## 10. Bulk create (partial success)
+
+Good for import flows where you want to commit valid rows and report failures:
+
+```yaml
+create:
+  bulk: true
+  bulk_max: 1000
+  bulk_error_mode: partial  # continue; return 207 Multi-Status
+```
+
+Response:
+```json
+{
+  "results": [
+    { "index": 0, "data": { "id": "...", "name": "A" } },
+    { "index": 1, "error": "price: must be greater than 0.01" }
+  ]
+}
+```
+
+---
+
+## 11. Token refresh
+
+```yaml
+# auth.yaml
+auth:
+  base_path: /auth
+  user_entity: User
+  login:
+    enabled: true
+    credential_field: email
+    password_field: password
+    hash_field: password_hash
+  refresh:
+    enabled: true
+    expiry: 30d       # refresh token TTL
+    store: cookie     # HttpOnly cookie (best for web apps)
+```
+
+For native/mobile apps, use `store: body`:
+```yaml
+  refresh:
+    enabled: true
+    expiry: 90d
+    store: body
+```
+
+---
+
+## 12. API key authentication (static)
+
+```yaml
+# yaypi.yaml
+auth:
+  secret: ${JWT_SECRET}
+  api_keys:
+    header: X-API-Key
+    keys:
+      - key: ${ADMIN_API_KEY}
+        role: admin
+      - key: ${CI_API_KEY}
+        role: service
+```
+
+API keys and JWTs are OR-logic — either authenticates the request.
+
+---
+
+## 13. API key authentication (DB-backed, revocable)
+
+```yaml
+# yaypi.yaml
+auth:
+  api_keys:
+    entity: ApiKey
+    key_field: token
+    role_field: role
+
+# Entity
+entity:
+  name: ApiKey
+  soft_delete: true           # soft-delete to revoke without data loss
+  fields:
+    - name: token
+      type: string
+      length: 64
+      unique: true
+    - name: role
+      type: string
+    - name: description
+      type: string
+      nullable: true
+```
+
+---
+
+## 14. Email notification on signup
+
+Requires env: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`.
+
+```yaml
+# emails/welcome.yaml
+version: "1"
+kind: email
+emails:
+  - entity: User
+    trigger: after_create
+    to: "{{record.email}}"
+    subject: "Welcome to our platform!"
+    body: |
+      Hi {{record.name}},
+
+      Thanks for signing up. Your account is ready.
+```
+
+Add to `include:` in `yaypi.yaml`:
+```yaml
+include:
+  - emails/**/*.yaml
+```
+
+---
+
+## 15. Webhook on order creation
+
+```yaml
+# webhooks/fulfillment.yaml
+version: "1"
+kind: webhooks
+webhooks:
+  - entity: Order
+    trigger: after_create
+    url: "https://fulfillment.example.com/hooks"
+    method: POST
+    headers:
+      Authorization: "Bearer ${FULFILLMENT_SECRET}"
+    payload: |
+      {"order_id": "{{record.id}}", "total": "{{record.total}}"}
+    retry:
+      max_attempts: 3
+      backoff: 5s
+```
+
+---
+
+## 16. Seed data for lookup tables
+
+```yaml
+# seeds/roles.yaml
+version: "1"
+kind: seed
+seeds:
+  - entity: Role
+    key_field: name
+    data:
+      - name: admin
+        description: "Full administrative access"
+      - name: editor
+        description: "Can create and edit content"
+      - name: member
+        description: "Standard member access"
+```
+
+Rows are skipped if they already exist — safe to run repeatedly.
+
+---
+
+## 17. Filtering related records via query param
+
+Instead of nested routes (`/posts/{id}/comments`), use a flat path with a filter parameter.
 
 ```yaml
 - path: /comments
@@ -130,21 +427,13 @@ Instead of nested routes (`/posts/{id}/comments`), use a flat path with a filter
 
 **Usage:**
 ```bash
-# Comments on a post
 GET /comments?post_id=<uuid>
-
-# Replies to a comment
-GET /comments?parent_id=<uuid>
-
-# All comments by a user
-GET /comments?author_id=<uuid>
+GET /comments?parent_id=<uuid>    # threaded replies
 ```
 
 ---
 
-## 6. Protecting a sensitive field
-
-Use `serialization` to prevent a field from appearing in API responses or logs.
+## 18. Protecting a sensitive field
 
 ```yaml
 - name: password_hash
@@ -154,13 +443,9 @@ Use `serialization` to prevent a field from appearing in API responses or logs.
     omit_log: true        # never in structured log output
 ```
 
-The field is still stored in the database and can be read by plugins (e.g. for password verification). It just never leaves the server boundary.
-
 ---
 
-## 7. Many-to-many with junction table
-
-Define three entities: the two main entities and a junction entity.
+## 19. Many-to-many with junction table
 
 **`post_tag.yaml` — junction entity:**
 ```yaml
@@ -210,9 +495,7 @@ list:
 
 ---
 
-## 8. Self-referential hierarchy (threaded comments)
-
-An entity can have a FK to itself for parent-child trees.
+## 20. Self-referential hierarchy (threaded comments)
 
 ```yaml
 entity:
@@ -238,52 +521,12 @@ entity:
       foreign_key: parent_id
 ```
 
-Fetch replies:
-```bash
-GET /comments?parent_id=<uuid>
-```
-
 ---
 
-## 9. Limiting pagination per audience
-
-Tighter limits for public endpoints, higher for authenticated admin views.
+## 21. Multiple databases
 
 ```yaml
-# Public endpoint — low limits
-- path: /posts
-  entity: Post
-  crud: [list]
-  list:
-    pagination:
-      style: cursor
-      default_limit: 10
-      max_limit: 50
-    auth:
-      require: false
-
-# Admin endpoint — higher limits
-- path: /admin/posts
-  entity: Post
-  crud: [list]
-  list:
-    pagination:
-      style: cursor
-      default_limit: 100
-      max_limit: 1000
-    auth:
-      require: true
-      roles: [admin]
-```
-
----
-
-## 10. Multiple databases (entity-level routing)
-
-Some entities live in a secondary database. Declare both databases and set `database:` on each entity that doesn't use the default.
-
-**`yaypi.yaml`:**
-```yaml
+# yaypi.yaml
 databases:
   - name: primary
     dsn: ${DATABASE_URL}
@@ -294,25 +537,20 @@ databases:
     read_only: true
 ```
 
-**Entity in the analytics database:**
+Entity opts in:
 ```yaml
 entity:
   name: PageView
-  table: page_views
-  database: analytics   # routes queries to the analytics pool
+  database: analytics
 ```
 
 ---
 
-## 11. Scheduled data maintenance (SQL cron job)
+## 22. Scheduled data maintenance
 
 ```yaml
-version: "1"
-kind: jobs
-
 jobs:
   - name: purge-soft-deleted-posts
-    description: Remove posts soft-deleted more than 90 days ago
     schedule: "@daily"
     handler: sql
     config:
@@ -325,52 +563,8 @@ jobs:
 
 ---
 
-## 12. Enum field with default
+## 23. Row ownership — users can only modify their own records
 
-The `default:` value for string literals needs double quoting — the outer quotes are YAML, the inner single quotes are SQL.
-
-```yaml
-- name: status
-  type: enum
-  values: [draft, published, archived]
-  default: "'draft'"   # SQL: DEFAULT 'draft'
-```
-
-If you write `default: "draft"` (no inner quotes), PostgreSQL treats `draft` as a column reference and the migration fails.
-
----
-
-## 13. JSONB metadata field
-
-Store flexible, schema-less data alongside structured fields.
-
-```yaml
-- name: metadata
-  type: jsonb
-  nullable: true
-```
-
-Clients can set and read arbitrary JSON objects:
-
-```json
-{
-  "metadata": {
-    "source": "import",
-    "tags": ["featured"],
-    "reading_time_minutes": 5
-  }
-}
-```
-
-Note: You cannot filter or sort by JSONB sub-fields via the standard `allow_filter_by` mechanism. For querying inside JSONB, write a custom SQL job or use a plugin.
-
----
-
-## 15. Row ownership — users can only modify their own records
-
-Authors can update/delete their own posts; admins can touch any post.
-
-**`endpoints/posts.yaml`:**
 ```yaml
 - path: /post/{id}
   entity: Post
@@ -399,46 +593,30 @@ Authors can update/delete their own posts; admins can touch any post.
         filter: "author_id = :subject.id"
 ```
 
-When a non-admin tries to update/delete a post they don't own, the row filter makes the SQL match zero rows — the handler returns **404** (indistinguishable from a missing record, which avoids leaking existence information).
+Non-owners get **404** (not 403), which avoids leaking existence information.
 
 ---
 
-## 16. Role-based row visibility (row-level security for lists)
+## 24. Role-based row visibility for lists
 
-Admins see all posts (including drafts). Editors see their own drafts plus all published. Everyone else sees published only.
+Admins see all; editors see own + published; everyone else sees published only.
 
 ```yaml
 list:
-  allow_filter_by: [status, author_id]
-  allow_sort_by: [published_at, title]
   auth:
-    require: false   # public endpoint — sub may be nil
+    require: false   # public endpoint — subject may be nil
   row_access:
     - when: "subject.role == \"admin\""
-      filter: ""                                         # all rows
+      filter: ""
     - when: "subject.role == \"editor\""
       filter: "status = 'published' OR author_id = :subject.id"
     - when: "*"
-      filter: "status = 'published'"                     # guests + members
+      filter: "status = 'published'"
 ```
-
-The `*` catch-all is critical here: it handles unauthenticated callers (sub is nil — `subject.id` resolves to empty string, which won't match any valid UUID). Without a catch-all, unauthenticated requests would return **403**.
 
 ---
 
-## 17. Attribute condition — restrict by email domain
-
-Only users from `@acme.com` can create records.
-
-```yaml
-create:
-  auth:
-    require: true
-    conditions:
-      - subject.email ends_with "@acme.com"
-```
-
-Combined with roles:
+## 25. Attribute condition — restrict by email domain
 
 ```yaml
 create:
@@ -450,39 +628,32 @@ create:
       - subject.role != "suspended"
 ```
 
-Both `roles` and all `conditions` must pass — they are ANDed together.
-
 ---
 
-## 18. Field-level access — admin-only fields
+## 26. Field-level access — admin-only fields
 
-Some fields should only be visible to or writable by specific roles.
-
-**Entity:**
 ```yaml
 fields:
   - name: internal_notes
     type: text
     nullable: true
     access:
-      read_roles: [admin]       # members see null/absent for this field
-      write_roles: [admin]      # members' values silently ignored on create/update
+      read_roles: [admin]
+      write_roles: [admin]
 
   - name: flagged
     type: boolean
     default: "false"
     access:
       read_roles: [admin, editor]
-      write_roles: [admin]      # only admins can flag a record
+      write_roles: [admin]
 ```
-
-There is no error or warning when a restricted field is omitted from a response or dropped from a write — the behavior is transparent to the caller.
 
 ---
 
-## 19. Self-service profile update (users can only edit their own profile)
+## 27. Self-service profile update
 
-Users can edit their own profile fields. Admins can edit any field on any user.
+Users can edit their own profile; admins can edit any user. Only admins can change `role`.
 
 **Entity:**
 ```yaml
@@ -491,7 +662,7 @@ fields:
     type: enum
     values: [admin, editor, member]
     access:
-      write_roles: [admin]       # only admins can change a user's role
+      write_roles: [admin]
 ```
 
 **Endpoint:**
@@ -502,21 +673,41 @@ update:
     require: true
   row_access:
     - when: "subject.role == \"admin\""
-      filter: ""                          # admins: any user
+      filter: ""
     - when: "*"
-      filter: "id = :subject.id"          # everyone else: only themselves
+      filter: "id = :subject.id"
 ```
-
-With this config:
-- A member can `PATCH /user/{their-own-id}` and change `display_name`, `bio`, `avatar_url`. Their `role` value is silently dropped because `write_roles: [admin]`.
-- A member calling `PATCH /user/{someone-elses-id}` gets **404**.
-- An admin can update any field on any user.
 
 ---
 
-## 14. Composite primary key (junction table, no `id` column)
+## 28. Health and readiness probes (Kubernetes)
 
-When a table uses a composite primary key, mark both fields with `primary_key: true`. Do not add an `id` field.
+```yaml
+# yaypi.yaml
+server:
+  health:
+    enabled: true
+    path: /health         # liveness probe — always 200
+    readiness_path: /ready # readiness probe — 503 if DB unreachable
+```
+
+Kubernetes pod spec:
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 8080
+readinessProbe:
+  httpGet:
+    path: /ready
+    port: 8080
+```
+
+Both endpoints are mounted outside the `base_url` prefix.
+
+---
+
+## 29. Composite primary key (junction table)
 
 ```yaml
 entity:
@@ -533,4 +724,17 @@ entity:
       primary_key: true
 ```
 
-The migration engine includes both in the `PRIMARY KEY (post_id, tag_id)` constraint.
+---
+
+## 30. JSONB metadata field
+
+```yaml
+- name: metadata
+  type: jsonb
+  nullable: true
+```
+
+Clients can set and read arbitrary JSON:
+```json
+{ "metadata": { "source": "import", "tags": ["featured"] } }
+```

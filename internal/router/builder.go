@@ -21,11 +21,14 @@ type Config struct {
 	AuthSecret     []byte
 	AuthAlg        string
 	Enforcer       *policy.Engine
-	AuthHandler    *auth.Handler    // optional; mounts register/login/me/oauth2 routes
-	OpenAPIHandler *openapi.Handler // optional; serves /openapi/{name}.json
-	HealthHandler  *health.Handler  // optional; mounts /health and /ready
-	AllowedOrigins []string         // CORS: permitted origins; ["*"] allows all
+	AuthHandler    *auth.Handler          // optional; mounts register/login/me/oauth2 routes
+	OpenAPIHandler *openapi.Handler       // optional; serves /openapi/{name}.json
+	HealthHandler  *health.Handler        // optional; mounts /health and /ready
+	AllowedOrigins []string               // CORS: permitted origins; ["*"] allows all
 	RateLimit      *middleware.RateLimiter // optional; global rate limiter
+	APIKeyHeader   string                 // header name for API key (default: X-API-Key)
+	APIKeyParam    string                 // optional query param for API key
+	APIKeyLookup   middleware.APIKeyLookup // optional; enables API key auth
 }
 
 // Build constructs a chi.Router from the schema registry and config.
@@ -214,6 +217,11 @@ func buildMiddlewareChain(
 	auth := resolveOpAuth(ep, op)
 
 	requireAuth := auth != nil && auth.Require
+
+	// API key auth middleware (runs before JWT so either can satisfy auth).
+	if cfg.APIKeyLookup != nil {
+		mws = append(mws, middleware.APIKeyAuth(cfg.APIKeyHeader, cfg.APIKeyParam, cfg.APIKeyLookup))
+	}
 
 	// JWT auth middleware
 	if cfg.AuthSecret != nil && cfg.AuthAlg != "" {

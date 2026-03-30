@@ -104,9 +104,12 @@ type GetOpts struct {
 
 // CreateOpts holds create endpoint options.
 type CreateOpts struct {
-	Auth        *Auth
-	BeforeHooks []string
-	AfterHooks  []string
+	Auth          *Auth
+	BeforeHooks   []string
+	AfterHooks    []string
+	Bulk          bool
+	BulkMax       int
+	BulkErrorMode string // abort | partial
 }
 
 // UpdateOpts holds update endpoint options.
@@ -299,10 +302,21 @@ func buildGetOpts(g *config.GetConfig) *GetOpts {
 }
 
 func buildCreateOpts(c *config.CreateConfig) *CreateOpts {
+	bulkMax := c.BulkMax
+	if bulkMax <= 0 {
+		bulkMax = 500
+	}
+	mode := c.BulkErrorMode
+	if mode == "" {
+		mode = "abort"
+	}
 	return &CreateOpts{
-		Auth:        buildAuth(c.Auth),
-		BeforeHooks: c.BeforeHooks,
-		AfterHooks:  c.AfterHooks,
+		Auth:          buildAuth(c.Auth),
+		BeforeHooks:   c.BeforeHooks,
+		AfterHooks:    c.AfterHooks,
+		Bulk:          c.Bulk,
+		BulkMax:       bulkMax,
+		BulkErrorMode: mode,
 	}
 }
 

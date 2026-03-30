@@ -27,6 +27,13 @@ func RequireAuth(secret []byte, algorithm string, requireAuth bool) func(http.Ha
 
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// If a prior middleware (e.g. APIKeyAuth) already authenticated this
+			// request, honour that and skip JWT processing.
+			if GetSubject(r) != nil {
+				next.ServeHTTP(w, r)
+				return
+			}
+
 			tokenStr := extractBearerToken(r)
 
 			if tokenStr == "" {

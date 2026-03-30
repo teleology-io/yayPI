@@ -67,6 +67,10 @@ entity:
       type: string
       length: 255
       nullable: false
+      validate:
+        required: true
+        min_length: 2
+        max_length: 255
 
     - name: description
       type: text
@@ -78,6 +82,9 @@ entity:
       scale: 2
       nullable: false
       default: "0.00"
+      validate:
+        min: 0
+        max: 99999.99
 
     - name: published
       type: boolean
@@ -85,7 +92,7 @@ entity:
       nullable: false
 ```
 
-See [Entities](entities.md) for all field types and options.
+Validation rules are enforced on every create and update request. See [Entities](entities.md) for all field types, validation options, and immutable fields.
 
 ## 4. Define an endpoint
 
@@ -134,7 +141,7 @@ endpoints:
         require: true
 ```
 
-See [Endpoints](endpoints.md) for all options.
+See [Endpoints](endpoints.md) for all options including bulk create, offset pagination, and per-endpoint rate limiting.
 
 ## 5. Validate your config
 
@@ -195,13 +202,23 @@ curl -X POST http://localhost:8080/api/v1/items \
 {"error": "authentication required"}
 ```
 
-**Create an item (authenticated → 201):**
+**Create an item with a validation error (→ 422):**
+```bash
+curl -X POST http://localhost:8080/api/v1/items \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"name": "X", "price": "-1"}'
+```
+```json
+{"errors": {"name": "must be at least 2 characters", "price": "must be between 0 and 99999.99"}}
+```
 
-yayPi does not issue tokens — you need to mint a JWT yourself. The token must contain `sub` (user ID), `role`, and `email` claims. The easiest way to test is [jwt.io](https://jwt.io):
+**Create a valid item (authenticated → 201):**
 
-1. Go to jwt.io
-2. Set algorithm to **HS256**
-3. Set payload:
+You need a JWT. Use [jwt.io](https://jwt.io):
+
+1. Set algorithm to **HS256**
+2. Set payload:
    ```json
    {
      "sub": "user-123",
@@ -210,8 +227,8 @@ yayPi does not issue tokens — you need to mint a JWT yourself. The token must 
      "exp": 9999999999
    }
    ```
-4. Set secret to match `JWT_SECRET`
-5. Copy the encoded token
+3. Set secret to match `JWT_SECRET`
+4. Copy the encoded token
 
 ```bash
 TOKEN=<paste token here>
@@ -232,8 +249,10 @@ curl http://localhost:8080/api/v1/items/<id>
 
 ## Next steps
 
+- Add login/register endpoints → [Auth Endpoints](auth-endpoints.md)
 - Add roles and access control → [Authorization](authorization.md)
 - Define relationships between entities → [Entities](entities.md)
+- Send emails or fire webhooks on events → [Plugins](plugins.md)
 - Schedule background jobs → [Jobs](jobs.md)
-- Write custom logic with plugins → [Plugins](plugins.md)
+- See all patterns → [Patterns Cookbook](patterns.md)
 - See the full community-blog example → [`examples/community-blog/`](../examples/community-blog/)

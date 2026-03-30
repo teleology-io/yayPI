@@ -34,6 +34,18 @@ server:
     - https://app.example.com
     - http://localhost:3000
 
+  # Health/readiness endpoints (for Kubernetes probes)
+  health:
+    enabled: true
+    path: /health          # liveness: always 200
+    readiness_path: /ready # readiness: 200 if DB reachable, 503 if not
+
+  # Global rate limiting (token bucket)
+  rate_limit:
+    requests_per_minute: 120
+    burst: 30
+    key_by: ip            # ip (default) | user (JWT sub claim)
+
 # ── Databases ─────────────────────────────────────────────────────────────────
 databases:
   - name: primary
@@ -58,6 +70,21 @@ auth:
   algorithm: HS256                # HS256, HS384, or HS512
   reject_algorithms: [none]       # always reject unsigned tokens
   expiry: 24h                     # informational only — yayPi validates `exp` claim
+
+  # Optional API key authentication (alongside JWT)
+  api_keys:
+    header: X-API-Key             # header to read the key from (default: X-API-Key)
+    query_param: api_key          # optional: also accept ?api_key= query param
+    # Static key list (use this OR entity below, not both):
+    keys:
+      - key: ${ADMIN_API_KEY}
+        role: admin
+      - key: ${SERVICE_API_KEY}
+        role: service
+    # DB-backed alternative:
+    entity: ApiKey                # entity name containing key records
+    key_field: token              # column holding the key value (default: token)
+    role_field: role              # column holding the role (default: role)
 
 # ── Authorization (RBAC) ──────────────────────────────────────────────────────
 policy:
@@ -88,7 +115,7 @@ auto_migrate: false
 # ── Plugins ───────────────────────────────────────────────────────────────────
 plugins:
   - name: hash-password
-    path: ./plugins/hashpassword   # path to compiled plugin binary (future)
+    path: ./plugins/hashpassword
     config:
       bcrypt_cost: 12
 
@@ -100,6 +127,9 @@ include:
   - endpoints/**/*.yaml
   - policies/**/*.yaml
   - jobs/**/*.yaml
+  - seeds/**/*.yaml       # kind: seed — idempotent startup data
+  - emails/**/*.yaml      # kind: email — SMTP notification hooks
+  - webhooks/**/*.yaml    # kind: webhooks — HTTP webhook hooks
 ```
 
 ## Minimal `yaypi.yaml`
@@ -150,6 +180,14 @@ include:
 | `allowed_origins` | list | `[]` | CORS allowed origins; `["*"]` allows all |
 | `tls.cert_file` | string | — | TLS certificate path |
 | `tls.key_file` | string | — | TLS private key path |
+| `health.enabled` | boolean | `false` | Mount liveness + readiness endpoints |
+| `health.path` | string | `/health` | Liveness path — always 200 |
+| `health.readiness_path` | string | `/ready` | Readiness path — 503 if DB unreachable |
+| `rate_limit.requests_per_minute` | integer | — | Token bucket fill rate |
+| `rate_limit.burst` | integer | equal to rpm | Burst capacity |
+| `rate_limit.key_by` | string | `ip` | `ip` or `user` (JWT sub) |
+
+Health endpoints are mounted **outside** the `base_url` prefix so they are always reachable.
 
 ### `databases[]`
 
@@ -157,7 +195,7 @@ include:
 |---|---|---|---|
 | `name` | string | — | Logical name referenced by entities |
 | `driver` | string | — | `postgres`/`postgresql`, `mysql`/`mariadb`, `sqlite`/`sqlite3` |
-| `dsn` | string | — | Connection string — Postgres: URL; MySQL: `user:pass@tcp(host)/db`; SQLite: file path or `:memory:` |
+| `dsn` | string | — | Connection string |
 | `max_open_conns` | integer | `0` (unlimited) | Max open connections in pool |
 | `max_idle_conns` | integer | `0` | Max idle connections |
 | `conn_max_lifetime` | duration | `0` (no limit) | Max connection lifetime |
@@ -175,6 +213,20 @@ include:
 | `reject_algorithms` | list | Always include `[none]` |
 | `expiry` | duration | Informational; `exp` claim is always validated |
 
+### `auth.api_keys`
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `header` | string | `X-API-Key` | Request header to read the key from |
+| `query_param` | string | — | Also accept the key from this query param |
+| `keys[].key` | string | — | Static key value (use env var) |
+| `keys[].role` | string | — | Role granted to this key |
+| `entity` | string | — | DB-backed: entity name holding key records |
+| `key_field` | string | `token` | DB-backed: column with the key value |
+| `role_field` | string | `role` | DB-backed: column with the role |
+
+API keys and JWTs are OR-logic: a request authenticated by either is considered authenticated. If a key is present but not found, the request is rejected (401) regardless of whether a JWT is also present.
+
 ### `policy`
 
 | Field | Type | Description |
@@ -190,7 +242,7 @@ include:
 |---|---|---|---|
 | `auto_migrate` | boolean | `false` | Apply schema diff on startup |
 | `plugins` | list | `[]` | Plugins to load (see [Plugins](plugins.md)) |
-| `include` | list | `[]` | Glob patterns for entity/endpoint/job/policy files |
+| `include` | list | `[]` | Glob patterns for all YAML kinds |
 | `spec` | list | `[]` | Named OpenAPI specs to generate (see [OpenAPI](openapi.md)) |
 
 ### `spec[]`

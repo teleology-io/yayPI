@@ -2,22 +2,119 @@
 
 Plugins let you add custom logic that runs during entity lifecycle events (before/after create, update, delete). When you need plugins, you use yaypi as a library inside your own `main.go` rather than the standalone `yaypi` binary.
 
-## When to use plugins
+> **For email and webhooks, you don't need a plugin.** yayPi has built-in email and webhook hooks driven by YAML files (`kind: email`, `kind: webhooks`). See the sections below for when to use each approach.
 
-- Hash passwords before saving a User
-- Send a welcome email after creating a User
-- Write an audit log entry after any create/update/delete
-- Validate business rules that can't be expressed in field constraints
+## When to use plugins vs. built-in hooks
 
-## SDK import path
+| Need | Solution |
+|---|---|
+| Send email when a record is created/updated/deleted | `kind: email` YAML file — no code needed |
+| Fire an HTTP webhook on lifecycle events | `kind: webhooks` YAML file — no code needed |
+| Hash passwords before saving | Custom plugin (or use the built-in auth `/register` endpoint) |
+| Write an audit log to a database table | Custom plugin |
+| Validate business rules that can't be expressed in field constraints | Custom plugin |
+| Complex data transformation before a write | Custom plugin |
+
+## Built-in email hooks (`kind: email`)
+
+Create a YAML file with `kind: email` to send transactional email on entity lifecycle events. yayPi reads SMTP configuration from environment variables.
+
+**Required env vars:** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`
+
+```yaml
+# emails/welcome.yaml
+version: "1"
+kind: email
+
+emails:
+  - entity: User
+    trigger: after_create
+    to: "{{record.email}}"
+    subject: "Welcome to our platform!"
+    body: |
+      Hi {{record.name}},
+
+      Thanks for signing up. Your account is ready.
+    html: |
+      <p>Hi {{record.name}},</p>
+      <p>Thanks for signing up. Your account is ready.</p>
+
+  - entity: Order
+    trigger: after_create
+    condition: "record.email != \"\""
+    to: "{{record.email}}"
+    subject: "Order confirmation #{{record.id}}"
+    body: "Your order has been received. Total: {{record.total}}"
+```
+
+**Template syntax:** `{{record.FIELD}}` where `FIELD` is any column name in the entity.
+
+**Condition syntax:** `record.FIELD != ""` or `record.FIELD == "value"` (simple equality/inequality only). Omit to always fire.
+
+**Triggers:** `before_create` | `after_create` | `before_update` | `after_update` | `before_delete` | `after_delete`
+
+Add the file to your `include:` globs:
+```yaml
+include:
+  - emails/**/*.yaml
+```
+
+Emails are sent in a goroutine (non-blocking) so they do not slow down the HTTP response.
+
+## Built-in webhook hooks (`kind: webhooks`)
+
+Create a YAML file with `kind: webhooks` to fire HTTP webhooks on entity lifecycle events.
+
+```yaml
+# webhooks/orders.yaml
+version: "1"
+kind: webhooks
+
+webhooks:
+  - entity: Order
+    trigger: after_create
+    url: "https://fulfillment.example.com/hooks/new-order"
+    method: POST
+    headers:
+      Authorization: "Bearer ${FULFILLMENT_SECRET}"
+      Content-Type: "application/json"
+    payload: |
+      {
+        "event": "order.created",
+        "order_id": "{{record.id}}",
+        "customer_id": "{{record.customer_id}}"
+      }
+    timeout: 10s
+    retry:
+      max_attempts: 3
+      backoff: 5s
+```
+
+**Template syntax:** same `{{record.FIELD}}` as email hooks.
+
+**SSRF protection:** webhook targets are blocked if they resolve to RFC-1918 (private), loopback, or link-local addresses.
+
+**Non-blocking:** webhooks fire in a goroutine; failures don't affect the HTTP response.
+
+Add the file to your `include:` globs:
+```yaml
+include:
+  - webhooks/**/*.yaml
+```
+
+## Custom plugins (code)
+
+When built-in hooks aren't enough, write a plugin in Go.
+
+### SDK import path
 
 ```go
 import "github.com/teleology-io/yayPI/pkg/sdk"
 ```
 
-## Interfaces
+### Interfaces
 
-### `Plugin`
+#### `Plugin`
 
 Every plugin must implement the base `Plugin` interface:
 
@@ -29,7 +126,7 @@ type Plugin interface {
 }
 ```
 
-### `EntityHookPlugin`
+#### `EntityHookPlugin`
 
 To handle entity lifecycle events, also implement `EntityHookPlugin`:
 
@@ -80,7 +177,7 @@ type Logger interface {
 }
 ```
 
-## Hook behavior
+### Hook behavior
 
 | Hook | Runs | Can modify data | Error effect |
 |---|---|---|---|
@@ -93,11 +190,11 @@ type Logger interface {
 
 **Before hooks** that return a non-nil error cancel the operation and return an HTTP error to the caller. Use this for validation and data transformation.
 
-**After hooks** that return a non-nil error are logged but do not affect the response. The database operation is not rolled back. Use this for side effects like emails or audit logs.
+**After hooks** that return a non-nil error are logged but do not affect the response. The database operation is not rolled back. Use this for side effects like audit logs.
 
 ## Project layout
 
-When you need plugins, your project has its own `go.mod` and a `main.go` that uses yaypi as a library. Everything else — entities, endpoints, `yaypi.yaml` — stays the same.
+When you need custom plugins, your project has its own `go.mod` and a `main.go` that uses yaypi as a library. Everything else — entities, endpoints, `yaypi.yaml` — stays the same.
 
 ```
 my-api/
@@ -107,6 +204,8 @@ my-api/
 ├── yaypi.yaml
 ├── entities/
 ├── endpoints/
+├── emails/              ← kind: email YAML files (no code needed)
+├── webhooks/            ← kind: webhooks YAML files (no code needed)
 └── plugins/
     └── hashpassword/
         └── plugin.go
@@ -233,6 +332,8 @@ entity:
 ```
 
 The hook names in YAML are informational labels. What matters for dispatch is which entity name you pass to `RegisterHook`.
+
+> Email and webhook hooks do **not** need to be listed here — they are auto-registered by yayPi based on their YAML files.
 
 ## Plugin config
 

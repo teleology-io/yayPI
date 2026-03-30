@@ -14,6 +14,9 @@ endpoints:
     crud: [list, create]   # operations to register on this path
     auth:                  # top-level auth applies to all operations
       require: true        # unless overridden per operation
+    rate_limit:            # optional per-endpoint rate limit
+      requests_per_minute: 30
+      burst: 10
 
     list:    {...}
     create:  {...}
@@ -73,32 +76,35 @@ This enables the common "public read / auth write" pattern in a single block:
 
 ## Response format
 
-**List:**
+**Cursor-paginated list:**
 ```json
 {
-  "data": [
-    {"id": "...", "name": "..."},
-    ...
-  ],
-  "meta": {
-    "count": 20,
-    "next_cursor": "eyJ..."
-  }
+  "data": [{"id": "...", "name": "..."}, ...],
+  "meta": { "count": 20, "next_cursor": "eyJ..." }
+}
+```
+
+**Offset-paginated list:**
+```json
+{
+  "data": [...],
+  "meta": { "count": 20, "limit": 20, "offset": 0, "page": 1, "total": 312 }
 }
 ```
 
 **Single item (get, create, update):**
 ```json
-{
-  "data": {"id": "...", "name": "..."}
-}
+{ "data": {"id": "...", "name": "..."} }
 ```
 
-**Error:**
+**Validation error (422):**
 ```json
-{
-  "error": "authentication required"
-}
+{ "errors": { "email": "must be a valid email address" } }
+```
+
+**Other error:**
+```json
+{ "error": "authentication required" }
 ```
 
 ## HTTP status codes
@@ -107,11 +113,28 @@ This enables the common "public read / auth write" pattern in a single block:
 |---|---|---|
 | `list` | 200 | |
 | `get` | 200 | 404 if not found |
-| `create` | 201 | |
-| `update` | 200 | 404 if not found |
+| `create` | 201 | 422 on validation failure |
+| `update` | 200 | 404 if not found; 422 on validation failure |
 | `delete` | 204 | No body |
+| `create` (bulk, partial) | 207 | Multi-Status with per-item results |
 
-Error codes: 400 (bad request / validation), 401 (unauthenticated), 403 (forbidden), 404 (not found), 500 (server error).
+Other error codes: 400 (bad request), 401 (unauthenticated), 403 (forbidden), 429 (rate limited), 500 (server error).
+
+## Rate limiting
+
+A token bucket rate limiter can be applied per-endpoint. It overrides the global `server.rate_limit` for requests to this path.
+
+```yaml
+- path: /auth/register
+  entity: User
+  crud: [create]
+  rate_limit:
+    requests_per_minute: 5   # fill rate
+    burst: 2                 # bucket capacity (allows short burst above the rate)
+    key_by: ip               # ip (default) | user (JWT sub)
+```
+
+Excess requests receive **429 Too Many Requests**.
 
 ## `list` options
 
@@ -121,9 +144,10 @@ list:
   allow_sort_by: [created_at, title]     # query params allowed as ORDER BY columns
   default_sort: created_at:desc          # default sort (format: column:asc or column:desc)
   pagination:
-    style: cursor                        # only "cursor" is supported
+    style: cursor                        # cursor (default) | offset
     default_limit: 20
     max_limit: 100
+    include_total: true                  # offset only: include total row count in meta
   include: [author, tags]               # relations to eager-load
   auth:
     require: false
@@ -139,9 +163,29 @@ Clients filter and sort by passing query parameters:
 ```
 GET /posts?status=published&sort=title:asc&limit=10
 GET /posts?cursor=eyJ...&limit=10
+GET /posts?limit=20&offset=40        # offset pagination
 ```
 
 Only columns listed in `allow_filter_by` and `allow_sort_by` are accepted — any other value returns 400. This prevents both SQL injection and unindexed queries.
+
+### Pagination styles
+
+**Cursor** (default) — HMAC-signed opaque cursor. Best for live feeds where rows may be inserted during pagination.
+
+**Offset** — traditional page/offset. Use when clients need to jump to arbitrary pages or display "page N of M". Enable total count (a separate `COUNT(*)` query) with `include_total: true`:
+
+```yaml
+pagination:
+  style: offset
+  default_limit: 25
+  max_limit: 100
+  include_total: true
+```
+
+Response:
+```json
+{ "meta": { "count": 25, "limit": 25, "offset": 0, "page": 1, "total": 312 } }
+```
 
 ## `get` options
 
@@ -166,9 +210,38 @@ create:
       - subject.email ends_with "@company.com"
   before_hooks: [validate-post]              # plugin hook names
   after_hooks: [notify-followers]
+  bulk: false               # true = accept a JSON array; false (default) = single object
+  bulk_max: 100             # max items per bulk request (default: 100)
+  bulk_error_mode: abort    # abort (default) | partial
 ```
 
-The request body is `application/json`. All entity fields can be set on create (there is no field whitelist for create — use `serialization` or `access.write_roles` if needed).
+### Single create
+
+The request body is `application/json` containing a single object. All entity fields can be set on create (use `serialization` or `access.write_roles` if needed).
+
+### Bulk create
+
+When `bulk: true`, `POST` accepts a JSON array:
+
+```json
+[
+  {"name": "Widget A", "price": 9.99},
+  {"name": "Widget B", "price": 14.99}
+]
+```
+
+**`bulk_error_mode: abort`** (default) — the first validation or DB error stops the entire batch. Returns 400/422. No rows are written.
+
+**`bulk_error_mode: partial`** — processing continues past errors. Returns **207 Multi-Status** with a per-item result array:
+
+```json
+{
+  "results": [
+    { "index": 0, "data": { "id": "...", "name": "Widget A" } },
+    { "index": 1, "error": "price: must be greater than 0" }
+  ]
+}
+```
 
 ## `update` options
 
@@ -185,9 +258,9 @@ update:
       filter: "author_id = :subject.id"  # others: only their own rows
 ```
 
-`allowed_fields` is a security-critical whitelist. Only the listed fields can be changed via PATCH. Fields not in the list are silently ignored from the request body. Without this whitelist, any field on the entity can be updated — which can allow callers to escalate privileges (e.g. by updating a `role` field).
+`allowed_fields` is a security-critical whitelist. Only the listed fields can be changed via PATCH. Fields not in the list are silently ignored. Without this whitelist, any entity field can be updated — which can allow callers to escalate privileges (e.g. by updating a `role` field).
 
-In addition, `access.write_roles` on individual fields provides a second layer: even if a field is in `allowed_fields`, callers whose role is not in `write_roles` have that field silently dropped before the DB call.
+Immutable fields (`immutable: true` on the entity) are always stripped from update payloads regardless of `allowed_fields`.
 
 ## `delete` options
 
@@ -212,7 +285,7 @@ Used at top-level and per-operation:
 
 ```yaml
 auth:
-  require: true          # false = public access; true = JWT required
+  require: true          # false = public access; true = JWT or API key required
   roles: [admin, editor] # ABAC: role must be in this list (enforced, returns 403 if not)
   conditions:            # ABAC: ALL expressions must pass; 403 if any fails
     - subject.email ends_with "@company.com"
@@ -221,15 +294,13 @@ auth:
 
 | Field | Description |
 |---|---|
-| `require` | `false` = no JWT needed (public). `true` = JWT required; returns 401 if absent/invalid. |
-| `roles` | Allowlist of roles. JWT `role` claim must match one. Returns 403 if not in list. |
-| `conditions` | CEL-lite expressions evaluated against the JWT subject. All must pass (AND). Returns 403 if any fails. |
+| `require` | `false` = no auth needed (public). `true` = JWT or API key required; returns 401 if absent/invalid. |
+| `roles` | Allowlist of roles. The subject's role must match one. Returns 403 if not in list. |
+| `conditions` | CEL-lite expressions evaluated against the subject. All must pass (AND). Returns 403 if any fails. |
 
 **Condition operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `not_in`, `starts_with`, `ends_with`, `*` (always true)
 
-**Subject attributes:** `subject.id` (JWT `sub`), `subject.role`, `subject.email`
-
-When `roles:` is omitted, any authenticated role is accepted by that check. `conditions` are evaluated after `roles` — both must pass.
+**Subject attributes:** `subject.id` (JWT `sub` or API key user ID), `subject.role`, `subject.email`
 
 ## `row_access` rules
 
@@ -255,8 +326,8 @@ Rules are evaluated **in order** — the first matching `when` wins. If no rule 
 
 | Placeholder | Value |
 |---|---|
-| `:subject.id` | JWT `sub` |
-| `:subject.role` | JWT `role` |
+| `:subject.id` | JWT `sub` or API key subject ID |
+| `:subject.role` | JWT `role` or API key role |
 | `:subject.email` | JWT `email` |
 
 `row_access` is **opt-in**: omitting it means all rows are accessible. Defining it without a catch-all `when: "*"` means any caller not matched by a rule is denied.
@@ -287,17 +358,6 @@ When you define named specs in `yaypi.yaml` (see [OpenAPI](openapi.md)), all end
     summary: "List or create posts"
 ```
 
-### `specs` field reference
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `names` | list | all specs | Restrict this endpoint to only the named specs |
-| `description` | string | — | Operation description in the spec |
-| `tags` | list | — | Extra tags; entity name is always the first tag |
-| `summary` | string | `"{op} {Entity}"` | Short operation summary |
-
-Each CRUD operation on the endpoint gets its own Operation in the spec. Tags are shared across all operations generated from the same endpoint block.
-
 ## Complete examples
 
 See the community-blog example:
@@ -306,4 +366,3 @@ See the community-blog example:
 - [`endpoints/comments.yaml`](../examples/community-blog/endpoints/comments.yaml)
 - [`endpoints/tags.yaml`](../examples/community-blog/endpoints/tags.yaml)
 - [`endpoints/users.yaml`](../examples/community-blog/endpoints/users.yaml)
-

@@ -58,6 +58,9 @@ func (h *Handler) Mount(r chi.Router) {
 		if h.cfg.Me != nil && h.cfg.Me.Enabled {
 			r.Get("/me", h.me)
 		}
+		if h.cfg.Refresh != nil && h.cfg.Refresh.Enabled {
+			r.Post("/refresh", h.refresh)
+		}
 		if h.cfg.OAuth2 != nil {
 			for _, p := range h.cfg.OAuth2.Providers {
 				p := p

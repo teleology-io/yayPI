@@ -10,16 +10,17 @@ yayPi is a **runtime interpreter**, not a code generator. When you run `yaypi ru
 
 1. Load and parse `yaypi.yaml`
 2. Expand env var interpolations (`${VAR:-default}`)
-3. Glob-expand `include:` patterns and load entity/endpoint/job/policy files
+3. Glob-expand `include:` patterns and load entity/endpoint/auth/job/seed/email/webhook/policy files
 4. Validate cross-references (entity names, field names, etc.)
 5. Build the **schema registry** (resolved entity definitions)
 6. Connect to the database(s)
 7. Optionally auto-migrate (dev only)
-8. Load the Casbin policy engine from `roles.yaml` + `model.conf`
-9. Initialize plugins
-10. Build the chi router (one route per CRUD operation)
-11. Start cron scheduler
-12. Listen for HTTP requests
+8. Run seed files (idempotent)
+9. Load the Casbin policy engine from `roles.yaml` + `model.conf`
+10. Initialize plugins; auto-register email and webhook hooks
+11. Build the chi router (one route per CRUD operation)
+12. Start cron scheduler
+13. Listen for HTTP requests
 
 ## The `kind` system
 
@@ -29,8 +30,11 @@ Every YAML file (other than `yaypi.yaml` itself) must declare a `kind`. The load
 |---|---|
 | `entity` | Defines a data model and its database table |
 | `endpoints` | Defines REST routes for one or more entities |
-| `auth` | Defines register, login, me, and OAuth2 routes |
+| `auth` | Defines register, login, me, OAuth2, and refresh routes |
 | `jobs` | Defines background cron jobs |
+| `seed` | Defines idempotent seed rows inserted at startup |
+| `email` | Defines email notifications triggered by lifecycle events |
+| `webhooks` | Defines HTTP webhooks triggered by lifecycle events |
 | `policy` | Defines RBAC roles and permissions |
 
 Files are discovered via the `include:` globs in `yaypi.yaml`.
@@ -61,25 +65,37 @@ Request
   → RequestID (generates/propagates X-Request-Id)
   → Logger (structured zerolog entry)
   → Recover (catches panics, returns 500)
-  → RequireAuth (JWT verification — per route)          ← 401 on failure
-  → RBAC (Casbin enforcement — per route)               ← 403 on failure
-  → RBAC: auth.roles check                              ← 403 if role not in list
-  → RBAC: auth.conditions check                         ← 403 if any condition fails
+  → RateLimit (token bucket — global or per-endpoint)        ← 429 on excess
+  → APIKeyAuth (X-API-Key header check, if configured)       ← 401 on bad key
+  → RequireAuth (JWT verification — per route)               ← 401 on failure
+  → RBAC (Casbin enforcement — per route)                    ← 403 on failure
+  → RBAC: auth.roles check                                   ← 403 if role not in list
+  → RBAC: auth.conditions check                              ← 403 if any condition fails
   → Handler (list / get / create / update / delete)
-      → write_roles: strip restricted fields from body  ← silent drop
+      → validateFields() (field validation rules)            ← 422 on failure
+      → immutable field stripping (update only)
+      → write_roles: strip restricted fields from body       ← silent drop
       → row_access: resolve SQL WHERE fragment
       → Query Builder (parameterized SQL + row filter)
       → Database
       → read_roles: strip restricted fields from response
+      → plugin.Dispatcher (after hooks — email, webhook, custom)
   → Response
 ```
 
-## Auth: three layers
+## Auth: four layers
 
-yayPi enforces three independent security checks:
+yayPi enforces four independent security mechanisms:
+
+### API keys (optional)
+
+If `auth.api_keys` is configured, `APIKeyAuth` middleware runs first. It checks the `X-API-Key` header (or a query param). A valid key sets the request Subject with the key's associated role. If a key is present but invalid, the request is rejected with 401.
+
+When both API key and JWT auth are configured, **either one is sufficient** — if the API key succeeds, JWT is skipped. This lets services use API keys while users use JWTs.
 
 ### Layer 1 — JWT (`RequireAuth`)
-Verifies the token is cryptographically valid, not expired, and uses the configured algorithm. Extracts `sub`, `role`, and `email` from claims and attaches them to the request context as the *subject*.
+
+Verifies the token is cryptographically valid, not expired, and uses the configured algorithm. Extracts `sub`, `role`, and `email` from claims and attaches them to the request context as the *subject*. Skipped if API key already set the Subject.
 
 Returns **401** if the token is absent (when `require: true`), invalid, or expired.
 
@@ -103,26 +119,111 @@ After the middleware, three more checks run inside the handler itself:
 
 See [Authorization](authorization.md) for the full reference.
 
-## Cursor pagination
+## Field validation
 
-`list` endpoints use cursor-based pagination instead of offset/limit. Cursors are HMAC-SHA256 signed and base64url-encoded to prevent tampering.
+Fields can declare validation rules under `validate:`. Validation runs on both create and update, before any database write.
 
+```yaml
+- name: email
+  type: string
+  validate:
+    required: true
+    format: email         # email | url | uuid | slug
+    message: "must be a valid email address"
+
+- name: price
+  type: decimal
+  validate:
+    min: 0.01
+    max: 99999.99
+```
+
+Validation errors return **422 Unprocessable Entity** with a field-keyed error map:
 ```json
-{
-  "data": [...],
-  "meta": {
-    "count": 20,
-    "next_cursor": "eyJ..."
-  }
-}
+{ "errors": { "email": "must be a valid email address" } }
 ```
 
-To get the next page:
-```
-GET /items?cursor=eyJ...&limit=20
+## Immutable fields
+
+Fields marked `immutable: true` are silently stripped from `PATCH` (update) payloads. They can be set on `POST` (create) but never changed afterward:
+
+```yaml
+- name: order_number
+  type: string
+  immutable: true
 ```
 
-When `next_cursor` is `null` there are no more results. Cursors are opaque — do not parse them.
+## Rate limiting
+
+A token bucket limiter can be applied globally or per-endpoint:
+
+```yaml
+# yaypi.yaml — global
+server:
+  rate_limit:
+    requests_per_minute: 120
+    burst: 30
+    key_by: ip      # ip (default) | user (JWT sub)
+
+# endpoints — per-endpoint (overrides global for this route)
+- path: /auth/register
+  rate_limit:
+    requests_per_minute: 5
+    burst: 2
+```
+
+Excess requests receive **429 Too Many Requests**.
+
+## Pagination
+
+Two pagination styles are available on `list` endpoints:
+
+**Cursor pagination** (default) — HMAC-signed opaque cursors. Best for live data feeds. Clients use `next_cursor` to fetch the next page:
+```json
+{ "data": [...], "meta": { "count": 20, "next_cursor": "eyJ..." } }
+```
+
+**Offset pagination** — traditional page/offset. Supports optional total count:
+```json
+{ "data": [...], "meta": { "count": 20, "limit": 20, "offset": 0, "page": 1, "total": 312 } }
+```
+
+Configure with `pagination.style: cursor` or `pagination.style: offset`.
+
+## Bulk create
+
+When `create.bulk: true`, a `POST` endpoint accepts a JSON array instead of a single object. Two error modes are available:
+
+- `abort` (default) — stop on the first error, return 400. All-or-nothing.
+- `partial` — continue past errors, return 207 Multi-Status with per-item results.
+
+## Email and webhook hooks
+
+Email and webhook hooks are built-in plugin implementations that are auto-registered from their respective YAML files. No Go code is needed.
+
+**Email** (`kind: email`) — sends SMTP email on lifecycle events. Requires SMTP env vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`). Templates use `{{record.FIELD}}` syntax.
+
+**Webhooks** (`kind: webhooks`) — fires HTTP requests on lifecycle events. Runs in a goroutine (non-blocking). Has SSRF protection blocking RFC-1918 and loopback addresses. Supports retry with backoff.
+
+## Seed data
+
+Seed files (`kind: seed`) define rows that should exist in the database. They run at startup before routes are registered and are **idempotent** — if a row with the given `key_field` value already exists, it is skipped.
+
+```yaml
+kind: seed
+seeds:
+  - entity: Role
+    key_field: name
+    data:
+      - name: admin
+      - name: member
+```
+
+## Token refresh
+
+When `refresh.enabled: true` in an auth file, yayPi issues long-lived refresh tokens alongside regular JWTs. `POST /auth/refresh` validates the refresh token, issues a new access token, and rotates the refresh token (single-use).
+
+Storage options: `cookie` (HttpOnly, sent automatically by browsers) or `body` (JSON — better for native apps).
 
 ## Soft delete
 

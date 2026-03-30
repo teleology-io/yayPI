@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/handler"
 	"github.com/teleology-io/yayPI/internal/health"
+	"github.com/teleology-io/yayPI/internal/mailer"
 	"github.com/teleology-io/yayPI/internal/middleware"
 	"github.com/teleology-io/yayPI/internal/migration"
 	"github.com/teleology-io/yayPI/internal/openapi"
@@ -26,6 +28,7 @@ import (
 	"github.com/teleology-io/yayPI/internal/policy"
 	"github.com/teleology-io/yayPI/internal/router"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/internal/webhook"
 	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
@@ -123,6 +126,25 @@ func (s *Server) Run() error {
 		}
 	}
 
+	// Auto-register built-in email hooks for all entities referenced by email defs.
+	if emailDefs := cfg.AllEmailDefs(); len(emailDefs) > 0 {
+		if m := mailer.New(emailDefs); m != nil {
+			entities := uniqueEntities(emailDefs, nil)
+			for _, e := range entities {
+				s.dispatcher.RegisterHook(e, m)
+			}
+		}
+	}
+
+	// Auto-register built-in webhook hooks for all entities referenced by webhook defs.
+	if webhookDefs := cfg.AllWebhookDefs(); len(webhookDefs) > 0 {
+		wd := webhook.New(webhookDefs)
+		entities := uniqueEntities(nil, webhookDefs)
+		for _, e := range entities {
+			s.dispatcher.RegisterHook(e, wd)
+		}
+	}
+
 	secret := []byte(cfg.Auth.Secret)
 	factory := handler.NewFactory(reg, dbManager, policyEngine, s.dispatcher, secret)
 
@@ -158,6 +180,26 @@ func (s *Server) Run() error {
 		rateLimiter = middleware.NewRateLimiter(burst, rps)
 	}
 
+	// API key authentication
+	var apiKeyLookup middleware.APIKeyLookup
+	var apiKeyHeader, apiKeyParam string
+	if ak := cfg.Auth.APIKeys; ak != nil {
+		apiKeyHeader = ak.Header
+		apiKeyParam = ak.QueryParam
+		if len(ak.Keys) > 0 {
+			// Static key map
+			keyMap := make(map[string]*middleware.Subject, len(ak.Keys))
+			for _, k := range ak.Keys {
+				keyMap[k.Key] = &middleware.Subject{Role: k.Role}
+			}
+			apiKeyLookup = func(_ context.Context, key string) *middleware.Subject {
+				return keyMap[key]
+			}
+		} else if ak.Entity != "" && dbManager != nil {
+			apiKeyLookup = buildDBAPIKeyLookup(ak, reg, dbManager)
+		}
+	}
+
 	routerCfg := router.Config{
 		BaseURL:        cfg.Project.BaseURL,
 		AuthSecret:     secret,
@@ -168,6 +210,9 @@ func (s *Server) Run() error {
 		HealthHandler:  healthHandler,
 		AllowedOrigins: cfg.Server.AllowedOrigins,
 		RateLimit:      rateLimiter,
+		APIKeyHeader:   apiKeyHeader,
+		APIKeyParam:    apiKeyParam,
+		APIKeyLookup:   apiKeyLookup,
 	}
 	httpHandler := router.Build(reg, factory, routerCfg)
 
@@ -226,6 +271,72 @@ func (s *Server) Run() error {
 	}
 
 	return nil
+}
+
+// uniqueEntities returns a deduplicated list of entity names from email and webhook defs.
+func uniqueEntities(emails []config.EmailDef, webhooks []config.WebhookDef) []string {
+	seen := make(map[string]struct{})
+	for _, e := range emails {
+		seen[e.Entity] = struct{}{}
+	}
+	for _, w := range webhooks {
+		seen[w.Entity] = struct{}{}
+	}
+	out := make([]string, 0, len(seen))
+	for e := range seen {
+		out = append(out, e)
+	}
+	return out
+}
+
+func buildDBAPIKeyLookup(cfg *config.APIKeyConfig, reg *schema.Registry, dbm *db.Manager) middleware.APIKeyLookup {
+	keyField := cfg.KeyField
+	if keyField == "" {
+		keyField = "token"
+	}
+	roleField := cfg.RoleField
+	if roleField == "" {
+		roleField = "role"
+	}
+	return func(ctx context.Context, key string) *middleware.Subject {
+		entity, ok := reg.GetEntity(cfg.Entity)
+		if !ok {
+			return nil
+		}
+		dbc := dbm.Default()
+		if entity.Database != "" {
+			if d, err := dbm.Get(entity.Database); err == nil {
+				dbc = d
+			}
+		}
+		d := dbc.Dialect
+		keyCol, roleCol := keyField, roleField
+		for _, f := range entity.Fields {
+			if strings.EqualFold(f.Name, keyField) || strings.EqualFold(f.ColumnName, keyField) {
+				keyCol = f.ColumnName
+			}
+			if strings.EqualFold(f.Name, roleField) || strings.EqualFold(f.ColumnName, roleField) {
+				roleCol = f.ColumnName
+			}
+		}
+		q := d.Rebind(fmt.Sprintf(
+			`SELECT %s FROM %s WHERE %s = $1 AND deleted_at IS NULL LIMIT 1`,
+			d.QuoteIdent(roleCol), d.QuoteIdent(entity.Table), d.QuoteIdent(keyCol),
+		))
+		rows, err := dbc.SQL.QueryContext(ctx, q, key)
+		if err != nil {
+			return nil
+		}
+		defer rows.Close()
+		if !rows.Next() {
+			return nil
+		}
+		var role string
+		if err := rows.Scan(&role); err != nil {
+			return nil
+		}
+		return &middleware.Subject{Role: role}
+	}
 }
 
 func buildInMemoryPolicy(modelPath string, roles []policy.RoleConfig) (*policy.Engine, error) {

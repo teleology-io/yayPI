@@ -1,6 +1,6 @@
 # Auth Endpoints (`kind: auth`)
 
-Adding a `kind: auth` file to your project gives you built-in registration, login, a "me" endpoint, and OAuth2 sign-in — all driven from YAML, no code required.
+Adding a `kind: auth` file to your project gives you built-in registration, login, a "me" endpoint, token refresh, and OAuth2 sign-in — all driven from YAML, no code required.
 
 ## File structure
 
@@ -27,6 +27,11 @@ auth:
 
   me:
     enabled: true                 # GET /auth/me — returns the token owner's user record
+
+  refresh:
+    enabled: true                 # POST /auth/refresh — rotate refresh token, issue new access token
+    expiry: 30d                   # refresh token TTL (supports d/h/m/s and Go duration strings)
+    store: cookie                 # cookie (default, HttpOnly) | body (JSON)
 
   oauth2:
     providers:
@@ -64,6 +69,7 @@ All routes are mounted under `{base_url}{base_path}` (e.g. `/api/v1/auth`).
 | `POST` | `/auth/register` | No | Create account, returns `{token, user}` |
 | `POST` | `/auth/login` | No | Verify credentials, returns `{token, user}` |
 | `GET` | `/auth/me` | Bearer token | Returns current user record |
+| `POST` | `/auth/refresh` | Refresh token | Issue new access + refresh tokens |
 | `GET` | `/auth/{provider}` | No | Redirects to OAuth2 provider |
 | `GET` | `/auth/callback/{provider}` | No | Handles OAuth2 callback, returns/redirects with token |
 
@@ -89,9 +95,7 @@ Content-Type: application/json
     "id": "...",
     "email": "alice@example.com",
     "username": "alice",
-    "display_name": "Alice",
-    "role": "member",
-    ...
+    "role": "member"
   }
 }
 ```
@@ -140,6 +144,55 @@ Authorization: Bearer <token>
 ```
 
 Returns the user record for the `sub` claim in the token. Sensitive fields (e.g. `password_hash`) are stripped.
+
+## Token refresh
+
+Token refresh issues short-lived access tokens (JWTs) alongside long-lived refresh tokens. This allows access tokens to be kept short-lived (minutes/hours) for security while keeping users logged in for days or weeks without re-authenticating.
+
+### Cookie store (default, recommended for web apps)
+
+With `store: cookie`:
+
+- Login response sets `refresh_token` as an **HttpOnly** cookie and returns the access token in the JSON body.
+- The cookie is `Secure` when the connection is TLS, `SameSite: Lax`.
+- `POST /auth/refresh` reads the cookie automatically (no body needed).
+
+```bash
+# No body needed — the browser sends the cookie automatically
+POST /api/v1/auth/refresh
+
+# Response 200:
+{
+  "token": "<new access jwt>"
+}
+# Also sets a new refresh_token cookie (the old one is now invalid)
+```
+
+### Body store (for native/mobile apps)
+
+With `store: body`:
+
+- Login response returns both tokens in the JSON body.
+- `POST /auth/refresh` reads `refresh_token` from the request body.
+
+```bash
+# Login
+POST /api/v1/auth/login
+→ { "token": "<access jwt>", "refresh_token": "<refresh jwt>" }
+
+# Refresh
+POST /api/v1/auth/refresh
+Content-Type: application/json
+{ "refresh_token": "<refresh jwt>" }
+
+→ { "token": "<new access jwt>", "refresh_token": "<new refresh jwt>" }
+```
+
+### Refresh token security
+
+- Refresh tokens are **single-use** — every call to `/auth/refresh` issues a new refresh token and invalidates the old one.
+- Refresh tokens contain `"type": "refresh"` in their claims. They cannot be used as access tokens.
+- The default TTL is 30 days. Configure with `expiry: 7d`, `expiry: 90d`, etc.
 
 ## OAuth2
 
@@ -239,7 +292,7 @@ The JWT issued by all auth endpoints contains:
 }
 ```
 
-This matches the claims expected by the JWT middleware and Casbin RBAC on all other endpoints — the token works everywhere in the same API.
+Refresh tokens additionally contain `"type": "refresh"`. They are validated separately and cannot be used as access tokens.
 
 ## Complete example
 

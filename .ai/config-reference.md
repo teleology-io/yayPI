@@ -23,6 +23,14 @@ server:
   tls:
     cert_file: string
     key_file: string
+  health:
+    enabled: true               # mount liveness + readiness endpoints
+    path: /health               # GET /health → 200 always (liveness)
+    readiness_path: /ready      # GET /ready  → 200 if all DBs reachable, 503 otherwise
+  rate_limit:
+    requests_per_minute: 60     # token bucket fill rate
+    burst: 20                   # bucket capacity (allows short bursts above the rate)
+    key_by: ip                  # ip (default) | user (JWT sub claim)
 
 databases:
   - name: primary               # logical name; referenced by entity.database
@@ -41,6 +49,17 @@ auth:
   algorithm: HS256              # HS256 | HS384 | HS512
   reject_algorithms: [none]     # always include "none"
   expiry: 24h                   # informational; exp claim is always validated
+  api_keys:
+    header: X-API-Key           # request header to check (default: X-API-Key)
+    query_param: api_key        # optional: also accept ?api_key= query param
+    keys:                       # static key list (use this OR entity below, not both)
+      - key: ${ADMIN_API_KEY}
+        role: admin
+      - key: ${READONLY_API_KEY}
+        role: readonly
+    entity: ApiKey              # DB-backed: entity name containing key records
+    key_field: token            # column holding the key value (default: token)
+    role_field: role            # column holding the role (default: role)
 
 policy:
   engine: casbin
@@ -61,6 +80,9 @@ include:
   - endpoints/**/*.yaml
   - policies/**/*.yaml
   - jobs/**/*.yaml
+  - seeds/**/*.yaml             # kind: seed files
+  - emails/**/*.yaml            # kind: email files
+  - webhooks/**/*.yaml          # kind: webhooks files
 
 spec:                           # named OpenAPI specs
   - name: api                   # used in URL: /openapi/api.json
@@ -100,6 +122,24 @@ entity:
       unique: false
       index: false              # creates a single-column index
       default: string           # SQL default expression
+      immutable: true           # once set, this field cannot be changed via PATCH
+
+    - name: email
+      type: string
+      validate:
+        required: true          # field must be present and non-empty
+        min_length: 3           # minimum string length
+        max_length: 255         # maximum string length
+        pattern: "^[^@]+@[^@]+$"  # regex the value must match
+        format: email           # built-in format: email | url | uuid | slug
+        message: "must be a valid email address"  # custom error message
+
+    - name: age
+      type: integer
+      validate:
+        min: 18                 # numeric minimum (inclusive)
+        max: 120                # numeric maximum (inclusive)
+        message: "must be between 18 and 120"
 
     - name: price
       type: decimal
@@ -191,6 +231,15 @@ entity:
 | `array` | PostgreSQL `text[]`; other drivers: `TEXT` (serialized) |
 | `bytea` | Binary data; MySQL/SQLite `BLOB` |
 
+### Validation formats
+
+| `format` value | What it checks |
+|---|---|
+| `email` | Valid email address |
+| `url` | Valid URL with http/https scheme |
+| `uuid` | UUID v4 format |
+| `slug` | Lowercase alphanumeric and hyphens only |
+
 ---
 
 ## Endpoint YAML (`kind: endpoints`)
@@ -202,6 +251,12 @@ endpoints:
   - path: /posts                # URL path (chi syntax: {param} for path params)
     entity: Post                # entity name from entity YAML
     crud: [list, create]        # list | get | create | update | delete
+
+    # Optional per-endpoint rate limit (overrides global server.rate_limit)
+    rate_limit:
+      requests_per_minute: 10
+      burst: 5
+      key_by: ip
 
     # Top-level auth applies to all ops unless overridden per-op
     auth:
@@ -224,9 +279,10 @@ endpoints:
       allow_sort_by: [created_at, title]      # fields allowed in ?sort=
       default_sort: created_at:desc
       pagination:
-        style: cursor           # cursor | offset | page
+        style: cursor           # cursor (default) | offset
         default_limit: 20
         max_limit: 100
+        include_total: true     # offset only: include total row count in meta
       include: [author, tags]   # relation names to eager-load
       auth:                     # overrides top-level auth for list only
         require: false
@@ -252,6 +308,10 @@ endpoints:
           - subject.email ends_with "@company.com"
       before_hooks: [validate-post]    # plugin hook names
       after_hooks: [notify-followers]
+      bulk: false               # true = accept an array body; false (default) = single object
+      bulk_max: 100             # max items in a bulk request (default: 100)
+      bulk_error_mode: abort    # abort (default) = fail all on first error
+                                # partial = continue; return 207 with per-item results
 
     update:
       allowed_fields: [title, body, status]   # mass-assignment whitelist
@@ -288,6 +348,42 @@ endpoints:
 
 If the path already contains `{param}` (e.g. `/post/{id}`), no `/{id}` is appended.
 
+### Offset pagination response
+
+When `style: offset`, the `meta` envelope changes:
+
+```json
+{
+  "data": [...],
+  "meta": {
+    "count":  20,
+    "limit":  20,
+    "offset": 40,
+    "page":   3,
+    "total":  157    // only present when include_total: true
+  }
+}
+```
+
+### Bulk create response
+
+When `bulk: true`, POST accepts a JSON array. On `bulk_error_mode: abort`:
+```json
+{ "data": [...] }   // 201 — all succeeded
+{ "error": "..." }  // 400/422 — rolled back on first error
+```
+
+On `bulk_error_mode: partial`:
+```json
+// 207 Multi-Status — mix of successes and failures
+{
+  "results": [
+    { "index": 0, "data": { ... } },
+    { "index": 1, "error": "title is required" }
+  ]
+}
+```
+
 ---
 
 ## Auth YAML (`kind: auth`)
@@ -315,6 +411,11 @@ auth:
   me:
     enabled: true               # GET /auth/me returns current user from JWT sub
 
+  refresh:
+    enabled: true               # POST /auth/refresh rotates access + refresh tokens
+    expiry: 30d                 # refresh token TTL; supports d/h/m/s and Go duration syntax
+    store: cookie               # cookie (default, HttpOnly) | body (returns JSON)
+
   oauth2:
     enabled: true
     providers:
@@ -341,11 +442,104 @@ auth:
 
 | Method | Path | Description |
 |---|---|---|
-| POST | `/auth/register` | Create account, returns JWT |
-| POST | `/auth/login` | Authenticate, returns JWT |
+| POST | `/auth/register` | Create account, returns JWT (+ refresh token if enabled) |
+| POST | `/auth/login` | Authenticate, returns JWT (+ refresh token if enabled) |
 | GET | `/auth/me` | Returns current user (requires JWT) |
-| GET | `/auth/oauth2/{provider}` | Redirect to provider |
+| POST | `/auth/refresh` | Exchange refresh token for new access + refresh tokens |
+| GET | `/auth/{provider}` | Redirect to OAuth2 provider |
 | GET | `/auth/callback/{provider}` | OAuth2 callback, returns JWT |
+
+### Token refresh flow
+
+With `store: cookie` (default):
+1. Login response sets `refresh_token` HttpOnly cookie + returns `{"token": "<access>"}` in body
+2. `POST /auth/refresh` reads cookie, validates refresh JWT, issues new access + refresh tokens, rotates cookie
+3. Refresh token is single-use (rotated on every call)
+
+With `store: body`:
+1. Login response returns `{"token": "<access>", "refresh_token": "<refresh>"}` in body
+2. `POST /auth/refresh` reads `{"refresh_token": "<token>"}` from request body
+
+---
+
+## Seed YAML (`kind: seed`)
+
+```yaml
+version: "1"
+kind: seed
+seeds:
+  - entity: Role                # entity name to insert into
+    key_field: name             # field used to check if row already exists (idempotent)
+    data:
+      - name: admin
+        description: "Full access"
+      - name: editor
+        description: "Can create and edit content"
+      - name: member
+        description: "Read-only access"
+```
+
+Seeds are idempotent: before each INSERT, yayPi checks whether a row with the `key_field` value already exists. If it does, the row is skipped. Seeds run once at server startup before routes are registered.
+
+---
+
+## Email YAML (`kind: email`)
+
+Requires SMTP environment variables: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`.
+
+```yaml
+version: "1"
+kind: email
+emails:
+  - entity: User                # entity that triggers this email
+    trigger: after_create       # before_create | after_create | before_update |
+                                # after_update | before_delete | after_delete
+    condition: ""               # optional: "record.field != value" to skip some triggers
+    to: "{{record.email}}"      # recipient; supports {{record.FIELD}} template syntax
+    subject: "Welcome to our platform"
+    body: |
+      Hi {{record.name}},
+
+      Your account has been created. Welcome aboard!
+    html: |
+      <p>Hi {{record.name}},</p>
+      <p>Your account has been created. Welcome aboard!</p>
+```
+
+Template syntax: `{{record.FIELD}}` where `FIELD` is any column name in the entity.
+
+Condition syntax: `record.FIELD != ""` or `record.FIELD == "value"` (simple equality/inequality only).
+
+---
+
+## Webhooks YAML (`kind: webhooks`)
+
+```yaml
+version: "1"
+kind: webhooks
+webhooks:
+  - entity: Order               # entity that triggers this webhook
+    trigger: after_create       # before_create | after_create | before_update |
+                                # after_update | before_delete | after_delete
+    condition: ""               # optional: skip trigger if condition fails
+    url: "https://hooks.example.com/orders"
+    method: POST                # default: POST
+    headers:
+      Authorization: "Bearer ${WEBHOOK_SECRET}"
+      Content-Type: "application/json"
+    payload: |
+      {
+        "event": "order.created",
+        "order_id": "{{record.id}}",
+        "amount": "{{record.total}}"
+      }
+    timeout: 10s                # default: 10s
+    retry:
+      max_attempts: 3
+      backoff: 5s
+```
+
+Webhook requests are sent in a goroutine (non-blocking). The SSRF blocklist rejects RFC-1918, loopback, and link-local addresses.
 
 ---
 
@@ -379,12 +573,6 @@ jobs:
       url: https://uptime.example.com/ping
       method: GET
       allowed_hosts: [uptime.example.com]   # SSRF allowlist
-
-  - name: custom-job
-    schedule: "0 * * * *"
-    plugin: my-plugin           # plugin name instead of handler (calls plugin's RunJob)
-    config:
-      key: value
 ```
 
 ---
@@ -394,16 +582,25 @@ jobs:
 All CRUD endpoints return JSON in a consistent envelope:
 
 ```json
-// list
-{ "data": [...], "meta": { "count": 42, "next_cursor": "abc" } }
+// cursor-paginated list
+{ "data": [...], "meta": { "count": 20, "next_cursor": "abc" } }
+
+// offset-paginated list
+{ "data": [...], "meta": { "count": 20, "limit": 20, "offset": 0, "page": 1, "total": 157 } }
 
 // get / create / update
 { "data": { ...entity fields... } }
 
+// bulk create (partial mode) — 207 Multi-Status
+{ "results": [ { "index": 0, "data": {...} }, { "index": 1, "error": "..." } ] }
+
 // delete
 // 204 No Content
 
-// errors
+// validation errors
+{ "errors": { "email": "must be a valid email address", "age": "must be between 18 and 120" } }
+
+// other errors
 { "error": "message" }
 ```
 
@@ -422,5 +619,7 @@ Tokens issued by `/auth/register` and `/auth/login` contain:
   "exp": 1711320967
 }
 ```
+
+Refresh tokens contain an additional `"type": "refresh"` claim and are validated separately.
 
 The `sub` claim is used to identify the current user in `GET /auth/me` and RBAC enforcement.
