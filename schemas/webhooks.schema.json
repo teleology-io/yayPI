@@ -1,0 +1,124 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/webhooks.schema.json",
+  "title": "yayPi Webhooks",
+  "description": "Defines outbound webhook triggers that fire HTTP requests to external systems when entity events occur.",
+  "type": "object",
+  "required": ["kind", "webhooks"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "webhooks",
+      "description": "File kind discriminator. Must be 'webhooks'."
+    },
+    "webhooks": {
+      "type": "array",
+      "description": "List of webhook trigger definitions.",
+      "items": { "$ref": "#/$defs/WebhookDef" }
+    }
+  },
+  "$defs": {
+    "WebhookDef": {
+      "type": "object",
+      "description": "A single outbound webhook trigger.",
+      "required": ["name", "entity", "trigger", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique name for this webhook, used in logs.",
+          "examples": ["crm-sync", "slack-notification", "stripe-sync"]
+        },
+        "entity": {
+          "type": "string",
+          "description": "Entity whose events trigger this webhook.",
+          "examples": ["User", "Order", "Payment"]
+        },
+        "trigger": {
+          "type": "string",
+          "description": "Lifecycle event that fires this webhook.",
+          "enum": ["after_create", "after_update", "after_delete"]
+        },
+        "condition": {
+          "type": "string",
+          "description": "Optional CEL-lite expression. Webhook only fires if this evaluates to true. Supports record.<field> bindings.",
+          "examples": ["record.status == 'active'", "record.amount > 1000"]
+        },
+        "url": {
+          "type": "string",
+          "description": "Destination URL. Supports ${ENV_VAR} substitution. SSRF protection blocks private IP ranges.",
+          "examples": ["${CRM_WEBHOOK_URL}", "https://hooks.slack.com/services/${SLACK_TOKEN}"]
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method to use.",
+          "enum": ["POST", "PUT", "PATCH"],
+          "default": "POST"
+        },
+        "headers": {
+          "type": "object",
+          "description": "HTTP headers to include. Values support ${ENV_VAR} substitution.",
+          "additionalProperties": { "type": "string" },
+          "examples": [
+            {
+              "Authorization": "Bearer ${CRM_TOKEN}",
+              "Content-Type": "application/json"
+            }
+          ]
+        },
+        "payload": {
+          "type": "string",
+          "description": "JSON payload template. Supports {{record.field}} and ${ENV_VAR} substitution. Defaults to the full record JSON.",
+          "examples": ["{\"email\": \"{{record.email}}\", \"name\": \"{{record.name}}\"}"]
+        },
+        "timeout": {
+          "type": "string",
+          "description": "HTTP request timeout. Webhook is cancelled if exceeded.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "default": "5s",
+          "examples": ["5s", "10s", "30s"]
+        },
+        "retry": { "$ref": "#/$defs/RetryConfig" }
+      }
+    },
+    "RetryConfig": {
+      "type": "object",
+      "description": "Retry settings for failed webhook deliveries.",
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "description": "Maximum delivery attempts (including the first).",
+          "minimum": 1,
+          "default": 3,
+          "examples": [3, 5]
+        },
+        "backoff": {
+          "type": "string",
+          "description": "Backoff strategy between retries.",
+          "enum": ["fixed", "exponential"],
+          "default": "exponential"
+        },
+        "initial_delay": {
+          "type": "string",
+          "description": "Wait time before the first retry.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "default": "1s",
+          "examples": ["1s", "5s"]
+        },
+        "max_delay": {
+          "type": "string",
+          "description": "Maximum wait time between retries.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "default": "1m",
+          "examples": ["30s", "1m"]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,402 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/entity.schema.json",
+  "title": "yayPi Entity",
+  "description": "Defines a database entity with fields, relations, indexes, constraints, and lifecycle hooks.",
+  "type": "object",
+  "required": ["kind", "entity"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version. Use '1' for current format.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "entity",
+      "description": "File kind discriminator. Must be 'entity'."
+    },
+    "entity": { "$ref": "#/$defs/EntityDef" }
+  },
+  "$defs": {
+    "EntityDef": {
+      "type": "object",
+      "description": "The entity definition block.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Entity name in PascalCase. Used as the Go type name and default table name.",
+          "examples": ["User", "Post", "ApiKey"]
+        },
+        "table": {
+          "type": "string",
+          "description": "Override the database table name. Defaults to snake_case plural of name.",
+          "examples": ["users", "blog_posts"]
+        },
+        "database": {
+          "type": "string",
+          "description": "Database connection name from yaypi.yaml databases list. Uses default DB if omitted.",
+          "examples": ["primary", "readonly"]
+        },
+        "timestamps": {
+          "type": "boolean",
+          "description": "Auto-manage created_at and updated_at columns.",
+          "default": false
+        },
+        "soft_delete": {
+          "type": "boolean",
+          "description": "Use soft deletes (deleted_at column). DELETE requests set deleted_at instead of removing the row.",
+          "default": false
+        },
+        "fields": {
+          "type": "array",
+          "description": "Column definitions for this entity.",
+          "items": { "$ref": "#/$defs/FieldDef" }
+        },
+        "relations": {
+          "type": "array",
+          "description": "Relationships to other entities.",
+          "items": { "$ref": "#/$defs/RelationDef" }
+        },
+        "indexes": {
+          "type": "array",
+          "description": "Database indexes on this entity.",
+          "items": { "$ref": "#/$defs/IndexDef" }
+        },
+        "constraints": {
+          "type": "array",
+          "description": "Database constraints on this entity.",
+          "items": { "$ref": "#/$defs/ConstraintDef" }
+        },
+        "hooks": { "$ref": "#/$defs/EntityHooksDef" }
+      }
+    },
+    "FieldDef": {
+      "type": "object",
+      "description": "A single column on the entity.",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Field name in camelCase or snake_case. Used as the JSON key in API responses.",
+          "examples": ["email", "firstName", "passwordHash"]
+        },
+        "type": {
+          "type": "string",
+          "description": "Column type.",
+          "enum": [
+            "uuid", "string", "text", "integer", "bigint",
+            "float", "decimal", "boolean", "timestamptz",
+            "date", "jsonb", "enum", "array", "bytea"
+          ]
+        },
+        "length": {
+          "type": "integer",
+          "description": "Max length for string columns.",
+          "minimum": 1,
+          "examples": [255, 512]
+        },
+        "precision": {
+          "type": "integer",
+          "description": "Total digits for decimal columns.",
+          "minimum": 1
+        },
+        "scale": {
+          "type": "integer",
+          "description": "Decimal digits for decimal columns.",
+          "minimum": 0
+        },
+        "nullable": {
+          "type": "boolean",
+          "description": "Allow NULL values.",
+          "default": false
+        },
+        "unique": {
+          "type": "boolean",
+          "description": "Add a UNIQUE constraint.",
+          "default": false
+        },
+        "primary_key": {
+          "type": "boolean",
+          "description": "Mark as primary key.",
+          "default": false
+        },
+        "default": {
+          "type": "string",
+          "description": "SQL default expression.",
+          "examples": ["gen_random_uuid()", "now()", "'active'"]
+        },
+        "index": {
+          "type": "boolean",
+          "description": "Add a single-column index.",
+          "default": false
+        },
+        "immutable": {
+          "type": "boolean",
+          "description": "Field is accepted on create but stripped from PATCH body. Use for email, owner_id, etc.",
+          "default": false
+        },
+        "values": {
+          "type": "array",
+          "description": "Allowed values for enum type fields.",
+          "items": { "type": "string" },
+          "examples": [["active", "inactive", "pending"]]
+        },
+        "references": { "$ref": "#/$defs/ReferenceDef" },
+        "serialization": { "$ref": "#/$defs/SerializationDef" },
+        "access": { "$ref": "#/$defs/FieldAccessDef" },
+        "validate": { "$ref": "#/$defs/FieldValidateDef" }
+      }
+    },
+    "FieldValidateDef": {
+      "type": "object",
+      "description": "Input validation rules applied on create and update before the DB write.",
+      "additionalProperties": false,
+      "properties": {
+        "required": {
+          "type": "boolean",
+          "description": "Field must be present and non-empty in the request body.",
+          "default": false
+        },
+        "min_length": {
+          "type": "integer",
+          "description": "Minimum string length (inclusive).",
+          "minimum": 0,
+          "examples": [3, 8]
+        },
+        "max_length": {
+          "type": "integer",
+          "description": "Maximum string length (inclusive).",
+          "minimum": 0,
+          "examples": [72, 255]
+        },
+        "min": {
+          "type": "number",
+          "description": "Minimum numeric value (inclusive). Applies to integer, bigint, float, decimal.",
+          "examples": [0, 1]
+        },
+        "max": {
+          "type": "number",
+          "description": "Maximum numeric value (inclusive). Applies to integer, bigint, float, decimal.",
+          "examples": [100, 150]
+        },
+        "pattern": {
+          "type": "string",
+          "description": "RE2 regex the value must match.",
+          "examples": ["^[a-z0-9_]+$", "^\\+?[0-9]{7,15}$"]
+        },
+        "format": {
+          "type": "string",
+          "description": "Built-in format check. Returns a descriptive error on failure.",
+          "enum": ["email", "url", "uuid", "slug"]
+        },
+        "message": {
+          "type": "string",
+          "description": "Custom error message returned to the client instead of the default.",
+          "examples": ["username must be 3-30 lowercase alphanumeric characters"]
+        }
+      }
+    },
+    "ReferenceDef": {
+      "type": "object",
+      "description": "Foreign key reference for this field.",
+      "additionalProperties": false,
+      "properties": {
+        "entity": {
+          "type": "string",
+          "description": "Referenced entity name.",
+          "examples": ["User", "Post"]
+        },
+        "field": {
+          "type": "string",
+          "description": "Referenced field name (usually 'id').",
+          "examples": ["id"]
+        },
+        "on_delete": {
+          "type": "string",
+          "description": "Referential action on delete.",
+          "enum": ["CASCADE", "SET NULL", "RESTRICT", "NO ACTION"],
+          "default": "NO ACTION"
+        },
+        "on_update": {
+          "type": "string",
+          "description": "Referential action on update.",
+          "enum": ["CASCADE", "SET NULL", "RESTRICT", "NO ACTION"],
+          "default": "NO ACTION"
+        }
+      }
+    },
+    "SerializationDef": {
+      "type": "object",
+      "description": "Controls how this field appears in API responses and logs.",
+      "additionalProperties": false,
+      "properties": {
+        "omit_response": {
+          "type": "boolean",
+          "description": "Exclude this field from all API responses (e.g. password_hash).",
+          "default": false
+        },
+        "omit_log": {
+          "type": "boolean",
+          "description": "Exclude this field from access logs and audit trails.",
+          "default": false
+        }
+      }
+    },
+    "FieldAccessDef": {
+      "type": "object",
+      "description": "Per-role read/write access control for this field (ABAC).",
+      "additionalProperties": false,
+      "properties": {
+        "read_roles": {
+          "type": "array",
+          "description": "Roles that may read this field. Omit to allow all roles.",
+          "items": { "type": "string" },
+          "examples": [["admin", "owner"]]
+        },
+        "write_roles": {
+          "type": "array",
+          "description": "Roles that may write this field on create/update. Omit to allow all roles.",
+          "items": { "type": "string" },
+          "examples": [["admin"]]
+        }
+      }
+    },
+    "RelationDef": {
+      "type": "object",
+      "description": "A relationship to another entity. Used to populate related data in GET responses.",
+      "required": ["name", "type", "entity"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Relation name as it appears in API responses.",
+          "examples": ["posts", "author", "tags"]
+        },
+        "type": {
+          "type": "string",
+          "description": "Relationship type.",
+          "enum": ["belongs_to", "has_many", "has_one", "many_to_many"]
+        },
+        "entity": {
+          "type": "string",
+          "description": "Related entity name.",
+          "examples": ["Post", "User", "Tag"]
+        },
+        "foreign_key": {
+          "type": "string",
+          "description": "Foreign key column name. Defaults to snake_case entity name + '_id'.",
+          "examples": ["user_id", "author_id"]
+        },
+        "through": {
+          "type": "string",
+          "description": "Join table entity name for many_to_many relations.",
+          "examples": ["PostTag"]
+        },
+        "other_key": {
+          "type": "string",
+          "description": "The other foreign key in a many_to_many join table.",
+          "examples": ["tag_id"]
+        }
+      }
+    },
+    "IndexDef": {
+      "type": "object",
+      "description": "A database index on one or more columns.",
+      "required": ["name", "columns"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Index name.",
+          "examples": ["idx_users_email", "idx_posts_author_created"]
+        },
+        "columns": {
+          "type": "array",
+          "description": "Columns included in the index.",
+          "items": { "type": "string" },
+          "minItems": 1
+        },
+        "unique": {
+          "type": "boolean",
+          "description": "Create a UNIQUE index.",
+          "default": false
+        },
+        "type": {
+          "type": "string",
+          "description": "Index access method.",
+          "enum": ["btree", "hash", "brin", "gin", "gist"],
+          "default": "btree"
+        }
+      }
+    },
+    "ConstraintDef": {
+      "type": "object",
+      "description": "A database constraint.",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Constraint name.",
+          "examples": ["chk_age_positive", "uq_users_email_tenant"]
+        },
+        "type": {
+          "type": "string",
+          "description": "Constraint type.",
+          "enum": ["check", "unique", "primary_key"]
+        },
+        "check": {
+          "type": "string",
+          "description": "SQL check expression (for type: check).",
+          "examples": ["age >= 0", "price > 0"]
+        },
+        "columns": {
+          "type": "array",
+          "description": "Columns for composite unique or primary_key constraints.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "EntityHooksDef": {
+      "type": "object",
+      "description": "Lifecycle hook plugin names. Each value is a list of registered plugin names to call.",
+      "additionalProperties": false,
+      "properties": {
+        "before_create": {
+          "type": "array",
+          "description": "Plugins called before a record is created.",
+          "items": { "type": "string" }
+        },
+        "after_create": {
+          "type": "array",
+          "description": "Plugins called after a record is created.",
+          "items": { "type": "string" }
+        },
+        "before_update": {
+          "type": "array",
+          "description": "Plugins called before a record is updated.",
+          "items": { "type": "string" }
+        },
+        "after_update": {
+          "type": "array",
+          "description": "Plugins called after a record is updated.",
+          "items": { "type": "string" }
+        },
+        "before_delete": {
+          "type": "array",
+          "description": "Plugins called before a record is deleted.",
+          "items": { "type": "string" }
+        },
+        "after_delete": {
+          "type": "array",
+          "description": "Plugins called after a record is deleted.",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,115 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/jobs.schema.json",
+  "title": "yayPi Jobs",
+  "description": "Defines scheduled background jobs using cron expressions.",
+  "type": "object",
+  "required": ["kind", "jobs"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "jobs",
+      "description": "File kind discriminator. Must be 'jobs'."
+    },
+    "jobs": {
+      "type": "array",
+      "description": "List of scheduled job definitions.",
+      "items": { "$ref": "#/$defs/JobDef" }
+    }
+  },
+  "$defs": {
+    "JobDef": {
+      "type": "object",
+      "description": "A single scheduled background job.",
+      "required": ["name", "schedule"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique job name used in logs and monitoring.",
+          "examples": ["daily-report", "cleanup-expired-sessions"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this job does."
+        },
+        "schedule": {
+          "type": "string",
+          "description": "Cron expression (5-field standard or @every, @daily, @hourly, etc.).",
+          "examples": ["0 * * * *", "0 2 * * *", "@daily", "@every 30m", "*/15 * * * *"]
+        },
+        "timezone": {
+          "type": "string",
+          "description": "IANA timezone for the schedule. Defaults to UTC.",
+          "examples": ["UTC", "America/New_York", "Europe/London"]
+        },
+        "handler": {
+          "type": "string",
+          "description": "SQL query or HTTP URL to execute. Use plugin for plugin-based handlers.",
+          "examples": ["DELETE FROM sessions WHERE expires_at < NOW()", "https://api.example.com/trigger"]
+        },
+        "plugin": {
+          "type": "string",
+          "description": "Plugin name whose Handler method to invoke. Required when handler is a plugin method.",
+          "examples": ["reportPlugin", "cleanupPlugin"]
+        },
+        "config": {
+          "type": "object",
+          "description": "Arbitrary key-value config passed to the plugin handler.",
+          "additionalProperties": true
+        },
+        "retry": { "$ref": "#/$defs/RetryConfig" },
+        "timeout": {
+          "type": "string",
+          "description": "Maximum execution time. Job is cancelled if exceeded.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "examples": ["30s", "5m", "1h"]
+        },
+        "on_failure": {
+          "type": "string",
+          "description": "Plugin name to notify on job failure.",
+          "examples": ["alertPlugin"]
+        }
+      }
+    },
+    "RetryConfig": {
+      "type": "object",
+      "description": "Retry settings for failed job executions.",
+      "additionalProperties": false,
+      "properties": {
+        "max_attempts": {
+          "type": "integer",
+          "description": "Maximum number of execution attempts (including the first).",
+          "minimum": 1,
+          "default": 3,
+          "examples": [3, 5]
+        },
+        "backoff": {
+          "type": "string",
+          "description": "Backoff strategy between retries.",
+          "enum": ["fixed", "exponential"],
+          "default": "exponential"
+        },
+        "initial_delay": {
+          "type": "string",
+          "description": "Wait time before the first retry.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "default": "1s",
+          "examples": ["1s", "5s", "30s"]
+        },
+        "max_delay": {
+          "type": "string",
+          "description": "Maximum wait time between retries (caps exponential backoff).",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "default": "1m",
+          "examples": ["30s", "1m", "5m"]
+        }
+      }
+    }
+  }
+}

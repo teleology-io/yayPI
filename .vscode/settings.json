@@ -1,0 +1,70 @@
+{
+  // YAML IntelliSense — powered by the Red Hat YAML extension (VS Code) or built-in YAML support (Cursor).
+  // Provides autocomplete, hover docs, and typo detection for all yayPi YAML files.
+  "yaml.schemas": {
+    "./schemas/root.schema.json": [
+      "yaypi.yaml",
+      "yaypi.yml"
+    ],
+    "./schemas/entity.schema.json": [
+      "**/entities/**/*.yaml",
+      "**/entities/**/*.yml",
+      "entities.yaml",
+      "entities.yml"
+    ],
+    "./schemas/endpoints.schema.json": [
+      "**/endpoints/**/*.yaml",
+      "**/endpoints/**/*.yml",
+      "endpoints.yaml",
+      "endpoints.yml"
+    ],
+    "./schemas/auth.schema.json": [
+      "**/auth/**/*.yaml",
+      "**/auth/**/*.yml",
+      "auth.yaml",
+      "auth.yml"
+    ],
+    "./schemas/jobs.schema.json": [
+      "**/jobs/**/*.yaml",
+      "**/jobs/**/*.yml",
+      "jobs.yaml",
+      "jobs.yml"
+    ],
+    "./schemas/seed.schema.json": [
+      "**/seeds/**/*.yaml",
+      "**/seeds/**/*.yml",
+      "**/seed/**/*.yaml",
+      "**/seed/**/*.yml",
+      "seeds.yaml",
+      "seeds.yml"
+    ],
+    "./schemas/email.schema.json": [
+      "**/emails/**/*.yaml",
+      "**/emails/**/*.yml",
+      "**/email/**/*.yaml",
+      "**/email/**/*.yml",
+      "emails.yaml",
+      "emails.yml"
+    ],
+    "./schemas/webhooks.schema.json": [
+      "**/webhooks/**/*.yaml",
+      "**/webhooks/**/*.yml",
+      "webhooks.yaml",
+      "webhooks.yml"
+    ],
+    "./schemas/policy.schema.json": [
+      "**/policies/**/*.yaml",
+      "**/policies/**/*.yml",
+      "**/policy/**/*.yaml",
+      "**/policy/**/*.yml",
+      "policies.yaml",
+      "policies.yml"
+    ]
+  },
+  // Show schema violations as errors (red squiggles).
+  "yaml.validate": true,
+  // Enable hover documentation for all YAML keys.
+  "yaml.hover": true,
+  // Enable autocomplete suggestions.
+  "yaml.completion": true
+}

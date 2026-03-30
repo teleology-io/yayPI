@@ -1,0 +1,224 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/auth.schema.json",
+  "title": "yayPi Auth Endpoints",
+  "description": "Configures the built-in authentication endpoints: register, login, me, refresh, and OAuth2.",
+  "type": "object",
+  "required": ["kind", "auth"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "auth",
+      "description": "File kind discriminator. Must be 'auth'."
+    },
+    "auth": { "$ref": "#/$defs/AuthEndpointDef" }
+  },
+  "$defs": {
+    "AuthEndpointDef": {
+      "type": "object",
+      "description": "Auth endpoint configuration block.",
+      "additionalProperties": false,
+      "properties": {
+        "base_path": {
+          "type": "string",
+          "description": "URL prefix for all auth routes.",
+          "default": "/auth",
+          "examples": ["/auth", "/api/auth"]
+        },
+        "user_entity": {
+          "type": "string",
+          "description": "Entity name that represents users.",
+          "examples": ["User", "Account"]
+        },
+        "register": { "$ref": "#/$defs/RegisterDef" },
+        "login": { "$ref": "#/$defs/LoginDef" },
+        "me": { "$ref": "#/$defs/MeDef" },
+        "refresh": { "$ref": "#/$defs/RefreshDef" },
+        "oauth2": { "$ref": "#/$defs/OAuth2Def" }
+      }
+    },
+    "RegisterDef": {
+      "type": "object",
+      "description": "POST /auth/register — creates a new user record.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the POST /auth/register endpoint.",
+          "default": false
+        },
+        "credential_field": {
+          "type": "string",
+          "description": "Entity field used as the login identifier (e.g. 'email').",
+          "examples": ["email", "username"]
+        },
+        "password_field": {
+          "type": "string",
+          "description": "Request body field containing the plain-text password. Never stored.",
+          "examples": ["password"]
+        },
+        "hash_field": {
+          "type": "string",
+          "description": "Entity field where the bcrypt hash is stored.",
+          "examples": ["password_hash"]
+        },
+        "default_role": {
+          "type": "string",
+          "description": "Role assigned to new users.",
+          "examples": ["member", "user"]
+        }
+      }
+    },
+    "LoginDef": {
+      "type": "object",
+      "description": "POST /auth/login — verifies credentials and returns a JWT.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the POST /auth/login endpoint.",
+          "default": false
+        },
+        "credential_field": {
+          "type": "string",
+          "description": "Entity field used as the login identifier.",
+          "examples": ["email", "username"]
+        },
+        "password_field": {
+          "type": "string",
+          "description": "Request body field containing the plain-text password.",
+          "examples": ["password"]
+        },
+        "hash_field": {
+          "type": "string",
+          "description": "Entity field storing the bcrypt hash to verify against.",
+          "examples": ["password_hash"]
+        }
+      }
+    },
+    "MeDef": {
+      "type": "object",
+      "description": "GET /auth/me — returns the current authenticated user's record.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the GET /auth/me endpoint.",
+          "default": false
+        }
+      }
+    },
+    "RefreshDef": {
+      "type": "object",
+      "description": "POST /auth/refresh — rotates a refresh token and issues a new access token.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable the POST /auth/refresh endpoint.",
+          "default": false
+        },
+        "expiry": {
+          "type": "string",
+          "description": "Refresh token TTL. Supports Go duration units: s, m, h, d.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h|d)$",
+          "default": "30d",
+          "examples": ["7d", "30d", "90d"]
+        },
+        "store": {
+          "type": "string",
+          "description": "Where to send/receive the refresh token.",
+          "enum": ["cookie", "body"],
+          "default": "cookie"
+        }
+      }
+    },
+    "OAuth2Def": {
+      "type": "object",
+      "description": "OAuth2 provider configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "providers": {
+          "type": "array",
+          "description": "List of OAuth2 providers.",
+          "items": { "$ref": "#/$defs/OAuth2ProviderDef" }
+        }
+      }
+    },
+    "OAuth2ProviderDef": {
+      "type": "object",
+      "description": "A single OAuth2 provider. Use 'google' or 'github' for built-in providers; set auth/token/userinfo URLs for custom.",
+      "required": ["name", "client_id", "client_secret"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Provider name. 'google' and 'github' are built-in; any other value is treated as custom.",
+          "examples": ["google", "github", "okta"]
+        },
+        "client_id": {
+          "type": "string",
+          "description": "OAuth2 client ID. Supports ${ENV_VAR} substitution.",
+          "examples": ["${GOOGLE_CLIENT_ID}"]
+        },
+        "client_secret": {
+          "type": "string",
+          "description": "OAuth2 client secret. Supports ${ENV_VAR} substitution.",
+          "examples": ["${GOOGLE_CLIENT_SECRET}"]
+        },
+        "scopes": {
+          "type": "array",
+          "description": "OAuth2 scopes to request.",
+          "items": { "type": "string" },
+          "examples": [["openid", "email", "profile"]]
+        },
+        "redirect_uri": {
+          "type": "string",
+          "description": "Callback URL registered with the provider.",
+          "examples": ["https://example.com/auth/callback/google"]
+        },
+        "success_redirect": {
+          "type": "string",
+          "description": "Where to redirect the browser after successful OAuth2 login.",
+          "examples": ["/dashboard"]
+        },
+        "error_redirect": {
+          "type": "string",
+          "description": "Where to redirect the browser on OAuth2 failure.",
+          "examples": ["/login?error=oauth"]
+        },
+        "auth_url": {
+          "type": "string",
+          "description": "Authorization endpoint URL (custom providers only)."
+        },
+        "token_url": {
+          "type": "string",
+          "description": "Token endpoint URL (custom providers only)."
+        },
+        "userinfo_url": {
+          "type": "string",
+          "description": "Userinfo endpoint URL (custom providers only)."
+        },
+        "email_field": {
+          "type": "string",
+          "description": "Userinfo JSON field to use as the email.",
+          "default": "email"
+        },
+        "name_field": {
+          "type": "string",
+          "description": "Userinfo JSON field to use as the display name.",
+          "default": "name"
+        },
+        "username_field": {
+          "type": "string",
+          "description": "Userinfo JSON field to use as the username."
+        }
+      }
+    }
+  }
+}

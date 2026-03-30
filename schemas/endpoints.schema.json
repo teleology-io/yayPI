@@ -1,0 +1,334 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/endpoints.schema.json",
+  "title": "yayPi Endpoints",
+  "description": "Defines REST endpoints for one or more entities, including CRUD, auth, rate limiting, pagination, and row-level access rules.",
+  "type": "object",
+  "required": ["kind", "endpoints"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "endpoints",
+      "description": "File kind discriminator. Must be 'endpoints'."
+    },
+    "endpoints": {
+      "type": "array",
+      "description": "List of endpoint group definitions.",
+      "items": { "$ref": "#/$defs/EndpointDef" }
+    }
+  },
+  "$defs": {
+    "EndpointDef": {
+      "type": "object",
+      "description": "A single endpoint or group of CRUD endpoints for an entity.",
+      "required": ["path"],
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "URL path. Use {id} for the record identifier parameter.",
+          "examples": ["/users", "/posts/{id}", "/admin/reports"]
+        },
+        "entity": {
+          "type": "string",
+          "description": "Entity name this endpoint maps to. Required for CRUD endpoints.",
+          "examples": ["User", "Post"]
+        },
+        "crud": {
+          "type": "array",
+          "description": "Auto-generate standard CRUD operations. Generates routes under path.",
+          "items": {
+            "type": "string",
+            "enum": ["list", "get", "create", "update", "delete"]
+          },
+          "examples": [["list", "get", "create", "update", "delete"]]
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method for custom (non-CRUD) endpoints.",
+          "enum": ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"]
+        },
+        "handler": {
+          "type": "string",
+          "description": "Plugin handler name for custom endpoints.",
+          "examples": ["myPlugin.HandleReport"]
+        },
+        "middleware": {
+          "type": "array",
+          "description": "Middleware names to apply to this endpoint (must be registered plugins).",
+          "items": { "type": "string" }
+        },
+        "auth": { "$ref": "#/$defs/AuthRequirement" },
+        "rate_limit": { "$ref": "#/$defs/RateLimitConfig" },
+        "list": { "$ref": "#/$defs/ListConfig" },
+        "get": { "$ref": "#/$defs/GetConfig" },
+        "create": { "$ref": "#/$defs/CreateConfig" },
+        "update": { "$ref": "#/$defs/UpdateConfig" },
+        "delete": { "$ref": "#/$defs/DeleteConfig" },
+        "spec": {
+          "type": "boolean",
+          "description": "Set to false to exclude this endpoint from all OpenAPI specs.",
+          "default": true
+        },
+        "specs": { "$ref": "#/$defs/EndpointSpecRef" }
+      }
+    },
+    "AuthRequirement": {
+      "type": "object",
+      "description": "Authentication and authorization requirements for an endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "require": {
+          "type": "boolean",
+          "description": "Require a valid JWT or API key. Returns 401 if not authenticated.",
+          "default": false
+        },
+        "roles": {
+          "type": "array",
+          "description": "Allowed roles. Returns 403 if the authenticated user's role is not listed.",
+          "items": { "type": "string" },
+          "examples": [["admin", "editor"]]
+        },
+        "conditions": {
+          "type": "array",
+          "description": "CEL-lite expressions evaluated against the subject. All must pass.",
+          "items": { "type": "string" },
+          "examples": [["subject.email.endsWith('@example.com')"]]
+        }
+      }
+    },
+    "RateLimitConfig": {
+      "type": "object",
+      "description": "Per-endpoint rate limiting. Overrides the global server rate limit.",
+      "additionalProperties": false,
+      "properties": {
+        "requests_per_minute": {
+          "type": "integer",
+          "description": "Maximum requests allowed per minute.",
+          "minimum": 1,
+          "examples": [60, 5]
+        },
+        "burst": {
+          "type": "integer",
+          "description": "Maximum burst size above the base rate.",
+          "minimum": 0,
+          "examples": [10, 2]
+        },
+        "key_by": {
+          "type": "string",
+          "description": "Key used to partition rate limit counters.",
+          "enum": ["ip", "user", "api_key"],
+          "default": "ip"
+        }
+      }
+    },
+    "RowAccessRule": {
+      "type": "object",
+      "description": "A single row-level access rule. Rules are evaluated in order; first match wins.",
+      "required": ["when"],
+      "additionalProperties": false,
+      "properties": {
+        "when": {
+          "type": "string",
+          "description": "Condition expression or '*' to always match. Uses subject bindings: subject.id, subject.role, subject.email.",
+          "examples": ["subject.role == 'admin'", "subject.role == 'owner'", "*"]
+        },
+        "filter": {
+          "type": "string",
+          "description": "SQL WHERE fragment injected into the query. Use :subject.id, :subject.role, :subject.email as bind parameters. Empty string means no filter (unrestricted).",
+          "examples": ["user_id = :subject.id", "tenant_id = :subject.tenant_id"]
+        }
+      }
+    },
+    "ListConfig": {
+      "type": "object",
+      "description": "Configuration for the list (GET /) endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "allow_filter_by": {
+          "type": "array",
+          "description": "Fields that clients may filter by via query params (e.g. ?status=active).",
+          "items": { "type": "string" },
+          "examples": [["status", "role", "created_at"]]
+        },
+        "allow_sort_by": {
+          "type": "array",
+          "description": "Fields that clients may sort by via ?sort=field or ?sort=-field.",
+          "items": { "type": "string" },
+          "examples": [["created_at", "name"]]
+        },
+        "default_sort": {
+          "type": "string",
+          "description": "Default sort expression. Prefix with - for descending.",
+          "examples": ["-created_at", "name"]
+        },
+        "pagination": { "$ref": "#/$defs/PaginationConfig" },
+        "include": {
+          "type": "array",
+          "description": "Relations to eager-load in list responses.",
+          "items": { "type": "string" },
+          "examples": [["author", "tags"]]
+        },
+        "auth": { "$ref": "#/$defs/AuthRequirement" },
+        "row_access": {
+          "type": "array",
+          "description": "Row-level access rules. Applied as additional WHERE clauses.",
+          "items": { "$ref": "#/$defs/RowAccessRule" }
+        }
+      }
+    },
+    "PaginationConfig": {
+      "type": "object",
+      "description": "Pagination settings for list endpoints.",
+      "additionalProperties": false,
+      "properties": {
+        "style": {
+          "type": "string",
+          "description": "Pagination style. 'cursor' uses opaque cursors; 'offset' uses page/offset with optional total count.",
+          "enum": ["cursor", "offset"],
+          "default": "cursor"
+        },
+        "default_limit": {
+          "type": "integer",
+          "description": "Default page size when client does not specify limit.",
+          "minimum": 1,
+          "default": 20,
+          "examples": [20, 50]
+        },
+        "max_limit": {
+          "type": "integer",
+          "description": "Maximum page size a client may request.",
+          "minimum": 1,
+          "default": 100,
+          "examples": [100, 500]
+        },
+        "include_total": {
+          "type": "boolean",
+          "description": "Run a COUNT(*) query and include meta.total in offset-style responses.",
+          "default": false
+        }
+      }
+    },
+    "GetConfig": {
+      "type": "object",
+      "description": "Configuration for the get (GET /{id}) endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "include": {
+          "type": "array",
+          "description": "Relations to eager-load in the response.",
+          "items": { "type": "string" }
+        },
+        "auth": { "$ref": "#/$defs/AuthRequirement" },
+        "row_access": {
+          "type": "array",
+          "description": "Row-level access rules. Request is denied (404) if none match.",
+          "items": { "$ref": "#/$defs/RowAccessRule" }
+        }
+      }
+    },
+    "CreateConfig": {
+      "type": "object",
+      "description": "Configuration for the create (POST /) endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "auth": { "$ref": "#/$defs/AuthRequirement" },
+        "before_hooks": {
+          "type": "array",
+          "description": "Plugin hook names to call before the record is created.",
+          "items": { "type": "string" }
+        },
+        "after_hooks": {
+          "type": "array",
+          "description": "Plugin hook names to call after the record is created.",
+          "items": { "type": "string" }
+        },
+        "bulk": {
+          "type": "boolean",
+          "description": "Accept an array body to create multiple records in one request.",
+          "default": false
+        },
+        "bulk_max": {
+          "type": "integer",
+          "description": "Maximum number of records in a bulk create request.",
+          "minimum": 1,
+          "default": 500,
+          "examples": [100, 500]
+        },
+        "bulk_error_mode": {
+          "type": "string",
+          "description": "How to handle per-row errors in bulk create. 'abort' rolls back all; 'partial' skips failed rows.",
+          "enum": ["abort", "partial"],
+          "default": "abort"
+        }
+      }
+    },
+    "UpdateConfig": {
+      "type": "object",
+      "description": "Configuration for the update (PATCH /{id}) endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_fields": {
+          "type": "array",
+          "description": "Whitelist of fields the client may update. Omit to allow all non-immutable fields.",
+          "items": { "type": "string" },
+          "examples": [["status", "name"]]
+        },
+        "auth": { "$ref": "#/$defs/AuthRequirement" },
+        "row_access": {
+          "type": "array",
+          "description": "Row-level access rules. Request is denied (404) if none match.",
+          "items": { "$ref": "#/$defs/RowAccessRule" }
+        }
+      }
+    },
+    "DeleteConfig": {
+      "type": "object",
+      "description": "Configuration for the delete (DELETE /{id}) endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "auth": { "$ref": "#/$defs/AuthRequirement" },
+        "soft_delete": {
+          "type": "boolean",
+          "description": "Override entity-level soft delete. If true, sets deleted_at instead of removing the row.",
+          "default": false
+        },
+        "row_access": {
+          "type": "array",
+          "description": "Row-level access rules. Request is denied (404) if none match.",
+          "items": { "$ref": "#/$defs/RowAccessRule" }
+        }
+      }
+    },
+    "EndpointSpecRef": {
+      "type": "object",
+      "description": "OpenAPI documentation overrides and per-spec filtering.",
+      "additionalProperties": false,
+      "properties": {
+        "names": {
+          "type": "array",
+          "description": "Restrict this endpoint to these spec names. Empty means include in all specs.",
+          "items": { "type": "string" }
+        },
+        "summary": {
+          "type": "string",
+          "description": "Short one-line summary for the OpenAPI operation."
+        },
+        "description": {
+          "type": "string",
+          "description": "Longer Markdown description for the OpenAPI operation."
+        },
+        "tags": {
+          "type": "array",
+          "description": "OpenAPI tags for grouping operations.",
+          "items": { "type": "string" }
+        }
+      }
+    }
+  }
+}

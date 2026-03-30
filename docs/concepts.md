@@ -209,15 +209,47 @@ Email and webhook hooks are built-in plugin implementations that are auto-regist
 
 Seed files (`kind: seed`) define rows that should exist in the database. They run at startup before routes are registered and are **idempotent** — if a row with the given `key_field` value already exists, it is skipped.
 
+### File format
+
+```yaml
+version: "1"
+kind: seed
+
+seeds:
+  - entity: Role          # entity name (must be defined in an entity file)
+    key_field: name       # field used to detect existing rows; if a row with this value exists, skip it
+    data:
+      - name: admin
+      - name: editor
+      - name: member
+```
+
+Multiple entities can be seeded in a single file or split across many files. Files are applied in the order they are returned by the glob pattern.
+
+### Environment variable substitution
+
+Values in `data` support `${ENV_VAR}` substitution:
+
 ```yaml
 kind: seed
 seeds:
-  - entity: Role
-    key_field: name
+  - entity: User
+    key_field: email
     data:
-      - name: admin
-      - name: member
+      - email: "${ADMIN_EMAIL}"
+        password_hash: "${ADMIN_PASSWORD_HASH}"
+        role: admin
 ```
+
+### Running seeds
+
+Seeds run automatically at startup when included via `include:` globs. They can also be run manually:
+
+```bash
+yaypi seed
+```
+
+The command is idempotent — running it multiple times is safe.
 
 ## Token refresh
 

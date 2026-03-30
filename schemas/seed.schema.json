@@ -1,0 +1,61 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/seed.schema.json",
+  "title": "yayPi Seed",
+  "description": "Defines seed data to insert into entity tables at startup or via 'yaypi seed'. Idempotent: rows are skipped if the key_field value already exists.",
+  "type": "object",
+  "required": ["kind", "seeds"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "seed",
+      "description": "File kind discriminator. Must be 'seed'."
+    },
+    "seeds": {
+      "type": "array",
+      "description": "List of seed definitions.",
+      "items": { "$ref": "#/$defs/SeedDef" }
+    }
+  },
+  "$defs": {
+    "SeedDef": {
+      "type": "object",
+      "description": "A set of rows to insert into a single entity's table.",
+      "required": ["entity", "key_field", "data"],
+      "additionalProperties": false,
+      "properties": {
+        "entity": {
+          "type": "string",
+          "description": "Entity name to seed rows into.",
+          "examples": ["Role", "User", "Category"]
+        },
+        "key_field": {
+          "type": "string",
+          "description": "Field used to detect existing rows. If a row with this value exists, it is skipped (idempotent).",
+          "examples": ["name", "email", "slug"]
+        },
+        "data": {
+          "type": "array",
+          "description": "Rows to insert. Each item is a map of field name to value. Supports ${ENV_VAR} substitution.",
+          "items": {
+            "type": "object",
+            "description": "A single row to insert. Keys are entity field names.",
+            "additionalProperties": true
+          },
+          "examples": [
+            [
+              {"name": "admin"},
+              {"name": "editor"},
+              {"name": "member"}
+            ]
+          ]
+        }
+      }
+    }
+  }
+}

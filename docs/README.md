@@ -53,6 +53,7 @@ yaypi run
 | Write a plugin (hooks) | [Plugins](plugins.md) |
 | See all CLI commands | [CLI Reference](cli.md) |
 | See common patterns | [Patterns Cookbook](patterns.md) |
+| Get autocomplete in VS Code / Cursor | [YAML IntelliSense](intellisense.md) |
 
 ## Examples
 

@@ -127,7 +127,7 @@ include:
   - seeds/**/*.yaml
 ```
 
-See the seed YAML reference in [`.ai/config-reference.md`](../.ai/config-reference.md) for file format.
+See [Concepts — Seed data](concepts.md#seed-data) for the full file format reference.
 
 ---
 

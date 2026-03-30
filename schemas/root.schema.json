@@ -1,0 +1,448 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/root.schema.json",
+  "title": "yayPi Root Config",
+  "description": "The top-level yaypi.yaml configuration file. Defines the project, server, databases, auth, policy engine, plugins, and included file globs.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "project": { "$ref": "#/$defs/ProjectConfig" },
+    "server": { "$ref": "#/$defs/ServerConfig" },
+    "databases": {
+      "type": "array",
+      "description": "Database connection configurations.",
+      "items": { "$ref": "#/$defs/DBConfig" }
+    },
+    "auth": { "$ref": "#/$defs/AuthConfig" },
+    "policy": { "$ref": "#/$defs/PolicyConfig" },
+    "auto_migrate": {
+      "type": "boolean",
+      "description": "Run database migrations automatically on startup.",
+      "default": false
+    },
+    "plugins": {
+      "type": "array",
+      "description": "Plugin configurations. Plugins provide custom handlers, hooks, and middleware.",
+      "items": { "$ref": "#/$defs/PluginConfig" }
+    },
+    "include": {
+      "type": "array",
+      "description": "Glob patterns for YAML files to include (entities, endpoints, jobs, seeds, emails, webhooks, auth, policies).",
+      "items": { "type": "string" },
+      "examples": [
+        ["entities/**/*.yaml", "endpoints/**/*.yaml", "jobs/**/*.yaml"]
+      ]
+    },
+    "spec": {
+      "type": "array",
+      "description": "OpenAPI spec definitions. Each spec is a separate API documentation artifact.",
+      "items": { "$ref": "#/$defs/SpecConfig" }
+    }
+  },
+  "$defs": {
+    "ProjectConfig": {
+      "type": "object",
+      "description": "Project-level metadata.",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Project name.",
+          "examples": ["my-api", "acme-backend"]
+        },
+        "base_url": {
+          "type": "string",
+          "description": "Base URL of the API, used in OpenAPI specs.",
+          "examples": ["https://api.example.com", "http://localhost:8080"]
+        }
+      }
+    },
+    "ServerConfig": {
+      "type": "object",
+      "description": "HTTP server settings.",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "description": "Port to listen on.",
+          "default": 8080,
+          "minimum": 1,
+          "maximum": 65535,
+          "examples": [8080, 3000, 9090]
+        },
+        "read_timeout": {
+          "type": "string",
+          "description": "Maximum time to read the full request including body.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "examples": ["15s", "30s"]
+        },
+        "write_timeout": {
+          "type": "string",
+          "description": "Maximum time to write the full response.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "examples": ["15s", "30s"]
+        },
+        "shutdown_timeout": {
+          "type": "string",
+          "description": "Graceful shutdown timeout on SIGTERM.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "examples": ["30s", "1m"]
+        },
+        "max_request_body_size": {
+          "type": "string",
+          "description": "Maximum allowed request body size.",
+          "examples": ["1MB", "10MB", "32MB"]
+        },
+        "max_header_bytes": {
+          "type": "string",
+          "description": "Maximum allowed request header size.",
+          "examples": ["1MB", "4KB"]
+        },
+        "allowed_origins": {
+          "type": "array",
+          "description": "CORS allowed origins. Use '*' to allow all.",
+          "items": { "type": "string" },
+          "examples": [["https://app.example.com", "https://admin.example.com"]]
+        },
+        "tls": { "$ref": "#/$defs/TLSConfig" },
+        "health": { "$ref": "#/$defs/HealthConfig" },
+        "rate_limit": { "$ref": "#/$defs/RateLimitConfig" }
+      }
+    },
+    "TLSConfig": {
+      "type": "object",
+      "description": "TLS certificate configuration.",
+      "required": ["cert_file", "key_file"],
+      "additionalProperties": false,
+      "properties": {
+        "cert_file": {
+          "type": "string",
+          "description": "Path to the TLS certificate file.",
+          "examples": ["/etc/ssl/certs/server.crt"]
+        },
+        "key_file": {
+          "type": "string",
+          "description": "Path to the TLS private key file.",
+          "examples": ["/etc/ssl/private/server.key"]
+        }
+      }
+    },
+    "HealthConfig": {
+      "type": "object",
+      "description": "Health and readiness endpoint configuration.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable health and readiness endpoints.",
+          "default": false
+        },
+        "path": {
+          "type": "string",
+          "description": "Liveness probe path. Returns 200 if the process is running.",
+          "default": "/health",
+          "examples": ["/health", "/healthz"]
+        },
+        "readiness_path": {
+          "type": "string",
+          "description": "Readiness probe path. Returns 200 if all databases are reachable, 503 otherwise.",
+          "default": "/ready",
+          "examples": ["/ready", "/readyz"]
+        }
+      }
+    },
+    "RateLimitConfig": {
+      "type": "object",
+      "description": "Global rate limiting settings. Can be overridden per endpoint.",
+      "additionalProperties": false,
+      "properties": {
+        "requests_per_minute": {
+          "type": "integer",
+          "description": "Maximum requests allowed per minute.",
+          "minimum": 1,
+          "examples": [120, 60]
+        },
+        "burst": {
+          "type": "integer",
+          "description": "Maximum burst size above the base rate.",
+          "minimum": 0,
+          "examples": [20, 10]
+        },
+        "key_by": {
+          "type": "string",
+          "description": "Key used to partition rate limit counters.",
+          "enum": ["ip", "user", "api_key"],
+          "default": "ip"
+        }
+      }
+    },
+    "DBConfig": {
+      "type": "object",
+      "description": "A database connection.",
+      "required": ["name", "driver", "dsn"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Connection name referenced by entities and other config.",
+          "examples": ["primary", "readonly", "analytics"]
+        },
+        "driver": {
+          "type": "string",
+          "description": "Database driver.",
+          "enum": ["postgres", "mysql", "sqlite3"]
+        },
+        "dsn": {
+          "type": "string",
+          "description": "Data source name / connection string. Supports ${ENV_VAR} substitution.",
+          "examples": [
+            "postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=require",
+            "${DATABASE_URL}"
+          ]
+        },
+        "max_open_conns": {
+          "type": "integer",
+          "description": "Maximum number of open connections.",
+          "minimum": 1,
+          "default": 25,
+          "examples": [25, 100]
+        },
+        "max_idle_conns": {
+          "type": "integer",
+          "description": "Maximum number of idle connections.",
+          "minimum": 0,
+          "default": 5,
+          "examples": [5, 10]
+        },
+        "conn_max_lifetime": {
+          "type": "string",
+          "description": "Maximum lifetime of a connection.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "examples": ["5m", "30m", "1h"]
+        },
+        "default": {
+          "type": "boolean",
+          "description": "Mark this as the default database for entities that don't specify one.",
+          "default": false
+        },
+        "read_only": {
+          "type": "boolean",
+          "description": "Restrict this connection to read-only queries.",
+          "default": false
+        },
+        "schema": {
+          "type": "string",
+          "description": "Default schema/search_path for PostgreSQL connections.",
+          "examples": ["public", "app"]
+        }
+      }
+    },
+    "AuthConfig": {
+      "type": "object",
+      "description": "JWT and API key authentication settings.",
+      "additionalProperties": false,
+      "properties": {
+        "provider": {
+          "type": "string",
+          "description": "Auth provider identifier.",
+          "examples": ["local"]
+        },
+        "secret": {
+          "type": "string",
+          "description": "JWT signing secret. Supports ${ENV_VAR} substitution. Use a strong random value in production.",
+          "examples": ["${JWT_SECRET}"]
+        },
+        "expiry": {
+          "type": "string",
+          "description": "Access token TTL.",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h|d)$",
+          "default": "15m",
+          "examples": ["15m", "1h", "24h"]
+        },
+        "algorithm": {
+          "type": "string",
+          "description": "JWT signing algorithm.",
+          "enum": ["HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384", "ES512"],
+          "default": "HS256"
+        },
+        "reject_algorithms": {
+          "type": "array",
+          "description": "Algorithms to explicitly reject in incoming tokens (defense against algorithm confusion attacks).",
+          "items": { "type": "string" },
+          "examples": [["none", "RS256"]]
+        },
+        "api_keys": { "$ref": "#/$defs/APIKeyConfig" }
+      }
+    },
+    "APIKeyConfig": {
+      "type": "object",
+      "description": "API key authentication. Keys can be static (inline) or DB-backed (entity lookup).",
+      "additionalProperties": false,
+      "properties": {
+        "header": {
+          "type": "string",
+          "description": "Request header name for the API key.",
+          "default": "X-API-Key",
+          "examples": ["X-API-Key", "Authorization"]
+        },
+        "query_param": {
+          "type": "string",
+          "description": "Query parameter name to also accept the API key from (e.g. ?api_key=...).",
+          "examples": ["api_key", "token"]
+        },
+        "keys": {
+          "type": "array",
+          "description": "Static API keys. Use for server-to-server integrations where keys are managed in config.",
+          "items": { "$ref": "#/$defs/StaticAPIKey" }
+        },
+        "entity": {
+          "type": "string",
+          "description": "Entity name for DB-backed API key lookup. Used when 'keys' is empty.",
+          "examples": ["ApiKey"]
+        },
+        "key_field": {
+          "type": "string",
+          "description": "Entity field holding the key value.",
+          "default": "token",
+          "examples": ["token", "key_hash"]
+        },
+        "role_field": {
+          "type": "string",
+          "description": "Entity field holding the role to inject into the authenticated subject.",
+          "default": "role",
+          "examples": ["role"]
+        }
+      }
+    },
+    "StaticAPIKey": {
+      "type": "object",
+      "description": "A single static API key entry.",
+      "required": ["key", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "key": {
+          "type": "string",
+          "description": "The API key value. Supports ${ENV_VAR} substitution.",
+          "examples": ["${INTERNAL_API_KEY}"]
+        },
+        "role": {
+          "type": "string",
+          "description": "Role injected into the subject when this key is used.",
+          "examples": ["service", "admin", "readonly"]
+        }
+      }
+    },
+    "PolicyConfig": {
+      "type": "object",
+      "description": "RBAC policy engine settings.",
+      "additionalProperties": false,
+      "properties": {
+        "engine": {
+          "type": "string",
+          "description": "Policy engine to use.",
+          "enum": ["casbin"],
+          "examples": ["casbin"]
+        },
+        "model": {
+          "type": "string",
+          "description": "Path to the Casbin model file.",
+          "examples": ["policy/model.conf"]
+        },
+        "adapter": {
+          "type": "string",
+          "description": "Casbin adapter type.",
+          "enum": ["file", "db"],
+          "examples": ["file", "db"]
+        },
+        "adapter_table": {
+          "type": "string",
+          "description": "Table name for DB-backed Casbin adapter.",
+          "examples": ["casbin_rules"]
+        }
+      }
+    },
+    "PluginConfig": {
+      "type": "object",
+      "description": "A plugin configuration entry.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Plugin name used to reference it in hooks and middleware.",
+          "examples": ["myPlugin", "auditLogger"]
+        },
+        "path": {
+          "type": "string",
+          "description": "Path to the plugin .so file (for external plugins).",
+          "examples": ["./plugins/audit.so"]
+        },
+        "checksum": {
+          "type": "string",
+          "description": "SHA256 checksum of the plugin file for integrity verification.",
+          "examples": ["sha256:abc123..."]
+        },
+        "config": {
+          "type": "object",
+          "description": "Arbitrary plugin-specific configuration.",
+          "additionalProperties": true
+        }
+      }
+    },
+    "SpecConfig": {
+      "type": "object",
+      "description": "An OpenAPI spec definition.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Spec name. Used to filter endpoints via endpoint.specs.names.",
+          "examples": ["public", "admin", "internal"]
+        },
+        "title": {
+          "type": "string",
+          "description": "OpenAPI info.title.",
+          "examples": ["My API", "Admin API"]
+        },
+        "description": {
+          "type": "string",
+          "description": "OpenAPI info.description."
+        },
+        "version": {
+          "type": "string",
+          "description": "OpenAPI info.version.",
+          "examples": ["1.0.0", "2.1.0"]
+        },
+        "servers": {
+          "type": "array",
+          "description": "OpenAPI servers list.",
+          "items": { "$ref": "#/$defs/SpecServer" }
+        }
+      }
+    },
+    "SpecServer": {
+      "type": "object",
+      "description": "A server entry in an OpenAPI spec.",
+      "required": ["url"],
+      "additionalProperties": false,
+      "properties": {
+        "url": {
+          "type": "string",
+          "description": "Server URL.",
+          "examples": ["https://api.example.com", "http://localhost:8080"]
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of this server.",
+          "examples": ["Production", "Local development"]
+        }
+      }
+    }
+  }
+}

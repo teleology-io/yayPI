@@ -1,0 +1,70 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/email.schema.json",
+  "title": "yayPi Email",
+  "description": "Defines trigger-based HTML email notifications sent via SMTP. Configure SMTP via SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SENDER_NAME, SMTP_SENDER_EMAIL environment variables.",
+  "type": "object",
+  "required": ["kind", "emails"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "email",
+      "description": "File kind discriminator. Must be 'email'."
+    },
+    "emails": {
+      "type": "array",
+      "description": "List of email trigger definitions.",
+      "items": { "$ref": "#/$defs/EmailDef" }
+    }
+  },
+  "$defs": {
+    "EmailDef": {
+      "type": "object",
+      "description": "A single email trigger fired when a lifecycle event occurs on an entity.",
+      "required": ["name", "entity", "trigger", "to", "subject", "body"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Unique name for this email trigger, used in logs.",
+          "examples": ["welcome-email", "password-reset", "order-confirmation"]
+        },
+        "entity": {
+          "type": "string",
+          "description": "Entity whose events trigger this email.",
+          "examples": ["User", "Order"]
+        },
+        "trigger": {
+          "type": "string",
+          "description": "Lifecycle event that fires this email.",
+          "enum": ["after_create", "after_update", "after_delete"]
+        },
+        "condition": {
+          "type": "string",
+          "description": "Optional CEL-lite expression. Email only fires if this evaluates to true. Supports record.<field> bindings.",
+          "examples": ["record.email_verified == false", "record.status == 'pending'"]
+        },
+        "to": {
+          "type": "string",
+          "description": "Recipient email address. Supports {{record.field}} and ${ENV_VAR} substitution.",
+          "examples": ["{{record.email}}", "admin@example.com", "${ADMIN_EMAIL}"]
+        },
+        "subject": {
+          "type": "string",
+          "description": "Email subject line. Supports {{record.field}} and ${ENV_VAR} substitution.",
+          "examples": ["Welcome to ${APP_NAME}, {{record.name}}!", "Your order #{{record.id}} is confirmed"]
+        },
+        "body": {
+          "type": "string",
+          "description": "HTML email body. Supports {{record.field}} and ${ENV_VAR} substitution.",
+          "examples": ["<h1>Hi {{record.name}},</h1><p>Welcome!</p>"]
+        }
+      }
+    }
+  }
+}

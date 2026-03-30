@@ -1,0 +1,73 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://yaypi.dev/schemas/policy.schema.json",
+  "title": "yayPi Policy",
+  "description": "Defines RBAC roles and permissions for the policy engine.",
+  "type": "object",
+  "required": ["kind", "roles"],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "string",
+      "description": "Schema version.",
+      "examples": ["1"]
+    },
+    "kind": {
+      "const": "policy",
+      "description": "File kind discriminator. Must be 'policy'."
+    },
+    "roles": {
+      "type": "array",
+      "description": "List of role definitions.",
+      "items": { "$ref": "#/$defs/RoleConfig" }
+    }
+  },
+  "$defs": {
+    "RoleConfig": {
+      "type": "object",
+      "description": "A single role with optional inheritance and permissions.",
+      "required": ["name"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "description": "Role name. Used in auth.roles lists and JWT claims.",
+          "examples": ["admin", "editor", "member", "guest"]
+        },
+        "inherits": {
+          "type": "array",
+          "description": "Roles this role inherits permissions from.",
+          "items": { "type": "string" },
+          "examples": [["member"], ["editor", "viewer"]]
+        },
+        "permissions": {
+          "type": "array",
+          "description": "Explicit permissions granted to this role.",
+          "items": { "$ref": "#/$defs/PermissionConfig" }
+        }
+      }
+    },
+    "PermissionConfig": {
+      "type": "object",
+      "description": "A permission entry granting actions on a resource.",
+      "required": ["resource", "actions"],
+      "additionalProperties": false,
+      "properties": {
+        "resource": {
+          "type": "string",
+          "description": "Resource identifier (entity name or '*' for all).",
+          "examples": ["User", "Post", "*"]
+        },
+        "actions": {
+          "type": "array",
+          "description": "Allowed actions on the resource.",
+          "items": {
+            "type": "string",
+            "enum": ["list", "get", "create", "update", "delete", "*"]
+          },
+          "examples": [["list", "get"], ["*"]]
+        }
+      }
+    }
+  }
+}
