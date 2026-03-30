@@ -54,6 +54,19 @@ func (f *Factory) Update(entity *schema.Entity, opts *schema.UpdateOpts) http.Ha
 			}
 		}
 
+		// Strip immutable fields — they may only be set on create
+		for _, f := range entity.Fields {
+			if f.Immutable {
+				delete(data, f.Name)
+			}
+		}
+
+		// Validate field rules (partial update — only check provided fields)
+		if verrs := validateFields(entity, data, true); verrs != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": verrs})
+			return
+		}
+
 		// Enforce field-level write restrictions
 		sub := middleware.GetSubject(r)
 		applyWriteRoles(entity, data, sub)

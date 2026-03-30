@@ -45,6 +45,7 @@ type Endpoint struct {
 	Handler         string
 	Middleware      []string
 	Auth            *Auth
+	RateLimit       *RateLimit              // optional per-endpoint rate limit
 	List            *ListOpts
 	Get             *GetOpts
 	Create          *CreateOpts
@@ -52,6 +53,13 @@ type Endpoint struct {
 	Delete          *DeleteOpts
 	ExcludeFromSpec bool                    // true when spec: false
 	Specs           *EndpointSpecMembership // nil = include in all specs with no metadata override
+}
+
+// RateLimit holds rate limiting settings for an endpoint.
+type RateLimit struct {
+	RequestsPerMinute int
+	Burst             int
+	KeyBy             string // ip | user
 }
 
 // Auth holds authentication/authorization requirements for an endpoint.
@@ -81,9 +89,10 @@ type ListOpts struct {
 
 // Pagination holds pagination settings.
 type Pagination struct {
-	Style        string // cursor, offset, page
+	Style        string // cursor | offset
 	DefaultLimit int
 	MaxLimit     int
+	IncludeTotal bool // offset style: emit meta.total via COUNT(*) query
 }
 
 // GetOpts holds get endpoint options.
@@ -199,6 +208,7 @@ func buildEndpoint(def *config.EndpointDef) *Endpoint {
 		Handler:    def.Handler,
 		Middleware: def.Middleware,
 		Auth:       buildAuth(def.Auth),
+		RateLimit:  buildRateLimit(def.RateLimit),
 	}
 	if def.List != nil {
 		ep.List = buildListOpts(def.List)
@@ -227,6 +237,17 @@ func buildEndpoint(def *config.EndpointDef) *Endpoint {
 		}
 	}
 	return ep
+}
+
+func buildRateLimit(r *config.RateLimitConfig) *RateLimit {
+	if r == nil {
+		return nil
+	}
+	return &RateLimit{
+		RequestsPerMinute: r.RequestsPerMinute,
+		Burst:             r.Burst,
+		KeyBy:             r.KeyBy,
+	}
 }
 
 func buildAuth(a *config.AuthRequirement) *Auth {
@@ -261,6 +282,7 @@ func buildListOpts(l *config.ListConfig) *ListOpts {
 			Style:        l.Pagination.Style,
 			DefaultLimit: l.Pagination.DefaultLimit,
 			MaxLimit:     l.Pagination.MaxLimit,
+			IncludeTotal: l.Pagination.IncludeTotal,
 		}
 	}
 	if opts.Pagination.DefaultLimit == 0 {

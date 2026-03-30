@@ -33,8 +33,22 @@ type Field struct {
 	Precision    int
 	Scale        int
 	Index        bool
-	ReadRoles    []string // ABAC: nil = no restriction; set = only these roles can read this field
-	WriteRoles   []string // ABAC: nil = no restriction; set = only these roles can write this field
+	Immutable    bool       // stripped from PATCH body; accepted on create only
+	ReadRoles    []string   // ABAC: nil = no restriction; set = only these roles can read this field
+	WriteRoles   []string   // ABAC: nil = no restriction; set = only these roles can write this field
+	Validate     *FieldValidation
+}
+
+// FieldValidation holds validation rules for a field.
+type FieldValidation struct {
+	Required  bool
+	MinLength int
+	MaxLength int
+	Min       *float64
+	Max       *float64
+	Pattern   string
+	Format    string // email, url, uuid, slug
+	Message   string // custom error message override
 }
 
 // Reference represents a foreign key reference from a field.

@@ -84,17 +84,6 @@ func (f *Factory) List(entity *schema.Entity, opts *schema.ListOpts) http.Handle
 			limit = parsed
 		}
 
-		// Cursor
-		var cursor *query.Cursor
-		if cursorStr := q.Get("cursor"); cursorStr != "" {
-			c, err := query.DecodeCursor(cursorStr, f.secret)
-			if err != nil {
-				writeError(w, http.StatusBadRequest, "invalid cursor")
-				return
-			}
-			cursor = c
-		}
-
 		// Resolve row-level access filter
 		sub := middleware.GetSubject(r)
 		var rowFilter string
@@ -112,47 +101,113 @@ func (f *Factory) List(entity *schema.Entity, opts *schema.ListOpts) http.Handle
 			}
 		}
 
-		lq := query.ListQuery{
-			Filters: filters,
-			Sort:    sortParam,
-			Limit:   limit,
-			Cursor:  cursor,
-		}
+		useOffset := opts != nil && opts.Pagination.Style == "offset"
 
-		rows, err := builder.List(r.Context(), lq, rowFilter, rowArgs)
-		if err != nil {
-			writeError(w, http.StatusInternalServerError, "query failed")
-			return
-		}
-
-		// Strip omit_response fields and apply field-level access control
-		for _, row := range rows {
-			stripOmitFields(entity, row)
-			applyFieldAccess(entity, row, sub)
-		}
-
-		// Build next cursor if results fill the page
-		var nextCursor string
-		if len(rows) == limit && len(rows) > 0 {
-			last := rows[len(rows)-1]
-			c := query.Cursor{ID: stringVal(last["id"])}
-			if ts, ok := last["created_at"]; ok {
-				c.CreatedAt = stringVal(ts)
+		if useOffset {
+			// --- Offset pagination ---
+			offset := 0
+			if oStr := q.Get("offset"); oStr != "" {
+				parsed, err := strconv.Atoi(oStr)
+				if err != nil || parsed < 0 {
+					writeError(w, http.StatusBadRequest, "invalid offset")
+					return
+				}
+				offset = parsed
 			}
-			nextCursor = query.EncodeCursor(c, f.secret)
-		}
 
-		meta := map[string]interface{}{
-			"count": len(rows),
-		}
-		if nextCursor != "" {
-			meta["next_cursor"] = nextCursor
-		}
+			oq := query.OffsetQuery{
+				Filters: filters,
+				Sort:    sortParam,
+				Limit:   limit,
+				Offset:  offset,
+			}
 
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"data": rows,
-			"meta": meta,
-		})
+			rows, err := builder.ListOffset(r.Context(), oq, rowFilter, rowArgs)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "query failed")
+				return
+			}
+
+			for _, row := range rows {
+				stripOmitFields(entity, row)
+				applyFieldAccess(entity, row, sub)
+			}
+
+			page := 1
+			if limit > 0 && offset > 0 {
+				page = offset/limit + 1
+			}
+
+			meta := map[string]interface{}{
+				"count":  len(rows),
+				"limit":  limit,
+				"offset": offset,
+				"page":   page,
+			}
+
+			if opts.Pagination.IncludeTotal {
+				total, err := builder.Count(r.Context(), filters, rowFilter, rowArgs)
+				if err == nil {
+					meta["total"] = total
+				}
+			}
+
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"data": rows,
+				"meta": meta,
+			})
+		} else {
+			// --- Cursor pagination ---
+			var cursor *query.Cursor
+			if cursorStr := q.Get("cursor"); cursorStr != "" {
+				c, err := query.DecodeCursor(cursorStr, f.secret)
+				if err != nil {
+					writeError(w, http.StatusBadRequest, "invalid cursor")
+					return
+				}
+				cursor = c
+			}
+
+			lq := query.ListQuery{
+				Filters: filters,
+				Sort:    sortParam,
+				Limit:   limit,
+				Cursor:  cursor,
+			}
+
+			rows, err := builder.List(r.Context(), lq, rowFilter, rowArgs)
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "query failed")
+				return
+			}
+
+			for _, row := range rows {
+				stripOmitFields(entity, row)
+				applyFieldAccess(entity, row, sub)
+			}
+
+			var nextCursor string
+			if len(rows) == limit && len(rows) > 0 {
+				last := rows[len(rows)-1]
+				c := query.Cursor{ID: stringVal(last["id"])}
+				if ts, ok := last["created_at"]; ok {
+					c.CreatedAt = stringVal(ts)
+				}
+				nextCursor = query.EncodeCursor(c, f.secret)
+			}
+
+			meta := map[string]interface{}{
+				"count": len(rows),
+			}
+			if nextCursor != "" {
+				meta["next_cursor"] = nextCursor
+			}
+
+			writeJSON(w, http.StatusOK, map[string]interface{}{
+				"data": rows,
+				"meta": meta,
+			})
+		}
 	}
 }
 

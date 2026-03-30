@@ -8,6 +8,7 @@ import (
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/teleology-io/yayPI/internal/auth"
 	"github.com/teleology-io/yayPI/internal/handler"
+	"github.com/teleology-io/yayPI/internal/health"
 	"github.com/teleology-io/yayPI/internal/middleware"
 	"github.com/teleology-io/yayPI/internal/openapi"
 	"github.com/teleology-io/yayPI/internal/policy"
@@ -22,7 +23,9 @@ type Config struct {
 	Enforcer       *policy.Engine
 	AuthHandler    *auth.Handler    // optional; mounts register/login/me/oauth2 routes
 	OpenAPIHandler *openapi.Handler // optional; serves /openapi/{name}.json
+	HealthHandler  *health.Handler  // optional; mounts /health and /ready
 	AllowedOrigins []string         // CORS: permitted origins; ["*"] allows all
+	RateLimit      *middleware.RateLimiter // optional; global rate limiter
 }
 
 // Build constructs a chi.Router from the schema registry and config.
@@ -40,6 +43,15 @@ func Build(
 	r.Use(middleware.Recover)
 	if len(cfg.AllowedOrigins) > 0 {
 		r.Use(middleware.CORS(cfg.AllowedOrigins))
+	}
+	if cfg.RateLimit != nil {
+		r.Use(cfg.RateLimit.Handler)
+	}
+
+	// Health/readiness endpoints — mounted outside base URL so they are
+	// always reachable regardless of base_url prefix.
+	if cfg.HealthHandler != nil {
+		cfg.HealthHandler.Mount(r)
 	}
 
 	// Global OPTIONS catch-all so chi never returns 405 for CORS preflight.
@@ -188,6 +200,16 @@ func buildMiddlewareChain(
 	op string,
 ) []func(http.Handler) http.Handler {
 	var mws []func(http.Handler) http.Handler
+
+	// Per-endpoint rate limiter (takes precedence over global).
+	if ep.RateLimit != nil && ep.RateLimit.RequestsPerMinute > 0 {
+		rps := float64(ep.RateLimit.RequestsPerMinute) / 60.0
+		burst := ep.RateLimit.Burst
+		if burst <= 0 {
+			burst = ep.RateLimit.RequestsPerMinute
+		}
+		mws = append(mws, middleware.NewRateLimiter(burst, rps).Handler)
+	}
 
 	auth := resolveOpAuth(ep, op)
 

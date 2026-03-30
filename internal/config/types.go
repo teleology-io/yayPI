@@ -18,6 +18,7 @@ type RootConfig struct {
 	Entities     []*EntityConfig          `yaml:"-"`
 	Endpoints    []*EndpointFileConfig    `yaml:"-"`
 	Jobs         []*JobConfig             `yaml:"-"`
+	SeedFiles    []*SeedFileConfig        `yaml:"-"`
 	AuthEndpoint *AuthEndpointFileConfig  `yaml:"-"`
 }
 
@@ -52,12 +53,28 @@ type ServerConfig struct {
 	MaxHeaderBytes     string        `yaml:"max_header_bytes"`
 	TLS                *TLSConfig    `yaml:"tls"`
 	AllowedOrigins     []string      `yaml:"allowed_origins"`
+	Health             *HealthConfig `yaml:"health"`
+	RateLimit          *RateLimitConfig `yaml:"rate_limit"`
 }
 
 // TLSConfig holds TLS certificate settings.
 type TLSConfig struct {
 	CertFile string `yaml:"cert_file"`
 	KeyFile  string `yaml:"key_file"`
+}
+
+// HealthConfig holds health/readiness endpoint settings.
+type HealthConfig struct {
+	Enabled       bool   `yaml:"enabled"`
+	Path          string `yaml:"path"`           // default: /health
+	ReadinessPath string `yaml:"readiness_path"` // default: /ready
+}
+
+// RateLimitConfig holds global rate limiting settings.
+type RateLimitConfig struct {
+	RequestsPerMinute int    `yaml:"requests_per_minute"`
+	Burst             int    `yaml:"burst"`
+	KeyBy             string `yaml:"key_by"` // ip | user (default: ip)
 }
 
 // DBConfig holds database connection settings.
@@ -132,10 +149,24 @@ type FieldDef struct {
 	PrimaryKey    bool             `yaml:"primary_key"`
 	Default       string           `yaml:"default"`
 	Index         bool             `yaml:"index"`
-	Values        []string         `yaml:"values"` // for enum
+	Immutable     bool             `yaml:"immutable"`    // stripped from PATCH body; accepted on create only
+	Values        []string         `yaml:"values"`       // for enum
 	References    *ReferenceDef    `yaml:"references"`
 	Serialization SerializationDef `yaml:"serialization"`
-	Access        *FieldAccessDef  `yaml:"access"` // ABAC: per-role read/write access
+	Access        *FieldAccessDef  `yaml:"access"`       // ABAC: per-role read/write access
+	Validate      *FieldValidateDef `yaml:"validate"`    // input validation rules
+}
+
+// FieldValidateDef holds validation rules for a field.
+type FieldValidateDef struct {
+	Required  bool    `yaml:"required"`
+	MinLength int     `yaml:"min_length"`
+	MaxLength int     `yaml:"max_length"`
+	Min       *float64 `yaml:"min"`
+	Max       *float64 `yaml:"max"`
+	Pattern   string  `yaml:"pattern"`
+	Format    string  `yaml:"format"` // email, url, uuid, slug
+	Message   string  `yaml:"message"` // custom error message override
 }
 
 // ReferenceDef describes a foreign key reference.
@@ -205,6 +236,7 @@ type EndpointDef struct {
 	Handler    string           `yaml:"handler"`
 	Middleware []string         `yaml:"middleware"`
 	Auth       *AuthRequirement `yaml:"auth"`
+	RateLimit  *RateLimitConfig `yaml:"rate_limit"` // per-endpoint rate limit (overrides global)
 	List       *ListConfig      `yaml:"list"`
 	Get        *GetConfig       `yaml:"get"`
 	Create     *CreateConfig    `yaml:"create"`
@@ -260,6 +292,7 @@ type PaginationConfig struct {
 	Style        string `yaml:"style"`
 	DefaultLimit int    `yaml:"default_limit"`
 	MaxLimit     int    `yaml:"max_limit"`
+	IncludeTotal bool   `yaml:"include_total"` // offset style: run COUNT(*) query
 }
 
 // GetConfig describes get endpoint configuration.
@@ -382,6 +415,21 @@ type MeDef struct {
 // OAuth2Def holds OAuth2 provider configurations.
 type OAuth2Def struct {
 	Providers []OAuth2ProviderDef `yaml:"providers"`
+}
+
+// SeedFileConfig represents a "kind: seed" YAML file.
+type SeedFileConfig struct {
+	Version  string    `yaml:"version"`
+	Kind     string    `yaml:"kind"`
+	Seeds    []SeedDef `yaml:"seeds"`
+	FilePath string    `yaml:"-"`
+}
+
+// SeedDef defines a set of rows to insert into an entity table.
+type SeedDef struct {
+	Entity   string                   `yaml:"entity"`
+	KeyField string                   `yaml:"key_field"` // field used to detect existing rows
+	Data     []map[string]interface{} `yaml:"data"`
 }
 
 // OAuth2ProviderDef configures a single OAuth2 provider.

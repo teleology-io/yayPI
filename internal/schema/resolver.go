@@ -121,6 +121,7 @@ func buildField(fd config.FieldDef) (Field, error) {
 		Precision:    fd.Precision,
 		Scale:        fd.Scale,
 		Index:        fd.Index,
+		Immutable:    fd.Immutable,
 	}
 
 	if fd.References != nil {
@@ -135,6 +136,19 @@ func buildField(fd config.FieldDef) (Field, error) {
 	if fd.Access != nil {
 		f.ReadRoles = fd.Access.ReadRoles
 		f.WriteRoles = fd.Access.WriteRoles
+	}
+
+	if fd.Validate != nil {
+		f.Validate = &FieldValidation{
+			Required:  fd.Validate.Required,
+			MinLength: fd.Validate.MinLength,
+			MaxLength: fd.Validate.MaxLength,
+			Min:       fd.Validate.Min,
+			Max:       fd.Validate.Max,
+			Pattern:   fd.Validate.Pattern,
+			Format:    fd.Validate.Format,
+			Message:   fd.Validate.Message,
+		}
 	}
 
 	return f, nil

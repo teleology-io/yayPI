@@ -18,6 +18,8 @@ import (
 	"github.com/teleology-io/yayPI/internal/cron"
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/handler"
+	"github.com/teleology-io/yayPI/internal/health"
+	"github.com/teleology-io/yayPI/internal/middleware"
 	"github.com/teleology-io/yayPI/internal/migration"
 	"github.com/teleology-io/yayPI/internal/openapi"
 	"github.com/teleology-io/yayPI/internal/plugin"
@@ -138,6 +140,24 @@ func (s *Server) Run() error {
 		}
 	}
 
+	// Health handler
+	var healthHandler *health.Handler
+	if cfg.Server.Health != nil && cfg.Server.Health.Enabled {
+		// dbManager satisfies health.Checker via its HealthCheck method; nil is safe.
+		healthHandler = health.New(dbManager, cfg.Server.Health.Path, cfg.Server.Health.ReadinessPath)
+	}
+
+	// Global rate limiter
+	var rateLimiter *middleware.RateLimiter
+	if cfg.Server.RateLimit != nil && cfg.Server.RateLimit.RequestsPerMinute > 0 {
+		rps := float64(cfg.Server.RateLimit.RequestsPerMinute) / 60.0
+		burst := cfg.Server.RateLimit.Burst
+		if burst <= 0 {
+			burst = cfg.Server.RateLimit.RequestsPerMinute
+		}
+		rateLimiter = middleware.NewRateLimiter(burst, rps)
+	}
+
 	routerCfg := router.Config{
 		BaseURL:        cfg.Project.BaseURL,
 		AuthSecret:     secret,
@@ -145,7 +165,9 @@ func (s *Server) Run() error {
 		Enforcer:       policyEngine,
 		AuthHandler:    authHandler,
 		OpenAPIHandler: openapiHandler,
+		HealthHandler:  healthHandler,
 		AllowedOrigins: cfg.Server.AllowedOrigins,
+		RateLimit:      rateLimiter,
 	}
 	httpHandler := router.Build(reg, factory, routerCfg)
 

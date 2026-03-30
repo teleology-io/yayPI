@@ -121,6 +121,111 @@ func (b *Builder) List(ctx context.Context, q ListQuery, extraFilter string, ext
 	return scanRows(rows)
 }
 
+// OffsetQuery contains parameters for an offset-based list query.
+type OffsetQuery struct {
+	Filters     map[string]interface{}
+	Sort        string
+	Limit       int
+	Offset      int
+}
+
+// ListOffset queries the database using LIMIT/OFFSET and returns rows.
+func (b *Builder) ListOffset(ctx context.Context, q OffsetQuery, extraFilter string, extraArgs []interface{}) ([]map[string]interface{}, error) {
+	cols := b.selectColumns()
+	table := b.entity.Table
+
+	var args []interface{}
+	var whereClauses []string
+	argIdx := 1
+
+	for col, val := range q.Filters {
+		if !b.isAllowedColumn(col) {
+			continue
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", b.qi(col), b.ph(argIdx)))
+		args = append(args, val)
+		argIdx++
+	}
+
+	if b.entity.SoftDelete {
+		whereClauses = append(whereClauses, "deleted_at IS NULL")
+	}
+
+	if extraFilter != "" {
+		whereClauses = append(whereClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
+		args = append(args, extraArgs...)
+		argIdx += len(extraArgs)
+	}
+
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s", cols, b.qi(table))
+	if len(whereClauses) > 0 {
+		sqlStr += " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	if q.Sort != "" {
+		orderClause, err := b.buildOrderClause(q.Sort)
+		if err != nil {
+			return nil, err
+		}
+		sqlStr += " ORDER BY " + orderClause
+	} else {
+		sqlStr += " ORDER BY id ASC"
+	}
+
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 20
+	}
+	sqlStr += fmt.Sprintf(" LIMIT %s OFFSET %s", b.ph(argIdx), b.ph(argIdx+1))
+	args = append(args, limit, q.Offset)
+
+	sqlStr = b.dialect.Rebind(sqlStr)
+	rows, err := b.db.QueryContext(ctx, sqlStr, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list offset query: %w", err)
+	}
+	defer rows.Close()
+	return scanRows(rows)
+}
+
+// Count returns the total number of rows matching the given filters and extra filter.
+func (b *Builder) Count(ctx context.Context, filters map[string]interface{}, extraFilter string, extraArgs []interface{}) (int64, error) {
+	table := b.entity.Table
+	var args []interface{}
+	var whereClauses []string
+	argIdx := 1
+
+	for col, val := range filters {
+		if !b.isAllowedColumn(col) {
+			continue
+		}
+		whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", b.qi(col), b.ph(argIdx)))
+		args = append(args, val)
+		argIdx++
+	}
+
+	if b.entity.SoftDelete {
+		whereClauses = append(whereClauses, "deleted_at IS NULL")
+	}
+
+	if extraFilter != "" {
+		whereClauses = append(whereClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
+		args = append(args, extraArgs...)
+	}
+
+	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM %s", b.qi(table))
+	if len(whereClauses) > 0 {
+		sqlStr += " WHERE " + strings.Join(whereClauses, " AND ")
+	}
+
+	sqlStr = b.dialect.Rebind(sqlStr)
+	var count int64
+	if err := b.db.QueryRowContext(ctx, sqlStr, args...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count query: %w", err)
+	}
+	return count, nil
+}
+
 // Get retrieves a single record by ID.
 func (b *Builder) Get(ctx context.Context, id string, extraFilter string, extraArgs []interface{}) (map[string]interface{}, error) {
 	cols := b.selectColumns()

@@ -137,6 +137,14 @@ func loadInclude(cfg *RootConfig, path string) error {
 		ac.FilePath = path
 		cfg.AuthEndpoint = &ac
 
+	case "seed":
+		var sf SeedFileConfig
+		if err := yaml.Unmarshal(raw, &sf); err != nil {
+			return fmt.Errorf("parsing seed file %s: %w", path, err)
+		}
+		sf.FilePath = path
+		cfg.SeedFiles = append(cfg.SeedFiles, &sf)
+
 	case "policy":
 		// Policies are handled by the policy package; skip here.
 
@@ -238,4 +246,13 @@ func (cfg *RootConfig) AllJobDefs() []JobDef {
 		jobs = append(jobs, jf.Jobs...)
 	}
 	return jobs
+}
+
+// AllSeedDefs returns a flat list of all seed definitions from all loaded seed files.
+func (cfg *RootConfig) AllSeedDefs() []SeedDef {
+	var seeds []SeedDef
+	for _, sf := range cfg.SeedFiles {
+		seeds = append(seeds, sf.Seeds...)
+	}
+	return seeds
 }

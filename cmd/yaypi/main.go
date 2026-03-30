@@ -15,6 +15,7 @@ import (
 	"github.com/teleology-io/yayPI/internal/migration"
 	"github.com/teleology-io/yayPI/internal/openapi"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/internal/seed"
 	"github.com/teleology-io/yayPI/pkg/server"
 )
 
@@ -36,11 +37,58 @@ func main() {
 		newMigrateCmd(&configFile),
 		newInitCmd(),
 		newSpecCmd(&configFile),
+		newSeedCmd(&configFile),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// newSeedCmd creates the `yaypi seed` subcommand.
+func newSeedCmd(configFile *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "seed",
+		Short: "Insert seed data (idempotent)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runSeed(*configFile)
+		},
+	}
+}
+
+// runSeed loads config and applies all seed definitions.
+func runSeed(configFile string) error {
+	cfg, err := config.Load(configFile)
+	if err != nil {
+		return fmt.Errorf("loading config: %w", err)
+	}
+
+	seeds := cfg.AllSeedDefs()
+	if len(seeds) == 0 {
+		log.Info().Msg("no seed definitions found")
+		return nil
+	}
+
+	reg, err := schema.Build(cfg)
+	if err != nil {
+		return fmt.Errorf("building schema registry: %w", err)
+	}
+
+	if len(cfg.Databases) == 0 {
+		return fmt.Errorf("no databases configured")
+	}
+	dbManager, err := db.NewManager(cfg.Databases)
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer dbManager.Close()
+
+	if err := seed.Run(context.Background(), seeds, reg, dbManager); err != nil {
+		return fmt.Errorf("seeding: %w", err)
+	}
+
+	log.Info().Msg("seed complete")
+	return nil
 }
 
 // newRunCmd creates the `yaypi run` subcommand.

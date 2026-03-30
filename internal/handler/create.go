@@ -24,6 +24,12 @@ func (f *Factory) Create(entity *schema.Entity, opts *schema.CreateOpts) http.Ha
 			return
 		}
 
+		// Validate field rules
+		if verrs := validateFields(entity, data, false); verrs != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"errors": verrs})
+			return
+		}
+
 		// Enforce field-level write restrictions before touching the DB
 		sub := middleware.GetSubject(r)
 		applyWriteRoles(entity, data, sub)
