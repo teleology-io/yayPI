@@ -397,19 +397,18 @@ create:
 
 ### Hide sensitive fields from non-admins
 
-```yaml
-# In entities/user.yaml
-fields:
-  - name: password_hash
-    type: string
-    serialization:
-      omit_response: true     # always hidden (not in any response)
+The built-in `password_hash` field is always `omit_response: true` and `omit_log: true`.
+For custom fields added via `auth.user.fields`, you can add the same controls:
 
-  - name: internal_notes
-    type: text
-    access:
-      read_roles: [admin]     # admins only; members get null/absent field
-      write_roles: [admin]
+```yaml
+# auth.yaml — user.fields
+user:
+  fields:
+    - name: internal_notes
+      type: text
+      access:
+        read_roles: [admin]     # admins only; members get null/absent field
+        write_roles: [admin]
 ```
 
 ## Complete example

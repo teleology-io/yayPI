@@ -2,6 +2,10 @@ package config
 
 import "time"
 
+// BuiltinUserEntityName is the canonical name of the always-present User entity.
+// Defined here (in config) to avoid an import cycle with the schema package.
+const BuiltinUserEntityName = "User"
+
 // RootConfig is the top-level configuration structure loaded from yaypi.yaml.
 type RootConfig struct {
 	Version     string          `yaml:"version"`
@@ -403,15 +407,21 @@ type AuthEndpointFileConfig struct {
 	FilePath string         `yaml:"-"`
 }
 
+// UserExtensionDef allows extending the built-in User entity with custom fields.
+type UserExtensionDef struct {
+	Fields []FieldDef `yaml:"fields"`
+}
+
 // AuthEndpointDef is the auth block inside an AuthEndpointFileConfig.
 type AuthEndpointDef struct {
-	BasePath   string          `yaml:"base_path"`   // URL prefix, default: /auth
-	UserEntity string          `yaml:"user_entity"` // entity name (e.g. "User")
-	Register   *RegisterDef    `yaml:"register"`
-	Login      *LoginDef       `yaml:"login"`
-	Me         *MeDef          `yaml:"me"`
-	Refresh    *RefreshDef     `yaml:"refresh"`
-	OAuth2     *OAuth2Def      `yaml:"oauth2"`
+	BasePath   string             `yaml:"base_path"`   // URL prefix, default: /auth
+	UserEntity string             `yaml:"user_entity"` // deprecated: built-in User is always registered
+	User       *UserExtensionDef  `yaml:"user"`        // optional: extend built-in User with custom fields
+	Register   *RegisterDef       `yaml:"register"`
+	Login      *LoginDef          `yaml:"login"`
+	Me         *MeDef             `yaml:"me"`
+	Refresh    *RefreshDef        `yaml:"refresh"`
+	OAuth2     *OAuth2Def         `yaml:"oauth2"`
 }
 
 // RegisterDef configures the POST /auth/register endpoint.

@@ -270,12 +270,8 @@ Response:
 # auth.yaml
 auth:
   base_path: /auth
-  user_entity: User
   login:
     enabled: true
-    credential_field: email
-    password_field: password
-    hash_field: password_hash
   refresh:
     enabled: true
     expiry: 30d       # refresh token TTL

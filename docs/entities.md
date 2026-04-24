@@ -351,7 +351,7 @@ Each value is a list of plugin names (matching the `name` in `yaypi.yaml` `plugi
 
 See these files in `examples/community-blog/`:
 
-- [`entities/user.yaml`](../examples/community-blog/entities/user.yaml) — enum field, serialization, soft delete
+- [`auth.yaml`](../examples/community-blog/auth.yaml) — built-in User extended with custom fields (`username`, `display_name`, `bio`, `avatar_url`)
 - [`entities/post.yaml`](../examples/community-blog/entities/post.yaml) — FK reference, relations, indexes, jsonb
 - [`entities/comment.yaml`](../examples/community-blog/entities/comment.yaml) — self-referential relation
 - [`entities/post_tag.yaml`](../examples/community-blog/entities/post_tag.yaml) — junction table, composite unique constraint

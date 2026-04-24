@@ -23,8 +23,9 @@ func (e ValidationError) Error() string {
 func Validate(cfg *RootConfig) []ValidationError {
 	var errs []ValidationError
 
-	// Build entity name set
+	// Build entity name set; always include the built-in User so FK refs to "User" resolve.
 	entityNames := make(map[string]struct{})
+	entityNames[BuiltinUserEntityName] = struct{}{}
 	for _, ec := range cfg.Entities {
 		entityNames[ec.Entity.Name] = struct{}{}
 	}

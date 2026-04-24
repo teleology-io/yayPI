@@ -388,25 +388,40 @@ On `bulk_error_mode: partial`:
 
 ## Auth YAML (`kind: auth`)
 
+yayPi owns the user account model. A built-in `users` table is always present with:
+`id` (uuid), `email`, `password_hash` (omit_response/omit_log), `role` (default `'member'`), `oauth_provider`, `oauth_id`, `created_at`, `updated_at`, `deleted_at`.
+No `entities/user.yaml` needed. Use `user.fields` to add custom columns.
+
 ```yaml
 version: "1"
 kind: auth
 auth:
   base_path: /auth              # all auth routes are mounted under this prefix
-  user_entity: User             # entity used for user records
+
+  # Optional: extend built-in User with app-specific fields.
+  # Built-in field names cannot be overridden (collision = warning + skip).
+  user:
+    fields:
+      - name: display_name
+        type: string
+        length: 128
+        nullable: true
+      - name: bio
+        type: text
+        nullable: true
 
   register:
     enabled: true
-    credential_field: email     # column used as username/identifier
-    password_field: password    # plaintext password field in request body (not stored)
-    hash_field: password_hash   # column where the bcrypt hash is stored
-    default_role: member        # value written to the role column on registration
+    credential_field: email     # default: email
+    password_field: password    # default: password (never stored)
+    hash_field: password_hash   # default: password_hash
+    default_role: member        # default: member
 
   login:
     enabled: true
-    credential_field: email
-    password_field: password
-    hash_field: password_hash
+    credential_field: email     # default: email
+    password_field: password    # default: password
+    hash_field: password_hash   # default: password_hash
 
   me:
     enabled: true               # GET /auth/me returns current user from JWT sub
@@ -417,25 +432,18 @@ auth:
     store: cookie               # cookie (default, HttpOnly) | body (returns JSON)
 
   oauth2:
-    enabled: true
     providers:
       - name: google
         client_id: ${GOOGLE_CLIENT_ID}
         client_secret: ${GOOGLE_CLIENT_SECRET}
-        redirect_url: https://app.example.com/auth/callback/google
+        redirect_uri: https://app.example.com/auth/callback/google
         scopes: [email, profile]
-        user_entity: User
-        email_field: email      # entity field to match/store the OAuth email
-        role: member            # default role for OAuth-created users
 
       - name: github
         client_id: ${GITHUB_CLIENT_ID}
         client_secret: ${GITHUB_CLIENT_SECRET}
-        redirect_url: https://app.example.com/auth/callback/github
+        redirect_uri: https://app.example.com/auth/callback/github
         scopes: [user:email]
-        user_entity: User
-        email_field: email
-        role: member
 ```
 
 ### Auth endpoints

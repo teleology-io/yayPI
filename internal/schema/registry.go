@@ -3,6 +3,7 @@ package schema
 import (
 	"fmt"
 
+	"github.com/rs/zerolog/log"
 	"github.com/teleology-io/yayPI/internal/config"
 )
 
@@ -167,8 +168,24 @@ func (r *Registry) Endpoints() []*Endpoint {
 func Build(cfg *config.RootConfig) (*Registry, error) {
 	reg := NewRegistry()
 
-	// Register entities
+	// Always inject the built-in User entity first.
+	var userExtensions []config.FieldDef
+	if cfg.AuthEndpoint != nil && cfg.AuthEndpoint.Auth.User != nil {
+		userExtensions = cfg.AuthEndpoint.Auth.User.Fields
+	}
+	builtinUser, err := NewBuiltinUser(userExtensions)
+	if err != nil {
+		return nil, fmt.Errorf("building built-in User entity: %w", err)
+	}
+	reg.RegisterEntity(builtinUser)
+
+	// Register entities; skip any YAML-defined "User" — the built-in takes precedence.
 	for _, ec := range cfg.Entities {
+		if ec.Entity.Name == BuiltinUserEntityName {
+			log.Warn().Str("file", ec.FilePath).Msg(
+				`entity "User" is now built-in. Move custom fields to auth.yaml under "auth.user.fields" and delete this file.`)
+			continue
+		}
 		entity, err := buildEntity(ec)
 		if err != nil {
 			return nil, fmt.Errorf("building entity %q from %s: %w", ec.Entity.Name, ec.FilePath, err)

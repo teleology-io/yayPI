@@ -460,10 +460,41 @@ include:
   - entities/**/*.yaml
   - endpoints/**/*.yaml
   - policies/**/*.yaml
+  - auth.yaml
 `, name, name)
 
 	if err := os.WriteFile(name+"/yaypi.yaml", []byte(yaypiYAML), 0644); err != nil {
 		return fmt.Errorf("writing yaypi.yaml: %w", err)
+	}
+
+	authYAML := `version: "1"
+kind: auth
+
+auth:
+  base_path: /auth
+
+  # Uncomment to extend the built-in User with custom fields.
+  # Built-in fields (id, email, password_hash, role, oauth_provider, oauth_id,
+  # created_at, updated_at, deleted_at) are always present.
+  #
+  # user:
+  #   fields:
+  #     - name: display_name
+  #       type: string
+  #       length: 128
+  #       nullable: true
+
+  register:
+    enabled: true
+
+  login:
+    enabled: true
+
+  me:
+    enabled: true
+`
+	if err := os.WriteFile(name+"/auth.yaml", []byte(authYAML), 0644); err != nil {
+		return fmt.Errorf("writing auth.yaml: %w", err)
 	}
 
 	modelConf := `[request_definition]

@@ -32,14 +32,81 @@
         },
         "user_entity": {
           "type": "string",
-          "description": "Entity name that represents users.",
-          "examples": ["User", "Account"]
+          "description": "Deprecated: the built-in User entity is always registered. Remove this field.",
+          "deprecated": true,
+          "examples": ["User"]
         },
+        "user": { "$ref": "#/$defs/UserExtensionDef" },
         "register": { "$ref": "#/$defs/RegisterDef" },
         "login": { "$ref": "#/$defs/LoginDef" },
         "me": { "$ref": "#/$defs/MeDef" },
         "refresh": { "$ref": "#/$defs/RefreshDef" },
         "oauth2": { "$ref": "#/$defs/OAuth2Def" }
+      }
+    },
+    "UserExtensionDef": {
+      "type": "object",
+      "description": "Extends the built-in User entity with additional fields. Built-in fields (id, email, password_hash, role, oauth_provider, oauth_id, created_at, updated_at, deleted_at) cannot be overridden.",
+      "additionalProperties": false,
+      "properties": {
+        "fields": {
+          "type": "array",
+          "description": "Additional fields to add to the built-in users table.",
+          "items": { "$ref": "#/$defs/FieldDef" }
+        }
+      }
+    },
+    "FieldDef": {
+      "type": "object",
+      "description": "A single column to add to the built-in User entity.",
+      "required": ["name", "type"],
+      "additionalProperties": false,
+      "properties": {
+        "name": { "type": "string", "description": "Field name.", "examples": ["display_name", "bio"] },
+        "type": {
+          "type": "string",
+          "description": "Column type.",
+          "enum": ["uuid","string","text","integer","bigint","float","decimal","boolean","timestamptz","date","jsonb","enum","array","bytea"]
+        },
+        "length": { "type": "integer", "description": "Max length for string columns.", "minimum": 1 },
+        "precision": { "type": "integer", "description": "Total digits for decimal columns.", "minimum": 1 },
+        "scale": { "type": "integer", "description": "Decimal digits for decimal columns.", "minimum": 0 },
+        "nullable": { "type": "boolean", "description": "Allow NULL values.", "default": false },
+        "unique": { "type": "boolean", "description": "Add a UNIQUE constraint.", "default": false },
+        "default": { "type": "string", "description": "SQL default expression.", "examples": ["'active'", "now()"] },
+        "index": { "type": "boolean", "description": "Add a single-column index.", "default": false },
+        "immutable": { "type": "boolean", "description": "Accepted on create but stripped from PATCH.", "default": false },
+        "values": { "type": "array", "description": "Allowed values for enum type.", "items": { "type": "string" } },
+        "serialization": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "omit_response": { "type": "boolean", "default": false },
+            "omit_log": { "type": "boolean", "default": false }
+          }
+        },
+        "access": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "read_roles": { "type": "array", "items": { "type": "string" } },
+            "write_roles": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "validate": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "required": { "type": "boolean" },
+            "min_length": { "type": "integer" },
+            "max_length": { "type": "integer" },
+            "min": { "type": "number" },
+            "max": { "type": "number" },
+            "pattern": { "type": "string" },
+            "format": { "type": "string", "enum": ["email","url","uuid","slug"] },
+            "message": { "type": "string" }
+          }
+        }
       }
     },
     "RegisterDef": {

@@ -10,14 +10,26 @@ kind: auth
 
 auth:
   base_path: /auth        # all routes mount under this prefix (default: /auth)
-  user_entity: User       # entity name to read/write users (must exist in entities/)
+
+  # Optional: extend the built-in User with custom fields.
+  # Built-in fields are always present and cannot be overridden (see "Built-in User" below).
+  user:
+    fields:
+      - name: display_name
+        type: string
+        length: 128
+        nullable: true
+      - name: avatar_url
+        type: string
+        length: 512
+        nullable: true
 
   register:
     enabled: true
-    credential_field: email       # field used as the login identifier
-    password_field: password      # field in the request body (never stored)
-    hash_field: password_hash     # entity field that stores the bcrypt hash
-    default_role: member          # role assigned when not provided by the caller
+    credential_field: email       # default: email
+    password_field: password      # default: password (never stored)
+    hash_field: password_hash     # default: password_hash
+    default_role: member          # default: member
 
   login:
     enabled: true
@@ -254,29 +266,23 @@ Supply `auth_url`, `token_url`, and `userinfo_url` explicitly:
 
 Users created via OAuth2 are assigned a **random unusable bcrypt hash** as their `hash_field`. They cannot log in via `POST /auth/login`. To let OAuth2 users set a password later, build a separate "set password" endpoint using a plugin.
 
-## Entity requirements
+## Built-in User
 
-The `user_entity` must have fields matching your config. For the defaults (`email`, `password_hash`, `role`):
+yayPi owns the user account model. A `users` table is always created with these fields — you do not need to define a User entity:
 
-```yaml
-fields:
-  - name: email
-    type: string
-    unique: true
-    nullable: false
+| Column | Type | Notes |
+|---|---|---|
+| `id` | `uuid` | Primary key, auto-generated |
+| `email` | `varchar(255)` | Unique, required, validated as email |
+| `password_hash` | `varchar(255)` | Nullable (null for OAuth-only users); never returned in responses or logs |
+| `role` | `varchar(64)` | Default: `'member'` |
+| `oauth_provider` | `varchar(64)` | Nullable; set on OAuth2 sign-in |
+| `oauth_id` | `varchar(256)` | Nullable; set on OAuth2 sign-in |
+| `created_at` | `timestamptz` | Auto-set |
+| `updated_at` | `timestamptz` | Auto-set |
+| `deleted_at` | `timestamptz` | Nullable; soft delete |
 
-  - name: password_hash
-    type: string
-    nullable: false
-    serialization:
-      omit_response: true   # required — keeps hash out of all API responses
-      omit_log: true
-
-  - name: role
-    type: enum
-    values: [admin, editor, member]
-    default: "'member'"
-```
+To add application-specific fields (e.g. `display_name`, `bio`), use the `user.fields` block in `auth.yaml` — they are merged into the `users` table and participate in migrations automatically.
 
 ## Token format
 

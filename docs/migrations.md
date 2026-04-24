@@ -210,7 +210,7 @@ auto_migrate: true
 
 ## Example: adding a field
 
-**Before** — `entities/user.yaml` has no `bio` field.
+**Before** — the `auth.yaml` `user.fields` list has no `bio` field.
 
 **Step 1:** Add the field:
 

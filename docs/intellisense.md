@@ -97,7 +97,7 @@ The glob patterns in `.vscode/settings.json` cover these conventional layouts:
 
 | Kind | Conventional location |
 |------|----------------------|
-| entity | `entities/user.yaml`, `entities/auth/user.yaml` |
+| entity | `entities/post.yaml`, `entities/product.yaml` |
 | endpoints | `endpoints/users.yaml`, `endpoints/admin/reports.yaml` |
 | auth | `auth/auth.yaml` |
 | jobs | `jobs/cleanup.yaml` |

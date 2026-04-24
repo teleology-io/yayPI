@@ -236,12 +236,8 @@ Response on partial failure:
 # auth.yaml
 auth:
   base_path: /auth
-  user_entity: User
   login:
     enabled: true
-    credential_field: email
-    password_field: password
-    hash_field: password_hash
   refresh:
     enabled: true
     expiry: 30d               # refresh token valid for 30 days
@@ -558,18 +554,13 @@ Runtime: `GET /api/v1/openapi/api.json` and `GET /api/v1/openapi/sdk.json`
 # auth.yaml
 auth:
   base_path: /auth
-  user_entity: User
   oauth2:
-    enabled: true
     providers:
       - name: google
         client_id: ${GOOGLE_CLIENT_ID}
         client_secret: ${GOOGLE_CLIENT_SECRET}
-        redirect_url: https://app.example.com/auth/callback/google
+        redirect_uri: https://app.example.com/auth/callback/google
         scopes: [email, profile]
-        user_entity: User
-        email_field: email
-        role: member
 ```
 
 Flow: `GET /auth/google` → provider → `GET /auth/callback/google` → JWT response.

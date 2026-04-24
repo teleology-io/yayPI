@@ -3,20 +3,13 @@ kind: auth
 
 auth:
   base_path: /auth
-  user_entity: User
 
   register:
     enabled: true
-    credential_field: email
-    password_field: password
-    hash_field: password_hash
     default_role: viewer
 
   login:
     enabled: true
-    credential_field: email
-    password_field: password
-    hash_field: password_hash
 
   me:
     enabled: true

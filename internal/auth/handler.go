@@ -75,6 +75,24 @@ func (h *Handler) Mount(r chi.Router) {
 
 func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	reg := h.cfg.Register
+
+	credField := reg.CredentialField
+	if credField == "" {
+		credField = "email"
+	}
+	passField := reg.PasswordField
+	if passField == "" {
+		passField = "password"
+	}
+	hashField := reg.HashField
+	if hashField == "" {
+		hashField = "password_hash"
+	}
+	defaultRole := reg.DefaultRole
+	if defaultRole == "" {
+		defaultRole = "member"
+	}
+
 	entity, dbc, err := h.resolveEntity()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "configuration error")
@@ -89,9 +107,9 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract password — never stored directly
-	password, _ := body[reg.PasswordField].(string)
+	password, _ := body[passField].(string)
 	if password == "" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("%s is required", reg.PasswordField))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%s is required", passField))
 		return
 	}
 	if len(password) < 8 {
@@ -100,19 +118,17 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Replace raw password with bcrypt hash
-	delete(body, reg.PasswordField)
+	delete(body, passField)
 	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcryptCost)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	body[reg.HashField] = string(hash)
+	body[hashField] = string(hash)
 
 	// Apply default role if caller did not provide one
-	if reg.DefaultRole != "" {
-		if _, set := body["role"]; !set {
-			body["role"] = reg.DefaultRole
-		}
+	if _, set := body["role"]; !set {
+		body["role"] = defaultRole
 	}
 
 	cols, placeholders, vals := buildInsert(entity, body, d)
@@ -153,10 +169,10 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		lastID, _ := res.LastInsertId()
-		credCol := fieldToColumn(entity, reg.CredentialField)
+		credCol := fieldToColumn(entity, credField)
 		fetchQ := d.Rebind(fmt.Sprintf(`SELECT * FROM %s WHERE %s = $1 LIMIT 1`,
 			d.QuoteIdent(entity.Table), d.QuoteIdent(credCol)))
-		rows, qerr := dbc.SQL.QueryContext(r.Context(), fetchQ, body[reg.CredentialField])
+		rows, qerr := dbc.SQL.QueryContext(r.Context(), fetchQ, body[credField])
 		if qerr != nil || lastID == 0 {
 			writeError(w, http.StatusInternalServerError, "could not read created user")
 			return
@@ -183,6 +199,20 @@ func (h *Handler) register(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 	login := h.cfg.Login
+
+	credField := login.CredentialField
+	if credField == "" {
+		credField = "email"
+	}
+	passField := login.PasswordField
+	if passField == "" {
+		passField = "password"
+	}
+	hashField := login.HashField
+	if hashField == "" {
+		hashField = "password_hash"
+	}
+
 	entity, dbc, err := h.resolveEntity()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "configuration error")
@@ -196,15 +226,15 @@ func (h *Handler) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	credential, _ := body[login.CredentialField].(string)
-	password, _ := body[login.PasswordField].(string)
+	credential, _ := body[credField].(string)
+	password, _ := body[passField].(string)
 	if credential == "" || password == "" {
-		writeError(w, http.StatusBadRequest, fmt.Sprintf("%s and %s are required", login.CredentialField, login.PasswordField))
+		writeError(w, http.StatusBadRequest, fmt.Sprintf("%s and %s are required", credField, passField))
 		return
 	}
 
-	credCol := fieldToColumn(entity, login.CredentialField)
-	hashCol := fieldToColumn(entity, login.HashField)
+	credCol := fieldToColumn(entity, credField)
+	hashCol := fieldToColumn(entity, hashField)
 
 	query := d.Rebind(fmt.Sprintf(
 		`SELECT * FROM %s WHERE %s = $1 AND deleted_at IS NULL LIMIT 1`,
@@ -674,9 +704,13 @@ func defaultScopes(provider string) []string {
 // ── DB / schema helpers ───────────────────────────────────────────────────────
 
 func (h *Handler) resolveEntity() (*schema.Entity, *db.DB, error) {
-	entity, ok := h.registry.GetEntity(h.cfg.UserEntity)
+	name := h.cfg.UserEntity
+	if name == "" {
+		name = schema.BuiltinUserEntityName
+	}
+	entity, ok := h.registry.GetEntity(name)
 	if !ok {
-		return nil, nil, fmt.Errorf("entity %q not found in registry", h.cfg.UserEntity)
+		return nil, nil, fmt.Errorf("entity %q not found in registry", name)
 	}
 	dbc := h.dbManager.Default()
 	if entity.Database != "" {

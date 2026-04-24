@@ -30,32 +30,25 @@ yaypi run
 ## Quick example
 
 ```yaml
-# entities/user.yaml
+# auth.yaml — register, login, /me, OAuth2 out of the box
+# The built-in User (email, password_hash, role, oauth_provider, …) is always present.
+# Add custom fields here; no entities/user.yaml needed.
 version: "1"
-kind: entity
-
-entity:
-  name: User
-  timestamps: true
-  soft_delete: true
-  fields:
-    - name: email
-      type: string
-      unique: true
-      immutable: true
-      validate:
-        required: true
-        format: email
-    - name: password_hash
-      type: string
-      serialization:
-        omit_response: true
-        omit_log: true
-    - name: role
-      type: string
-      default: "'member'"
-      validate:
-        required: true
+kind: auth
+auth:
+  base_path: /auth
+  user:
+    fields:
+      - name: display_name
+        type: string
+        length: 128
+        nullable: true
+  register:
+    enabled: true
+  login:
+    enabled: true
+  me:
+    enabled: true
 ```
 
 ```yaml
