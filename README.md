@@ -3,7 +3,7 @@
 **yayPi** (Yay-PI, like API but YAML-based) is a Go framework that turns YAML configuration files into a fully functional REST API backend — no code generation, no templates, no boilerplate.
 
 ```bash
-go install github.com/teleology-io/yayPI/cmd/yaypi@latest
+curl -fsSL https://raw.githubusercontent.com/teleology-io/yayPI/master/install.sh | sh
 yaypi init my-api && cd my-api
 yaypi run
 ```
