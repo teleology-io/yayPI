@@ -174,8 +174,37 @@ roles:
 |---|---|
 | `name` | Role name — must match the `role` claim in JWTs and the `role` value in API keys |
 | `inherits` | List of roles whose permissions are also granted (additive, transitive) |
-| `permissions[].resource` | Entity name (must match `entity.name` exactly) |
-| `permissions[].actions` | List of: `list`, `get`, `create`, `update`, `delete` |
+| `permissions[].resource` | Entity name (must match `entity.name` exactly), or `*` for every entity |
+| `permissions[].actions` | List of: `list`, `get`, `create`, `update`, `delete`, or `["*"]` for all five |
+
+### Wildcards
+
+Use `*` instead of hand-listing every entity/action when a role should have unrestricted access:
+
+```yaml
+roles:
+  - name: admin
+    permissions:
+      - { resource: "*", actions: ["*"] }   # every entity, every action
+```
+
+`resource: "*"` and `actions: ["*"]` can be used independently too:
+
+```yaml
+  - name: auditor
+    permissions:
+      - { resource: "*", actions: [list, get] }   # read-only, but on everything
+
+  - name: content_admin
+    permissions:
+      - { resource: Post, actions: ["*"] }         # full control of one entity only
+```
+
+Wildcards are expanded at load time — `resource: "*"` becomes one policy line per entity
+registered in your `entities/*.yaml` files, and `actions: ["*"]` becomes
+`[list, get, create, update, delete]`. This is a config-time expansion, not a runtime pattern
+match: adding a new entity later automatically includes it under an existing `resource: "*"`
+role the next time the server starts (or config is reloaded), without editing `roles.yaml`.
 
 ### Role inheritance
 

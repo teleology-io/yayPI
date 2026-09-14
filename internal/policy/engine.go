@@ -2,11 +2,16 @@ package policy
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casbin/casbin/v2/model"
 	"github.com/casbin/casbin/v2/persist"
 )
+
+// AllActions is the canonical set of CRUD actions a permission's `actions: ["*"]` wildcard
+// expands to.
+var AllActions = []string{"list", "get", "create", "update", "delete"}
 
 // Engine wraps a Casbin enforcer.
 type Engine struct {
@@ -37,16 +42,31 @@ func (e *Engine) Enforce(role, resource, action string) (bool, error) {
 }
 
 // LoadFromRolesConfig populates the Casbin enforcer from a slice of RoleConfig entries.
-func (e *Engine) LoadFromRolesConfig(roles []RoleConfig) error {
+// allResources is the full set of known entity names, used to expand a `resource: "*"`
+// permission into one policy line per entity — Casbin's default matcher does literal string
+// equality on obj, so a literal "*" policy row would never match a real resource on its own.
+func (e *Engine) LoadFromRolesConfig(roles []RoleConfig, allResources []string) error {
 	// Clear existing policies
 	e.enforcer.ClearPolicy()
 
 	// Add permissions
 	for _, role := range roles {
 		for _, perm := range role.Permissions {
-			for _, action := range perm.Actions {
-				if _, err := e.enforcer.AddPolicy(role.Name, perm.Resource, action); err != nil {
-					return fmt.Errorf("adding policy for role %q: %w", role.Name, err)
+			resources := []string{perm.Resource}
+			if perm.Resource == "*" {
+				resources = allResources
+			}
+
+			actions := perm.Actions
+			if slices.Contains(actions, "*") {
+				actions = AllActions
+			}
+
+			for _, resource := range resources {
+				for _, action := range actions {
+					if _, err := e.enforcer.AddPolicy(role.Name, resource, action); err != nil {
+						return fmt.Errorf("adding policy for role %q: %w", role.Name, err)
+					}
 				}
 			}
 		}

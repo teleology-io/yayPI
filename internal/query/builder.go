@@ -3,6 +3,7 @@ package query
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/teleology-io/yayPI/internal/dialect"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/pkg/types"
 )
 
 // Builder generates parameterized SQL for a given entity.
@@ -118,7 +120,7 @@ func (b *Builder) List(ctx context.Context, q ListQuery, extraFilter string, ext
 		return nil, fmt.Errorf("list query: %w", err)
 	}
 	defer rows.Close()
-	return scanRows(rows)
+	return b.scanRows(rows)
 }
 
 // OffsetQuery contains parameters for an offset-based list query.
@@ -185,7 +187,7 @@ func (b *Builder) ListOffset(ctx context.Context, q OffsetQuery, extraFilter str
 		return nil, fmt.Errorf("list offset query: %w", err)
 	}
 	defer rows.Close()
-	return scanRows(rows)
+	return b.scanRows(rows)
 }
 
 // Count returns the total number of rows matching the given filters and extra filter.
@@ -255,7 +257,7 @@ func (b *Builder) Get(ctx context.Context, id string, extraFilter string, extraA
 	}
 	defer rows.Close()
 
-	results, err := scanRows(rows)
+	results, err := b.scanRows(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -308,7 +310,7 @@ func (b *Builder) Create(ctx context.Context, data map[string]interface{}) (map[
 			return nil, fmt.Errorf("create query: %w", err)
 		}
 		defer rows.Close()
-		results, err := scanRows(rows)
+		results, err := b.scanRows(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -387,7 +389,7 @@ func (b *Builder) Update(ctx context.Context, id string, data map[string]interfa
 			return nil, fmt.Errorf("update query: %w", err)
 		}
 		defer rows.Close()
-		results, err := scanRows(rows)
+		results, err := b.scanRows(rows)
 		if err != nil {
 			return nil, err
 		}
@@ -480,7 +482,7 @@ func (b *Builder) LoadRelation(ctx context.Context, rel schema.Relation, ids []s
 	}
 	defer rows.Close()
 
-	all, err := scanRows(rows)
+	all, err := b.scanRows(rows)
 	if err != nil {
 		return nil, err
 	}
@@ -542,12 +544,31 @@ func (b *Builder) ph(n int) string {
 	return "?"
 }
 
+// jsonColumns returns the set of this entity's column names whose field type
+// is jsonb. database/sql (via the pq driver) scans jsonb values as []byte —
+// left alone, encoding/json.Marshal treats a bare []byte as binary data and
+// base64-encodes it, corrupting every jsonb column in every API response
+// instead of embedding it as nested JSON. Only columns actually declared
+// jsonb get the json.RawMessage treatment in scanRows, so a text/varchar
+// column that happens to hold a bare-JSON-looking value (e.g. a numeric
+// grade string like "1") is never misinterpreted as JSON.
+func (b *Builder) jsonColumns() map[string]bool {
+	cols := make(map[string]bool)
+	for _, f := range b.entity.Fields {
+		if f.Type == types.FieldTypeJSONB {
+			cols[f.ColumnName] = true
+		}
+	}
+	return cols
+}
+
 // scanRows converts database/sql rows to a slice of string-keyed maps.
-func scanRows(rows *sql.Rows) ([]map[string]interface{}, error) {
+func (b *Builder) scanRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("getting columns: %w", err)
 	}
+	jsonCols := b.jsonColumns()
 
 	var results []map[string]interface{}
 	for rows.Next() {
@@ -561,7 +582,13 @@ func scanRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 		}
 		row := make(map[string]interface{}, len(cols))
 		for i, col := range cols {
-			row[col] = vals[i]
+			v := vals[i]
+			if jsonCols[col] {
+				if raw, ok := v.([]byte); ok && len(raw) > 0 {
+					v = json.RawMessage(raw)
+				}
+			}
+			row[col] = v
 		}
 		results = append(results, row)
 	}

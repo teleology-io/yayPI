@@ -117,7 +117,11 @@ func (s *Server) Run() error {
 			log.Warn().Err(err).Msg("loading roles")
 		}
 		if cfg.Policy.Adapter == "file" {
-			pe, err := buildInMemoryPolicy(cfg.Policy.Model, roles)
+			entityNames := make([]string, 0, len(reg.Entities()))
+			for _, entity := range reg.Entities() {
+				entityNames = append(entityNames, entity.Name)
+			}
+			pe, err := buildInMemoryPolicy(cfg.Policy.Model, roles, entityNames)
 			if err != nil {
 				log.Warn().Err(err).Msg("initializing policy engine")
 			} else {
@@ -339,7 +343,7 @@ func buildDBAPIKeyLookup(cfg *config.APIKeyConfig, reg *schema.Registry, dbm *db
 	}
 }
 
-func buildInMemoryPolicy(modelPath string, roles []policy.RoleConfig) (*policy.Engine, error) {
+func buildInMemoryPolicy(modelPath string, roles []policy.RoleConfig, allResources []string) (*policy.Engine, error) {
 	tmpFile, err := os.CreateTemp("", "yaypi-policy-*.csv")
 	if err != nil {
 		return nil, err
@@ -352,7 +356,7 @@ func buildInMemoryPolicy(modelPath string, roles []policy.RoleConfig) (*policy.E
 		return nil, err
 	}
 
-	if err := pe.LoadFromRolesConfig(roles); err != nil {
+	if err := pe.LoadFromRolesConfig(roles, allResources); err != nil {
 		return nil, err
 	}
 
