@@ -1,6 +1,9 @@
 package sdk
 
-import "context"
+import (
+	"context"
+	"net/http"
+)
 
 // PluginInfo contains metadata about a plugin.
 type PluginInfo struct {
@@ -52,4 +55,30 @@ type EntityHookPlugin interface {
 	AfterUpdate(ctx HookContext, entity string, record map[string]any) error
 	BeforeDelete(ctx HookContext, entity string, id string) error
 	AfterDelete(ctx HookContext, entity string, id string) error
+}
+
+// RouteContext is passed to a custom route handler. Unlike HookContext, it carries the raw
+// http.Request/ResponseWriter — a custom route isn't wrapping a generated CRUD operation, so
+// there's no envelope format to hand back instead.
+type RouteContext struct {
+	Ctx      context.Context
+	Subject  *Subject // nil when the request is unauthenticated
+	Request  *http.Request
+	Response http.ResponseWriter
+}
+
+// RouteHandlerFunc handles one custom HTTP route registered by a RouteHandlerPlugin.
+type RouteHandlerFunc func(RouteContext)
+
+// RouteHandlerPlugin lets a plugin expose custom HTTP routes that yayPI's declarative CRUD
+// endpoints can't express (bulk operations, non-entity-shaped responses, file uploads/downloads,
+// etc). Each entry in Handlers() is referenced from endpoints YAML as
+// `handler: <PluginInfo.Name>.<key>` — e.g. a plugin named "reports" exposing a "Generate"
+// handler is wired up with `handler: reports.Generate`. The endpoint still declares `path`,
+// `method`, `entity` (for RBAC — the action is derived from the HTTP method), and `auth` exactly
+// like a CRUD endpoint, so a custom route gets the same auth/rate-limit/RBAC middleware chain for
+// free instead of reimplementing it.
+type RouteHandlerPlugin interface {
+	Plugin
+	Handlers() map[string]RouteHandlerFunc
 }

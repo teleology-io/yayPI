@@ -6,13 +6,16 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	chiMiddleware "github.com/go-chi/chi/v5/middleware"
+	"github.com/rs/zerolog/log"
 	"github.com/teleology-io/yayPI/internal/auth"
 	"github.com/teleology-io/yayPI/internal/handler"
 	"github.com/teleology-io/yayPI/internal/health"
 	"github.com/teleology-io/yayPI/internal/middleware"
 	"github.com/teleology-io/yayPI/internal/openapi"
+	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/policy"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
 // Config holds router-building configuration.
@@ -21,14 +24,15 @@ type Config struct {
 	AuthSecret     []byte
 	AuthAlg        string
 	Enforcer       *policy.Engine
-	AuthHandler    *auth.Handler          // optional; mounts register/login/me/oauth2 routes
-	OpenAPIHandler *openapi.Handler       // optional; serves /openapi/{name}.json
-	HealthHandler  *health.Handler        // optional; mounts /health and /ready
-	AllowedOrigins []string               // CORS: permitted origins; ["*"] allows all
+	AuthHandler    *auth.Handler           // optional; mounts register/login/me/oauth2 routes
+	OpenAPIHandler *openapi.Handler        // optional; serves /openapi/{name}.json
+	HealthHandler  *health.Handler         // optional; mounts /health and /ready
+	AllowedOrigins []string                // CORS: permitted origins; ["*"] allows all
 	RateLimit      *middleware.RateLimiter // optional; global rate limiter
-	APIKeyHeader   string                 // header name for API key (default: X-API-Key)
-	APIKeyParam    string                 // optional query param for API key
+	APIKeyHeader   string                  // header name for API key (default: X-API-Key)
+	APIKeyParam    string                  // optional query param for API key
 	APIKeyLookup   middleware.APIKeyLookup // optional; enables API key auth
+	Dispatcher     *plugin.Dispatcher      // optional; resolves custom-route `handler:` names
 }
 
 // Build constructs a chi.Router from the schema registry and config.
@@ -97,7 +101,7 @@ func registerEndpoints(r chi.Router, reg *schema.Registry, factory *handler.Fact
 				registerCRUDOp(r, op, ep, entity, factory, cfg)
 			}
 		} else if ep.Method != "" && ep.Handler != "" {
-			// Custom handler — not supported in v1 (YAML-driven only)
+			registerCustomHandler(r, ep, entity, cfg)
 		}
 	}
 }
@@ -160,6 +164,39 @@ func registerCRUDOp(
 			opts = &schema.DeleteOpts{}
 		}
 		r.With(mws...).Delete(itemPath, factory.Delete(entity, opts))
+	}
+}
+
+// registerCustomHandler registers an endpoint's `method`/`handler` pair (a RouteHandlerPlugin
+// entry, not a CRUD op) as a chi route. It gets the same auth/rate-limit/RBAC middleware chain
+// as a CRUD route — buildMiddlewareChain is called with op="" so resolveOpAuth falls through to
+// the endpoint-level `auth:` block, and RBAC derives the casbin action from the request's actual
+// HTTP method rather than a fixed op string, so this needs no special-casing there.
+func registerCustomHandler(r chi.Router, ep *schema.Endpoint, entity *schema.Entity, cfg Config) {
+	if cfg.Dispatcher == nil {
+		log.Warn().Str("handler", ep.Handler).Str("path", ep.Path).
+			Msg("no plugin dispatcher configured; skipping custom-handler endpoint")
+		return
+	}
+	fn, ok := cfg.Dispatcher.RouteHandler(ep.Handler)
+	if !ok {
+		log.Warn().Str("handler", ep.Handler).Str("path", ep.Path).
+			Msg("no route handler registered for endpoint; skipping")
+		return
+	}
+	mws := buildMiddlewareChain(ep, entity, cfg, "")
+	r.With(mws...).Method(strings.ToUpper(ep.Method), ep.Path, wrapRouteHandler(fn))
+}
+
+// wrapRouteHandler adapts an sdk.RouteHandlerFunc to an http.HandlerFunc, attaching the
+// authenticated Subject the same way internal/plugin's hook dispatch does.
+func wrapRouteHandler(fn sdk.RouteHandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		rc := sdk.RouteContext{Ctx: r.Context(), Request: r, Response: w}
+		if sub := middleware.SubjectFromContext(r.Context()); sub != nil {
+			rc.Subject = &sdk.Subject{ID: sub.ID, Role: sub.Role, Email: sub.Email}
+		}
+		fn(rc)
 	}
 }
 

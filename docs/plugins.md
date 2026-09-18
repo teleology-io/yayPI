@@ -13,6 +13,7 @@ Plugins let you add custom logic that runs during entity lifecycle events (befor
 | Hash passwords before saving | Custom plugin (or use the built-in auth `/register` endpoint) |
 | Write an audit log to a database table | Custom plugin |
 | Validate business rules that can't be expressed in field constraints | Custom plugin |
+| Bulk export/import, a report, a file upload — anything that isn't one CRUD row | Custom route plugin ([below](#custom-route-plugins)) |
 | Complex data transformation before a write | Custom plugin |
 
 ## Built-in email hooks (`kind: email`)
@@ -145,6 +146,22 @@ type EntityHookPlugin interface {
 }
 ```
 
+#### `RouteHandlerPlugin`
+
+To expose a custom HTTP route — something CRUD can't express, like a bulk export/import,
+a file upload, or a non-entity-shaped response — implement `RouteHandlerPlugin` instead:
+
+```go
+type RouteHandlerPlugin interface {
+    Plugin
+
+    Handlers() map[string]RouteHandlerFunc
+}
+```
+
+Each key in the returned map is referenced from endpoints YAML as
+`handler: <PluginInfo.Name>.<key>`. See [Custom route plugins](#custom-route-plugins) below.
+
 ### Supporting types
 
 ```go
@@ -175,6 +192,15 @@ type Logger interface {
     Info(msg string, fields ...any)
     Error(msg string, err error, fields ...any)
 }
+
+type RouteContext struct {
+    Ctx      context.Context
+    Subject  *Subject          // authenticated user, nil if unauthenticated
+    Request  *http.Request
+    Response http.ResponseWriter
+}
+
+type RouteHandlerFunc func(RouteContext)
 ```
 
 ### Hook behavior
@@ -334,6 +360,86 @@ entity:
 The hook names in YAML are informational labels. What matters for dispatch is which entity name you pass to `RegisterHook`.
 
 > Email and webhook hooks do **not** need to be listed here — they are auto-registered by yayPi based on their YAML files.
+
+## Custom route plugins
+
+A `RouteHandlerPlugin` gets a real HTTP route — its own path, method, request, and response —
+instead of a before/after hook wrapped around a generated CRUD operation. Use this when the
+operation doesn't map to a single entity row: bulk export/import, a report that joins several
+entities, a file upload, a webhook receiver with a bespoke payload shape, and so on.
+
+**`plugins/report/plugin.go`:**
+
+```go
+package report
+
+import (
+    "context"
+    "encoding/csv"
+
+    "github.com/teleology-io/yayPI/pkg/sdk"
+)
+
+type plugin struct{}
+
+func New() sdk.RouteHandlerPlugin { return &plugin{} }
+
+func (p *plugin) Info() sdk.PluginInfo {
+    return sdk.PluginInfo{Name: "report", Version: "1.0.0", Description: "CSV export endpoint"}
+}
+
+func (p *plugin) Init(_ sdk.InitContext) error      { return nil }
+func (p *plugin) Shutdown(_ context.Context) error  { return nil }
+
+func (p *plugin) Handlers() map[string]sdk.RouteHandlerFunc {
+    return map[string]sdk.RouteHandlerFunc{
+        "Generate": p.handleGenerate,
+    }
+}
+
+func (p *plugin) handleGenerate(rc sdk.RouteContext) {
+    rc.Response.Header().Set("Content-Type", "text/csv")
+    rc.Response.Header().Set("Content-Disposition", `attachment; filename="report.csv"`)
+    w := csv.NewWriter(rc.Response)
+    w.Write([]string{"user_id", "role"})
+    if rc.Subject != nil {
+        w.Write([]string{rc.Subject.ID, rc.Subject.Role})
+    }
+    w.Flush()
+}
+```
+
+**Endpoint YAML** (`endpoints/report.yaml`) — `entity:` is still required (it's what RBAC
+checks against; the action is derived from the HTTP method, so a `GET` here needs `get` on
+that entity, same as a CRUD list/get route would):
+
+```yaml
+version: "1"
+kind: endpoints
+
+endpoints:
+  - path: /reports/users
+    entity: User
+    method: GET
+    handler: report.Generate
+    auth:
+      require: true
+```
+
+**Wiring in `main.go`** — `RegisterRoutes` instead of `RegisterHook`:
+
+```go
+srv := server.New("yaypi.yaml")
+srv.RegisterRoutes(report.New())
+
+if err := srv.Run(); err != nil {
+    log.Fatal(err)
+}
+```
+
+A plugin can implement both `EntityHookPlugin` and `RouteHandlerPlugin` at once — register it
+with both `RegisterHook` and `RegisterRoutes` if it needs to react to lifecycle events *and*
+expose its own route.
 
 ## Plugin config
 

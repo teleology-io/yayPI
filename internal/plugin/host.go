@@ -10,21 +10,40 @@ import (
 	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
-// Dispatcher manages entity lifecycle hooks and dispatches them to registered plugins.
+// Dispatcher manages entity lifecycle hooks and custom route handlers, dispatching them to
+// registered plugins.
 type Dispatcher struct {
-	hooks map[string][]sdk.EntityHookPlugin // keyed by entity name
+	hooks         map[string][]sdk.EntityHookPlugin // keyed by entity name
+	routeHandlers map[string]sdk.RouteHandlerFunc   // keyed by "<PluginInfo.Name>.<handlerKey>"
 }
 
 // NewDispatcher creates an empty Dispatcher.
 func NewDispatcher() *Dispatcher {
 	return &Dispatcher{
-		hooks: make(map[string][]sdk.EntityHookPlugin),
+		hooks:         make(map[string][]sdk.EntityHookPlugin),
+		routeHandlers: make(map[string]sdk.RouteHandlerFunc),
 	}
 }
 
 // RegisterHook registers an EntityHookPlugin for a given entity.
 func (d *Dispatcher) RegisterHook(entityName string, plugin sdk.EntityHookPlugin) {
 	d.hooks[entityName] = append(d.hooks[entityName], plugin)
+}
+
+// RegisterRoutePlugin registers all of p's named handlers, prefixed with its own
+// PluginInfo.Name, matching the "handler: <name>.<key>" string endpoints YAML uses
+// to reference it.
+func (d *Dispatcher) RegisterRoutePlugin(p sdk.RouteHandlerPlugin) {
+	prefix := p.Info().Name
+	for name, fn := range p.Handlers() {
+		d.routeHandlers[prefix+"."+name] = fn
+	}
+}
+
+// RouteHandler looks up a registered custom-route handler by its full "plugin.key" name.
+func (d *Dispatcher) RouteHandler(name string) (sdk.RouteHandlerFunc, bool) {
+	fn, ok := d.routeHandlers[name]
+	return fn, ok
 }
 
 // buildHookContext constructs a HookContext from a request context,

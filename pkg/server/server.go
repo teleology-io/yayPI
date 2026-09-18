@@ -53,6 +53,12 @@ func (s *Server) RegisterHook(entity string, p sdk.EntityHookPlugin) {
 	s.dispatcher.RegisterHook(entity, p)
 }
 
+// RegisterRoutes registers a plugin's custom route handlers, referenceable from endpoints
+// YAML as `handler: <p.Info().Name>.<key>`. Must be called before Run.
+func (s *Server) RegisterRoutes(p sdk.RouteHandlerPlugin) {
+	s.dispatcher.RegisterRoutePlugin(p)
+}
+
 // Run loads configuration, starts the HTTP server, and blocks until interrupted.
 func (s *Server) Run() error {
 	cfg, err := config.Load(s.configFile)
@@ -217,6 +223,7 @@ func (s *Server) Run() error {
 		APIKeyHeader:   apiKeyHeader,
 		APIKeyParam:    apiKeyParam,
 		APIKeyLookup:   apiKeyLookup,
+		Dispatcher:     s.dispatcher,
 	}
 	httpHandler := router.Build(reg, factory, routerCfg)
 
