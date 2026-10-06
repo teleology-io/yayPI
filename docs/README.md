@@ -11,7 +11,7 @@ cd my-api
 
 # 2. Set your database URL
 export DATABASE_URL=postgres://localhost/my_api
-export JWT_SECRET=your-secret-here
+export JWT_SECRET=$(openssl rand -hex 32)   # at least 32 bytes
 
 # 3. Start the server
 yaypi run
@@ -19,21 +19,23 @@ yaypi run
 
 ## What yayPi gives you
 
-- **CRUD endpoints** with filtering, sorting, cursor and offset pagination, eager-loading relations
-- **Field validation** — required, min/max length, min/max value, regex pattern, built-in format checks
+- **CRUD endpoints** with operator filters, search, sorting, keyset (cursor) and offset pagination, sparse fields, embedded relations, PUT/PATCH
+- **Field validation** — strict type checking plus required, min/max length, min/max value, regex pattern, built-in format checks
+- **Safe writes** — every write is a transaction; ETag / If-Match optimistic concurrency; Idempotency-Key retries; consistent error envelope
 - **Immutable fields** — set on create, silently ignored on update
-- **Bulk create** — post an array; abort on first error or continue with partial success (207)
-- **Auth endpoints** — register, login, /me, OAuth2 (Google, GitHub, and custom providers)
-- **Token refresh** — long-lived refresh tokens with rotation (cookie or body store)
-- **API key auth** — static keys in YAML or DB-backed; works alongside JWT
+- **Bulk create** — post an array; all-or-nothing transaction or partial success (207)
+- **Auth endpoints** — register, login, /me, logout, password reset, email verification, OAuth2 with PKCE (Google, GitHub, custom)
+- **Token refresh** — stored, rotating refresh tokens with reuse detection; HS/RS/ES signing with JWKS
+- **API key auth** — static or DB-backed (hashed) keys; works alongside JWT
 - **RBAC + ABAC** — role-based access, conditions on subject attributes, row-level and field-level filtering
-- **Rate limiting** — global token bucket or per-endpoint
+- **Multi-tenancy, owner fields, audit log** — `tenant_scoped`, `default_from`, `audit: true`
+- **Rate limiting & brute-force protection** — global and per-endpoint limits, trusted-proxy aware, login lockout
 - **Health/readiness endpoints** — for Kubernetes liveness and readiness probes
-- **Diff-based migrations** — auto-detect schema changes, generate SQL, apply or roll back
-- **Background jobs** — cron-scheduled SQL or HTTP jobs
-- **Seed data** — idempotent rows inserted at startup
-- **Email hooks** — send transactional email on entity lifecycle events (SMTP)
-- **Webhook hooks** — fire HTTP webhooks on entity lifecycle events, with SSRF protection and retry
+- **Diff-based migrations** — per-database, transactional, locked, drift-checked
+- **Background jobs** — cron-scheduled SQL or HTTP jobs, run once across replicas
+- **Seed data** — idempotent rows via `yaypi seed`
+- **Email & webhooks** — transactional outbox with retries, signed webhooks, SSRF protection
+- **Operations** — JSON logs, Prometheus metrics, trace-context, graceful draining shutdown
 - **Custom plugins** — hook into any lifecycle event (before/after create/update/delete)
 - **OpenAPI 3.1** — auto-generated specs, served live, exportable to JSON
 
@@ -51,6 +53,7 @@ yaypi run
 | Generate and run migrations | [Migrations](migrations.md) |
 | Schedule background jobs | [Jobs](jobs.md) |
 | Write a plugin (hooks) | [Plugins](plugins.md) |
+| Deploy and operate in production | [Production](production.md) |
 | See all CLI commands | [CLI Reference](cli.md) |
 | See common patterns | [Patterns Cookbook](patterns.md) |
 | Get autocomplete in VS Code / Cursor | [YAML IntelliSense](intellisense.md) |

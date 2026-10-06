@@ -23,59 +23,70 @@ Every included YAML file has a `kind` field that tells yayPi what it contains:
 
 ```
 HTTP request
-  → chi router (base_url prefix)
-    → CORS middleware (allowed_origins)
-    → RequestID + Logger + Recover middleware
-    → RateLimit middleware (global token bucket, if configured)
-    → APIKeyAuth middleware (X-API-Key header, if configured)
-    → RequireAuth middleware (JWT validation)
-    → RBAC middleware (Casbin enforcement)
-    → handler.Factory (CRUD handler)
-      → validateFields() (field validation rules)
-      → query.Builder (SQL construction)
-        → dialect (Postgres / MySQL / SQLite)
-        → database/sql (*sql.DB)
-      → plugin.Dispatcher (before/after hooks → email, webhook, custom plugins)
+  → chi router
+    → ClientIP (trusted_proxies-aware) → RequestID → Trace (traceparent)
+    → Logger (route pattern, subject, metrics observer) → Recover
+    → SecurityHeaders → BodyLimit (413) → Timeout (request ctx deadline)
+    → CORS → RateLimit (global, IP-keyed)
+    → /health, /ready, /metrics (outside base_url)
+    → base_url routes:
+      → /auth/* (auth.Handler; no-store)
+      → per-route chain: [endpoint RateLimit (ip)] → APIKeyAuth → RequireAuth (token.Keys + optional
+        revocation check) → [RateLimit (user-keyed)] → RBAC (roles/conditions always; Casbin if configured)
+      → handler.Factory (CRUD)
+        → prepareInput (type coercion + validation) / write roles / default_from / tenant scope
+        → transaction: query.Builder (+ row filter) → TxObservers (audit log, outbox) → commit
+        → After* plugin hooks (post-commit)
+  → outbox.Worker (background) delivers webhooks/emails with retries
 ```
 
 ## Package map
 
 | Package | Path | Role |
 |---|---|---|
-| `config` | `internal/config/` | Parse `yaypi.yaml` and all included YAML files into typed Go structs (`RootConfig`, `EndpointDef`, `EntityDef`, etc.) |
-| `schema` | `internal/schema/` | Compile config structs into a runtime `Registry` of `Entity` and `Endpoint` objects; resolve foreign keys, field types, etc. |
-| `router` | `internal/router/` | Build a `chi.Router` from the registry; register all CRUD routes with middleware chains |
-| `handler` | `internal/handler/` | `Factory` that produces `http.HandlerFunc` values for list/get/create/update/delete; field validation and bulk create logic |
-| `query` | `internal/query/` | Dialect-aware SQL query builder; constructs and executes SELECT/INSERT/UPDATE/DELETE; offset and cursor pagination |
-| `dialect` | `internal/dialect/` | `Dialect` interface + implementations for Postgres, MySQL, SQLite; encapsulates placeholder syntax, identifier quoting, type mapping, RETURNING support, schema introspection |
-| `db` | `internal/db/` | `Manager` holding `map[name]*DB`; `DB` is `{SQL *sql.DB, Dialect dialect.Dialect}`; satisfies `health.Checker` |
-| `auth` | `internal/auth/` | Built-in auth handler: register, login, me, OAuth2 upsert, refresh token rotation; issues and validates JWT tokens |
-| `middleware` | `internal/middleware/` | JWT `RequireAuth`, API key `APIKeyAuth`, Casbin `RBAC`, token-bucket `RateLimiter`, CORS, RequestID, Logger, Recover |
-| `migration` | `internal/migration/` | Diff-based schema migration engine; `Engine` introspects live DB + desired schema; `Runner` applies/rolls back SQL files |
-| `openapi` | `internal/openapi/` | Builds OpenAPI 3.1 `Spec` objects from the registry; HTTP handler serves `/openapi/{name}.json`; `Build()` generates all named specs |
-| `cron` | `internal/cron/` | gocron-based scheduler; runs SQL and HTTP jobs defined in `jobs[]` |
-| `plugin` | `internal/plugin/` | `Dispatcher` calls before/after hooks on create/update/delete via the plugin SDK |
-| `policy` | `internal/policy/` | Casbin `Engine` wrapper; loads rules from YAML role files or a database adapter |
-| `health` | `internal/health/` | Liveness (`/health`) and readiness (`/ready`) HTTP handlers; readiness pings all DB connections |
-| `seed` | `internal/seed/` | Idempotent seed runner; checks row existence by key field before INSERT |
-| `mailer` | `internal/mailer/` | Built-in email hook; implements `sdk.EntityHookPlugin`; sends via SMTP on entity lifecycle events |
-| `webhook` | `internal/webhook/` | Built-in webhook hook; implements `sdk.EntityHookPlugin`; fires HTTP requests with SSRF protection |
-| `types` | `pkg/types/` | Shared constants: `FieldType`, `RelationType`, `ReferentialAction` |
-| `sdk` | `pkg/sdk/` | Plugin author SDK — `Plugin` interface, `BeforeCreate`/`AfterCreate`/etc. hooks |
+| `config` | `internal/config/` | Parse `yaypi.yaml` and included files into typed structs; `Validate()` (secrets, DSNs, crud ops, sizes) |
+| `schema` | `internal/schema/` | Compile config into a runtime `Registry`; built-in `User` plus internal tables (refresh/auth tokens, idempotency, outbox, audit, job locks) marked `Internal` |
+| `router` | `internal/router/` | Build the chi router: global middleware, health/metrics, auth, per-route auth/RBAC chains |
+| `handler` | `internal/handler/` | CRUD handlers: coercion/validation, transactions, ETag/If-Match, Idempotency-Key, includes, sparse fields, tenant scope, DB-error mapping; `TxObserver` hook point |
+| `query` | `internal/query/` | Dialect-aware SQL builder over an `Executor` (*sql.DB or *sql.Tx): typed filters, search, keyset cursors, batched relation includes |
+| `dialect` | `internal/dialect/` | Postgres / MySQL / SQLite: placeholders, quoting, types, default translation, constraint-error detection |
+| `db` | `internal/db/` | `Manager` of named `*DB` pools with bounded defaults |
+| `token` | `internal/token/` | Access token signing/verification (HS/RS/ES, iss/aud, TTL), JWKS |
+| `auth` | `internal/auth/` | Register/login/me, stored rotating refresh tokens, logout(-all), password reset, email verification, OAuth2 (PKCE, verified email), login throttle |
+| `apikey` | `internal/apikey/` | Static and DB-backed API key lookup by SHA-256 digest |
+| `middleware` | `internal/middleware/` | Auth, API key, RBAC, rate limit, client IP, CORS, body limit, timeout, trace, security headers, logger, recover |
+| `apierr` | `internal/apierr/` | The single JSON error envelope |
+| `netsafe` | `internal/netsafe/` | SSRF-safe HTTP client (dial-time IP checks) |
+| `outbox` | `internal/outbox/` | Transactional outbox: render webhooks/emails in-tx, deliver with retries/signatures |
+| `audit` | `internal/audit/` | Audit log observer (`audit: true`) |
+| `metrics` | `internal/metrics/` | Dependency-free Prometheus exposition |
+| `logging` | `internal/logging/` | zerolog setup (level, json/console) |
+| `migration` | `internal/migration/` | Diff engine (per database), transactional + locked runner, statement splitter |
+| `openapi` | `internal/openapi/` | OpenAPI 3.1 generation |
+| `cron` | `internal/cron/` | gocron scheduler with DB-leased distributed lock, retries, timezones |
+| `plugin` | `internal/plugin/` | Hook/route dispatcher; plugin Init/Shutdown lifecycle |
+| `policy` | `internal/policy/` | Casbin engine, conditions, row filters |
+| `health` | `internal/health/` | Liveness/readiness (draining-aware) |
+| `seed` | `internal/seed/` | Idempotent seeding (hashes User passwords) |
+| `mailer` | `internal/mailer/` | SMTP sender |
+| `sdk` | `pkg/sdk/` | Plugin SDK — hooks, route plugins, `HookError` |
 
 ## Data flow: YAML → running API
 
 ```
 yaypi.yaml
-  config.Load()              → RootConfig (+ all included files merged in)
-  schema.Build()             → Registry{entities, endpoints, specs}
-  db.NewManager()            → Manager{map[name]*DB}
-  seed.Run()                 → idempotent seed rows inserted
-  migration.NewEngine()      → Engine (introspects DB, diffs against registry)
-  openapi.Build()            → map[specName]*Spec
-  mailer.New() + webhook.New() → registered as entity hook plugins
-  router.Build()             → http.Handler (chi router with all routes mounted)
-  http.Server.ListenAndServe()
+  config.Load() + Validate()     → RootConfig (fail fast on bad secrets/DSNs/conditions)
+  logging.Setup()
+  schema.Build()                 → Registry (user + internal entities)
+  db.NewManager()                → bounded pools per database
+  auto_migrate (optional)        → per-database diff applied under lock
+  policy engine                  → fatal on any error
+  handler.Factory + observers    → outbox (webhooks/emails), audit
+  token.Keys, auth.Handler, API keys, OpenAPI, health, metrics
+  plugins.InitAll()
+  router.Build()
+  cron + outbox worker start
+  http.Server (all timeouts) → SIGTERM → drain → Shutdown → stop workers → plugins.ShutdownAll
 ```
 
 ## Key design decisions
@@ -85,7 +96,8 @@ yaypi.yaml
 - **No code generation** — the running server IS the compiled yayPi binary; user YAML is interpreted at startup
 - **Registry is immutable at runtime** — built once at startup; all handlers close over entity/endpoint pointers
 - **OpenAPI specs are pre-marshaled** — `openapi.NewHandler` marshals all specs to JSON bytes at startup; serving is a map lookup + `w.Write`
-- **Email/webhook as built-in plugins** — both implement `sdk.EntityHookPlugin` and are auto-registered by `server.go` based on config; no user code required
+- **Email/webhook via transactional outbox** — rendered inside the write transaction by `outbox.Observer` (a `handler.TxObserver`) and delivered by `outbox.Worker`; never fire-and-forget
+- **Fail closed** — misconfigured security (policy, secrets, auth without DB) stops the boot; `roles`/`conditions` are enforced with or without Casbin
 - **API key + JWT are OR-logic** — `APIKeyAuth` runs before `RequireAuth`; if the API key succeeds it sets the Subject in context and JWT parsing is skipped
 
 ## Adding a new feature
@@ -94,4 +106,5 @@ yaypi.yaml
 2. Add runtime types to `internal/schema/registry.go`; populate in `buildEndpoint` / `Build`
 3. Implement behavior in the relevant package
 4. Wire through `internal/router/builder.go` and/or `pkg/server/server.go`
-5. Run `go build ./...` to verify
+5. Add the field to the matching `schemas/*.schema.json` (they use `additionalProperties: false`, so VS Code flags unknown keys)
+6. Run `go build ./... && go vet ./... && go test ./...` (`internal/integration` exercises the full stack on SQLite, and on Postgres/MySQL when `YAYPI_TEST_POSTGRES_DSN` / `YAYPI_TEST_MYSQL_DSN` are set)

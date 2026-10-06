@@ -34,23 +34,32 @@ Configure in `yaypi.yaml`:
 auth:
   api_keys:
     header: X-API-Key           # default header name
-    query_param: api_key        # also accept ?api_key= (optional)
     keys:
       - key: ${ADMIN_API_KEY}
         role: admin
+        name: admin-console     # caller id (subject.id) for this key
       - key: ${SERVICE_API_KEY}
         role: service
 ```
 
-Or use DB-backed keys (looked up per request):
+Or use DB-backed keys (looked up per request). The key column stores the **SHA-256 digest**, never the key itself:
 
 ```yaml
 auth:
   api_keys:
     entity: ApiKey              # entity holding key records
-    key_field: token            # column with the key value (default: token)
+    key_field: token            # column with the key digest (default: token)
     role_field: role            # column with the role (default: role)
+    subject_field: user_id      # caller id (default: user_id if present, else the PK)
 ```
+
+```bash
+$ yaypi apikey generate
+key:    yk_3x…   (give this to the client; it is not stored)
+digest: 9f2c…    (store this in the key column)
+```
+
+Optional `expires_at`, `revoked_at` and `deleted_at` columns on the key table are honoured automatically. Set `key_hash: plain` only for a legacy table that stores raw keys. API-key callers get a `subject.id`, so `row_access` filters such as `owner_id = :subject.id` work for them too.
 
 ### OR-logic with JWT
 
@@ -73,7 +82,9 @@ Your tokens must include these claims:
 | `sub` | string | User ID (any string, typically a UUID) |
 | `role` | string | User's role (e.g. `admin`, `editor`, `member`) |
 | `email` | string | User's email address |
-| `exp` | Unix timestamp | Expiration time — always validated |
+| `exp` | Unix timestamp | Expiration time — always required and validated |
+| `tenant` | string | Optional; scopes `tenant_scoped` entities |
+| `iss` / `aud` | string | Verified when `auth.issuer` / `auth.audience` are set |
 
 Example payload:
 ```json
@@ -99,11 +110,11 @@ Configure the allowed algorithm in `yaypi.yaml`:
 
 ```yaml
 auth:
-  algorithm: HS256          # HS256, HS384, or HS512
-  reject_algorithms: [none] # always include this
+  algorithm: HS256          # HS256/384/512 (secret) or RS256/384/512, ES256/384/512 (key files)
+  secret: ${JWT_SECRET}     # HS*: at least 32 bytes
 ```
 
-The `none` algorithm is **always rejected**, even if not listed in `reject_algorithms`, as a belt-and-suspenders defense against algorithm confusion attacks.
+Only the configured algorithm is accepted, so `none` and algorithm-confusion tokens are always rejected (`reject_algorithms` is no longer needed). With RS*/ES*, set `private_key_file` (and optionally `public_key_file`); other services can verify tokens with the public key from `<base_url>/auth/.well-known/jwks.json`. Tokens are rejected once expired (with 30s clock-skew leeway). Set `auth.revocation_check: true` to also reject tokens of deleted users and of sessions ended by logout-all or a password reset.
 
 ### yayPi can issue tokens
 
@@ -339,11 +350,11 @@ For every request:
 ```
 1. API key check            (middleware — sets Subject if key valid)
 2. JWT validation           (middleware — sets Subject if token valid)
-3. Casbin RBAC              (middleware)
-4. auth.roles check         (middleware)
-5. auth.conditions check    (middleware)
+3. Casbin RBAC              (middleware — only when a policy engine is configured)
+4. auth.roles check         (middleware — always, with or without Casbin)
+5. auth.conditions check    (middleware — always)
 6. Handler runs
-7. row_access filter        (injected into SQL WHERE)
+7. row_access filter        (injected into SQL WHERE; tenant scope added for tenant_scoped entities)
 8. write_roles stripping    (on create/update, before DB call)
 9. read_roles masking       (on all responses, after DB call)
 ```

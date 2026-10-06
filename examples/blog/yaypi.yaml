@@ -18,7 +18,7 @@ databases:
     default: true
 auth:
   provider: jwt
-  secret: ${JWT_SECRET:-changeme-in-production}
+  secret: ${JWT_SECRET:-dev-only-insecure-jwt-key-replace-me-0123456789}
   expiry: 24h
   algorithm: HS256
   reject_algorithms: [none]

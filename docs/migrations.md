@@ -6,8 +6,8 @@ yayPi includes a diff-based migration engine that generates SQL migration files 
 
 When you run `yaypi migrate generate`, the engine:
 
-1. Queries `information_schema.tables` and `information_schema.columns` to see what currently exists in the database
-2. Queries `pg_indexes` for existing indexes
+1. Reads the live tables, columns and indexes from the catalog (`information_schema` / `pg_indexes` / `sqlite_master`)
+2. Considers only the entities stored in that database (including yayPi's internal tables, such as refresh tokens and the outbox, when those features are enabled)
 3. Compares the live schema to your entity registry
 4. Generates only the DDL statements needed to close the gap
 
@@ -198,15 +198,34 @@ yaypi migrate down --steps 1
 
 `--steps` is required for `down` to prevent accidental rollbacks.
 
+## Safety guarantees
+
+- **Transactional.** Each migration file's statements and its row in `yaypi_migrations` commit together. On Postgres and SQLite a failing migration leaves no trace and can be fixed and re-run. MySQL commits DDL implicitly, so a failed MySQL migration may be partly applied — inspect it before re-running.
+- **Locked.** `up` and `down` hold a database lock (`pg_advisory_lock` on Postgres, `GET_LOCK` on MySQL), so two deploy jobs or replicas never apply migrations at the same time.
+- **Drift-checked.** `up` verifies the checksums of applied files first and refuses to continue if one was edited. Use `--allow-drift` only when you mean it.
+- **Driver-independent.** The runner splits files into statements itself (respecting quotes, comments and `$$` bodies), so MySQL does not need `multiStatements=true`. `BEGIN`/`COMMIT` lines in files are ignored; the runner manages the transaction.
+- **Portable defaults.** `now()` and `gen_random_uuid()` are translated to each dialect (`CURRENT_TIMESTAMP`, `(UUID())`, a SQLite expression).
+
+## Multiple databases
+
+Each configured database gets its own diff and its own migrations directory, next to `yaypi.yaml`:
+
+```
+migrations/              # default database
+migrations/analytics/    # entities with database: analytics
+```
+
+`generate`, `up`, `status` and `verify` act on every database. `down` acts on the default database unless you pass `--database <name>`.
+
 ## `auto_migrate`
 
-Setting `auto_migrate: true` in `yaypi.yaml` makes yayPi automatically run `generate` + `up` at startup:
+Setting `auto_migrate: true` in `yaypi.yaml` applies the schema diff directly at startup, for every database, under the migration lock and in a transaction. No files are written and nothing is recorded in `yaypi_migrations`. If it fails, the server does not start.
 
 ```yaml
 auto_migrate: true
 ```
 
-**Use only in development or CI.** Never use in production — auto-migrations run without review and can cause downtime if a long-running index build blocks startup.
+**Use only in development or CI.** In production, run `yaypi migrate up` as a deploy step with reviewed, committed files (see [Production](production.md)).
 
 ## Example: adding a field
 

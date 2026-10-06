@@ -113,3 +113,28 @@ func (d MySQL) MigrationsTableDDL(tableName string) string {
 			UNIQUE KEY uq_name (name(255))
 		)`, d.QuoteIdent(tableName))
 }
+
+// TranslateDefault maps portable defaults to MySQL 8 expressions (expression defaults
+// must be parenthesised).
+func (MySQL) TranslateDefault(expr string) string {
+	switch {
+	case isNowDefault(expr):
+		return "CURRENT_TIMESTAMP"
+	case isUUIDDefault(expr):
+		return "(UUID())"
+	}
+	return expr
+}
+
+// MySQL error codes: 1451/1452 FK, 1048/1364 NOT NULL / no default, 3819 CHECK.
+func (MySQL) IsForeignKeyViolation(err error) bool {
+	return errContainsAny(err, "error 1451", "error 1452")
+}
+
+func (MySQL) IsNotNullViolation(err error) bool {
+	return errContainsAny(err, "error 1048", "error 1364")
+}
+
+func (MySQL) IsCheckViolation(err error) bool {
+	return errContainsAny(err, "error 3819")
+}

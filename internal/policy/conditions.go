@@ -27,17 +27,17 @@ func EvalConditions(conditions []string, sub *middleware.Subject) (bool, error) 
 //
 // Supported syntax:
 //
-//	*                                     → always true
-//	subject.<attr> == "value"
-//	subject.<attr> != "value"
-//	subject.<attr> > "value"
-//	subject.<attr> < "value"
-//	subject.<attr> >= "value"
-//	subject.<attr> <= "value"
-//	subject.<attr> in ["a", "b", "c"]
-//	subject.<attr> not_in ["a", "b"]
-//	subject.<attr> ends_with "value"
-//	subject.<attr> starts_with "value"
+//   - → always true
+//     subject.<attr> == "value"
+//     subject.<attr> != "value"
+//     subject.<attr> > "value"
+//     subject.<attr> < "value"
+//     subject.<attr> >= "value"
+//     subject.<attr> <= "value"
+//     subject.<attr> in ["a", "b", "c"]
+//     subject.<attr> not_in ["a", "b"]
+//     subject.<attr> ends_with "value"
+//     subject.<attr> starts_with "value"
 //
 // Attributes: subject.id, subject.role, subject.email
 //
@@ -90,6 +90,8 @@ func subjectAttr(sub *middleware.Subject, attr string) (string, error) {
 		return sub.Role, nil
 	case "email":
 		return sub.Email, nil
+	case "tenant":
+		return sub.Tenant, nil
 	default:
 		return "", fmt.Errorf("unknown subject attribute %q", attr)
 	}

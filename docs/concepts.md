@@ -138,9 +138,9 @@ Fields can declare validation rules under `validate:`. Validation runs on both c
     max: 99999.99
 ```
 
-Validation errors return **422 Unprocessable Entity** with a field-keyed error map:
+Every provided field is also type-checked against its declared type. Validation errors return **400** in the standard error envelope, with a field-keyed map:
 ```json
-{ "errors": { "email": "must be a valid email address" } }
+{ "error": "validation failed", "code": "validation_failed", "request_id": "…", "errors": { "email": "email must be a valid email address" } }
 ```
 
 ## Immutable fields
@@ -199,15 +199,15 @@ When `create.bulk: true`, a `POST` endpoint accepts a JSON array instead of a si
 
 ## Email and webhook hooks
 
-Email and webhook hooks are built-in plugin implementations that are auto-registered from their respective YAML files. No Go code is needed.
+Email and webhook triggers are configured in YAML with no Go code. Both go through a **transactional outbox**: the message is stored in the same database transaction as the change that triggered it, then delivered by a background worker with retries. A message is never lost when a receiver is down or the process restarts, and never sent for a change that rolled back.
 
-**Email** (`kind: email`) — sends SMTP email on lifecycle events. Requires SMTP env vars (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`). Templates use `{{record.FIELD}}` syntax.
+**Email** (`kind: email`) — HTML email over SMTP, configured by the `smtp:` block in `yaypi.yaml` (with `SMTP_*` env-var fallbacks) and retried per `smtp.retry`. Templates use `{{record.FIELD}}`; values are HTML-escaped.
 
-**Webhooks** (`kind: webhooks`) — fires HTTP requests on lifecycle events. Runs in a goroutine (non-blocking). Has SSRF protection blocking RFC-1918 and loopback addresses. Supports retry with backoff.
+**Webhooks** (`kind: webhooks`) — HTTP requests with JSON-safe payload templates, optional HMAC signatures, and SSRF protection that checks the resolved address at connect time. See [Plugins](plugins.md#built-in-webhook-hooks-kind-webhooks).
 
 ## Seed data
 
-Seed files (`kind: seed`) define rows that should exist in the database. They run at startup before routes are registered and are **idempotent** — if a row with the given `key_field` value already exists, it is skipped.
+Seed files (`kind: seed`) define rows that should exist in the database. They are applied with `yaypi seed` and are **idempotent** — if a row with the given `key_field` value already exists, it is skipped.
 
 ### File format
 
@@ -237,13 +237,13 @@ seeds:
     key_field: email
     data:
       - email: "${ADMIN_EMAIL}"
-        password_hash: "${ADMIN_PASSWORD_HASH}"
+        password: "${ADMIN_PASSWORD}"   # User seeds only: bcrypt-hashed into password_hash
         role: admin
 ```
 
 ### Running seeds
 
-Seeds run automatically at startup when included via `include:` globs. They can also be run manually:
+Seeds are applied by the CLI (typically as a deploy step after `migrate up`):
 
 ```bash
 yaypi seed
@@ -253,7 +253,7 @@ The command is idempotent — running it multiple times is safe.
 
 ## Token refresh
 
-When `refresh.enabled: true` in an auth file, yayPi issues long-lived refresh tokens alongside regular JWTs. `POST /auth/refresh` validates the refresh token, issues a new access token, and rotates the refresh token (single-use).
+When `refresh.enabled: true` in an auth file, register/login/OAuth issue a long-lived refresh token alongside a short-lived JWT. Refresh tokens are stored hashed in the database and rotated on every `POST /auth/refresh`; replaying a used one revokes that whole session. `POST /auth/logout` and `/auth/logout-all` revoke sessions. See [Auth Endpoints](auth-endpoints.md#tokens).
 
 Storage options: `cookie` (HttpOnly, sent automatically by browsers) or `body` (JSON — better for native apps).
 
@@ -261,11 +261,11 @@ Storage options: `cookie` (HttpOnly, sent automatically by browsers) or `body` (
 
 Entities with `soft_delete: true` get a `deleted_at timestamptz` column. When a record is soft-deleted, `deleted_at` is set to the current timestamp. yayPi automatically appends `WHERE deleted_at IS NULL` to every `SELECT`, `UPDATE`, and soft-`DELETE` query, so soft-deleted records are invisible to all API operations.
 
-Hard delete (`soft_delete: false` on the endpoint) issues a real `DELETE FROM` statement.
+Entities without `soft_delete` are hard-deleted with a real `DELETE FROM` statement.
 
 ## Migration engine
 
-The migration engine is **diff-based**: it queries `information_schema` to discover what currently exists in the database, then compares that to your entity definitions and generates only the DDL statements needed to close the gap.
+The migration engine is **diff-based**: it reads the database catalog to discover what currently exists in each database, then compares that to your entity definitions and generates only the DDL statements needed to close the gap.
 
 What it auto-detects:
 - New tables (generates `CREATE TABLE`)

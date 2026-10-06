@@ -27,9 +27,10 @@ type InitContext struct {
 // Subject holds the authenticated caller's identity, mirroring middleware.Subject
 // but defined here so plugins don't import internal packages.
 type Subject struct {
-	ID    string
-	Role  string
-	Email string
+	ID     string
+	Role   string
+	Email  string
+	Tenant string
 }
 
 // HookContext is passed to each entity hook call.
@@ -38,6 +39,18 @@ type HookContext struct {
 	RequestID string
 	Subject   *Subject // nil when the request is unauthenticated
 }
+
+// HookError lets a Before* hook reject a request with a specific HTTP status and a
+// client-safe message (e.g. 422 for a business-rule violation). Any other error returned
+// from a hook becomes a generic 500 and its text is only logged.
+type HookError struct {
+	Status  int               // HTTP status, typically 400, 403, 409 or 422
+	Message string            // returned to the client as "error"
+	Code    string            // optional machine code (defaults from Status)
+	Fields  map[string]string // optional per-field messages
+}
+
+func (e *HookError) Error() string { return e.Message }
 
 // Plugin is the base interface all yaypi plugins must implement.
 type Plugin interface {

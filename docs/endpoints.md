@@ -17,6 +17,7 @@ endpoints:
     rate_limit:            # optional per-endpoint rate limit
       requests_per_minute: 30
       burst: 10
+    max_body_size: 64MB    # optional: raise server.max_request_body_size (e.g. uploads)
 
     list:    {...}
     create:  {...}
@@ -42,9 +43,10 @@ One file can contain multiple endpoint blocks. It is conventional to split colle
 | `create` | `POST` | `/path` |
 | `get` | `GET` | `/path/{id}` |
 | `update` | `PATCH` | `/path/{id}` |
+| `replace` | `PUT` | `/path/{id}` |
 | `delete` | `DELETE` | `/path/{id}` |
 
-The `{id}` path parameter is validated as a UUID format before reaching the handler.
+The `{id}` path parameter is validated against the primary key type (UUID or integer) before reaching the handler. `replace` (PUT) is a full update: writable nullable fields you omit are set to null. It uses the `update:` options and auth.
 
 ## Auth inheritance rule
 
@@ -79,50 +81,66 @@ This enables the common "public read / auth write" pattern in a single block:
 **Cursor-paginated list:**
 ```json
 {
-  "data": [{"id": "...", "name": "..."}, ...],
-  "meta": { "count": 20, "next_cursor": "eyJ..." }
+  "data": [{"id": "...", "name": "..."}],
+  "meta": { "count": 20, "limit": 20, "has_more": true, "next_cursor": "eyJ..." }
 }
 ```
 
 **Offset-paginated list:**
 ```json
 {
-  "data": [...],
-  "meta": { "count": 20, "limit": 20, "offset": 0, "page": 1, "total": 312 }
+  "data": [],
+  "meta": { "count": 20, "limit": 20, "has_more": true, "offset": 0, "page": 1, "total": 312 }
 }
 ```
 
-**Single item (get, create, update):**
+**Single item (get, create, update, replace):**
 ```json
 { "data": {"id": "...", "name": "..."} }
 ```
 
-**Validation error (422):**
+**Errors** — every error uses one envelope:
 ```json
-{ "errors": { "email": "must be a valid email address" } }
+{
+  "error": "validation failed",
+  "code": "validation_failed",
+  "request_id": "6f1c…",
+  "errors": { "email": "email must be a valid email address" }
+}
 ```
 
-**Other error:**
-```json
-{ "error": "authentication required" }
-```
+`code` is stable and meant for programs; `errors` appears for validation failures.
 
 ## HTTP status codes
 
-| Operation | Success | Notes |
+| Status | `code` | When |
 |---|---|---|
-| `list` | 200 | |
-| `get` | 200 | 404 if not found |
-| `create` | 201 | 422 on validation failure |
-| `update` | 200 | 404 if not found; 422 on validation failure |
-| `delete` | 204 | No body |
-| `create` (bulk, partial) | 207 | Multi-Status with per-item results |
+| 200 / 201 / 204 | — | Success (`create` → 201, `delete` → 204) |
+| 207 | — | Bulk create in `partial` mode with some failures |
+| 304 | — | `GET` with a matching `If-None-Match` |
+| 400 | `validation_failed`, `bad_request` | Wrong type, failed rule, bad filter/sort/cursor |
+| 401 | `unauthorized` | Missing, invalid or revoked credentials |
+| 403 | `forbidden` | Role, condition, row-access or tenant denial |
+| 404 | `not_found` | Missing, or hidden by row access |
+| 409 | `conflict` | Duplicate unique value; Idempotency-Key request in progress |
+| 412 | `precondition_failed` | `If-Match` did not match the current version |
+| 413 | `payload_too_large` | Body over `server.max_request_body_size` |
+| 415 | `unsupported_media_type` | Write without `Content-Type: application/json` |
+| 422 | `reference_violation`, `required_field_missing`, `constraint_violation` | Foreign key / NOT NULL / CHECK; or a hook's `HookError` |
+| 429 | `rate_limited` | Rate limit (`Retry-After` header set) |
+| 504 | `timeout` | `server.request_timeout` exceeded |
 
-Other error codes: 400 (bad request), 401 (unauthenticated), 403 (forbidden), 429 (rate limited), 500 (server error).
+Database error details are logged with the request id and never returned to clients.
+
+## Concurrency and retries
+
+**ETags.** `GET`, `create`, `update` and `replace` return an `ETag`. Send it back as `If-Match` on `PATCH`/`PUT`/`DELETE`: if the record changed since you read it, the write is refused with **412** and nothing changes. `GET` with `If-None-Match` returns **304** when unchanged.
+
+**Idempotency keys.** Send `Idempotency-Key: <unique string>` on `POST` to make retries safe. The first response is stored for 24 hours, and a retry with the same key and body replays it (`Idempotent-Replayed: true`) instead of creating a duplicate. Keys are scoped to the caller and path. Reusing a key with a different body returns 422. A request that is still running returns 409.
 
 ## Rate limiting
 
-A token bucket rate limiter can be applied per-endpoint. It overrides the global `server.rate_limit` for requests to this path.
+A token bucket rate limiter can be applied per endpoint. It applies **in addition to** the global `server.rate_limit`: a request must pass both. `key_by: user` limits per authenticated caller and falls back to the client IP for anonymous requests.
 
 ```yaml
 - path: /auth/register
@@ -131,24 +149,25 @@ A token bucket rate limiter can be applied per-endpoint. It overrides the global
   rate_limit:
     requests_per_minute: 5   # fill rate
     burst: 2                 # bucket capacity (allows short burst above the rate)
-    key_by: ip               # ip (default) | user (JWT sub)
+    key_by: ip               # ip (default) | user (authenticated subject)
 ```
 
-Excess requests receive **429 Too Many Requests**.
+Excess requests receive **429 Too Many Requests** with `Retry-After`. Responses carry `X-RateLimit-Limit` and `X-RateLimit-Remaining`. Limits are counted per server instance.
 
 ## `list` options
 
 ```yaml
 list:
-  allow_filter_by: [status, author_id]   # query params allowed as WHERE filters
+  allow_filter_by: [status, author_id]   # fields clients may filter on
+  search: [title, body]                  # fields matched by ?q= (case-insensitive substring)
   allow_sort_by: [created_at, title]     # query params allowed as ORDER BY columns
   default_sort: created_at:desc          # default sort (format: column:asc or column:desc)
   pagination:
     style: cursor                        # cursor (default) | offset
     default_limit: 20
     max_limit: 100
-    include_total: true                  # offset only: include total row count in meta
-  include: [author, tags]               # relations to eager-load
+    include_total: true                  # add meta.total (a COUNT query)
+  include: [author, tags]               # relations clients may request with ?include=
   auth:
     require: false
   row_access:                           # ABAC: row-level filter rules (opt-in)
@@ -162,15 +181,23 @@ Clients filter and sort by passing query parameters:
 
 ```
 GET /posts?status=published&sort=title:asc&limit=10
-GET /posts?cursor=eyJ...&limit=10
-GET /posts?limit=20&offset=40        # offset pagination
+GET /posts?score[gte]=10&score[lt]=100          # gt gte lt lte ne
+GET /posts?status[in]=draft,review              # in / nin (max 100 values)
+GET /posts?title[contains]=postgres             # contains / starts_with (case-insensitive)
+GET /posts?published_at[is_null]=false
+GET /posts?q=migration                          # full-text-ish search over list.search fields
+GET /posts?sort=-created_at&cursor=eyJ...&limit=10
+GET /posts?fields=id,title&include=author       # sparse fields + embedded relations
+GET /posts?limit=20&offset=40                   # offset pagination
 ```
 
-Only columns listed in `allow_filter_by` and `allow_sort_by` are accepted — any other value returns 400. This prevents both SQL injection and unindexed queries.
+Filter values are converted to the field's type (`score[gte]=abc` → 400). Filtering on a field not in `allow_filter_by`, or sorting on one not in `allow_sort_by`, returns 400 rather than silently ignoring the parameter. Unrelated query parameters (e.g. cache busters) are ignored.
+
+`?include=` embeds relations listed in `include:` — `belongs_to`/`has_one` as an object, `has_many`/`many_to_many` as an array — loaded with one batched query per relation. Included rows have the related entity's `omit_response` and `read_roles` applied. They are **not** filtered by the related entity's endpoint `row_access`, so only list relations every caller of this endpoint may see.
 
 ### Pagination styles
 
-**Cursor** (default) — HMAC-signed opaque cursor. Best for live feeds where rows may be inserted during pagination.
+**Cursor** (default) — keyset pagination on (sort column, primary key) with an HMAC-signed opaque cursor. Every row is returned exactly once, for any sort order and direction, even while rows are inserted. Pass `meta.next_cursor` back as `?cursor=` with the same `sort` (a cursor issued for another sort is rejected). `meta.has_more` is `false` on the last page.
 
 **Offset** — traditional page/offset. Use when clients need to jump to arbitrary pages or display "page N of M". Enable total count (a separate `COUNT(*)` query) with `include_total: true`:
 
@@ -211,13 +238,14 @@ create:
   before_hooks: [validate-post]              # plugin hook names
   after_hooks: [notify-followers]
   bulk: false               # true = accept a JSON array; false (default) = single object
-  bulk_max: 100             # max items per bulk request (default: 100)
+  bulk_max: 500             # max items per bulk request (default: 500)
   bulk_error_mode: abort    # abort (default) | partial
+  strict: false             # true = unknown body fields are a 400 instead of being dropped
 ```
 
 ### Single create
 
-The request body is `application/json` containing a single object. All entity fields can be set on create (use `serialization` or `access.write_roles` if needed).
+The request body is `application/json` containing a single object. Every provided field is type-checked and converted to the field's declared type. Server-managed columns can't be set: timestamps, `deleted_at`, `default_from` fields (filled from the caller), and fields whose `access.write_roles` exclude the caller.
 
 ### Bulk create
 
@@ -230,7 +258,7 @@ When `bulk: true`, `POST` accepts a JSON array:
 ]
 ```
 
-**`bulk_error_mode: abort`** (default) — the first validation or DB error stops the entire batch. Returns 400/422. No rows are written.
+**`bulk_error_mode: abort`** (default) — the whole batch runs in one transaction. Any validation or database error fails the request (400/409/422; `X-Failed-Index` names the failing item) and **no rows are written**.
 
 **`bulk_error_mode: partial`** — processing continues past errors. Returns **207 Multi-Status** with a per-item result array:
 
@@ -238,10 +266,12 @@ When `bulk: true`, `POST` accepts a JSON array:
 {
   "results": [
     { "index": 0, "data": { "id": "...", "name": "Widget A" } },
-    { "index": 1, "error": "price: must be greater than 0" }
+    { "index": 1, "error": "validation failed", "errors": { "price": "price must be at least 0" } }
   ]
 }
 ```
+
+Each item commits on its own; failed items report a client-safe message.
 
 ## `update` options
 
@@ -258,15 +288,14 @@ update:
       filter: "author_id = :subject.id"  # others: only their own rows
 ```
 
-`allowed_fields` is a security-critical whitelist. Only the listed fields can be changed via PATCH. Fields not in the list are silently ignored. Without this whitelist, any entity field can be updated — which can allow callers to escalate privileges (e.g. by updating a `role` field).
+`strict: true` turns unknown body fields into a 400. `allowed_fields` is a security-critical whitelist. Only the listed fields can be changed via PATCH. Fields not in the list are silently ignored. Without this whitelist, any entity field can be updated — which can allow callers to escalate privileges (e.g. by updating a `role` field).
 
-Immutable fields (`immutable: true` on the entity) are always stripped from update payloads regardless of `allowed_fields`.
+Immutable fields (`immutable: true`), `default_from` fields and the primary key are always stripped from update payloads regardless of `allowed_fields`. Row access is checked, and the row is locked, before `BeforeUpdate` hooks run, so hooks never see rows the caller can't touch.
 
 ## `delete` options
 
 ```yaml
 delete:
-  soft_delete: true    # sets deleted_at instead of removing the row
   auth:
     require: true
     roles: [admin]
@@ -277,7 +306,7 @@ delete:
       filter: "author_id = :subject.id"
 ```
 
-`soft_delete: true` on the endpoint requires `soft_delete: true` on the entity. Hard deletes issue a real `DELETE FROM` statement.
+Entities with `soft_delete: true` are always soft-deleted (`deleted_at` is set and the row disappears from reads); other entities are hard-deleted. `delete.soft_delete: true` on an entity without `soft_delete` is a configuration error. `BeforeDelete` hooks only run for rows that exist and that the caller may delete.
 
 ## `auth` object
 
@@ -295,12 +324,14 @@ auth:
 | Field | Description |
 |---|---|
 | `require` | `false` = no auth needed (public). `true` = JWT or API key required; returns 401 if absent/invalid. |
-| `roles` | Allowlist of roles. The subject's role must match one. Returns 403 if not in list. |
-| `conditions` | CEL-lite expressions evaluated against the subject. All must pass (AND). Returns 403 if any fails. |
+| `roles` | Allowlist of roles. The subject's role must match one, or 403. Always enforced, with or without a Casbin policy, and implies `require: true`. |
+| `conditions` | CEL-lite expressions evaluated against the subject. All must pass (AND), or 403. Implies `require: true`. |
+
+If `require: true` is set but no JWT secret or API keys are configured, the route rejects every request (fail closed) rather than being open.
 
 **Condition operators:** `==`, `!=`, `>`, `<`, `>=`, `<=`, `in`, `not_in`, `starts_with`, `ends_with`, `*` (always true)
 
-**Subject attributes:** `subject.id` (JWT `sub` or API key user ID), `subject.role`, `subject.email`
+**Subject attributes:** `subject.id` (JWT `sub` or API key subject), `subject.role`, `subject.email`, `subject.tenant` (JWT `tenant` claim)
 
 ## `row_access` rules
 
@@ -329,6 +360,7 @@ Rules are evaluated **in order** — the first matching `when` wins. If no rule 
 | `:subject.id` | JWT `sub` or API key subject ID |
 | `:subject.role` | JWT `role` or API key role |
 | `:subject.email` | JWT `email` |
+| `:subject.tenant` | JWT `tenant` |
 
 `row_access` is **opt-in**: omitting it means all rows are accessible. Defining it without a catch-all `when: "*"` means any caller not matched by a rule is denied.
 

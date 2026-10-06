@@ -5,6 +5,9 @@ package plugin
 
 import (
 	"context"
+	"fmt"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/teleology-io/yayPI/internal/middleware"
 	"github.com/teleology-io/yayPI/pkg/sdk"
@@ -15,6 +18,52 @@ import (
 type Dispatcher struct {
 	hooks         map[string][]sdk.EntityHookPlugin // keyed by entity name
 	routeHandlers map[string]sdk.RouteHandlerFunc   // keyed by "<PluginInfo.Name>.<handlerKey>"
+	plugins       []sdk.Plugin                      // distinct plugins, registration order
+}
+
+func (d *Dispatcher) track(p sdk.Plugin) {
+	for _, existing := range d.plugins {
+		if existing == p {
+			return
+		}
+	}
+	d.plugins = append(d.plugins, p)
+}
+
+// Plugins returns every distinct registered plugin.
+func (d *Dispatcher) Plugins() []sdk.Plugin { return d.plugins }
+
+// InitAll calls Init on every plugin with its `plugins:` config block (matched by
+// PluginInfo.Name). The first error aborts startup.
+func (d *Dispatcher) InitAll(configs map[string]map[string]any) error {
+	for _, p := range d.plugins {
+		name := p.Info().Name
+		if err := p.Init(sdk.InitContext{Config: configs[name], Logger: pluginLogger{name: name}}); err != nil {
+			return fmt.Errorf("plugin %q init: %w", name, err)
+		}
+	}
+	return nil
+}
+
+// ShutdownAll calls Shutdown on every plugin (reverse order), logging failures.
+func (d *Dispatcher) ShutdownAll(ctx context.Context) {
+	for i := len(d.plugins) - 1; i >= 0; i-- {
+		p := d.plugins[i]
+		if err := p.Shutdown(ctx); err != nil {
+			log.Warn().Err(err).Str("plugin", p.Info().Name).Msg("plugin shutdown failed")
+		}
+	}
+}
+
+// pluginLogger adapts zerolog to sdk.Logger.
+type pluginLogger struct{ name string }
+
+func (l pluginLogger) Info(msg string, fields ...any) {
+	log.Info().Str("plugin", l.name).Fields(fields).Msg(msg)
+}
+
+func (l pluginLogger) Error(msg string, err error, fields ...any) {
+	log.Error().Str("plugin", l.name).Err(err).Fields(fields).Msg(msg)
 }
 
 // NewDispatcher creates an empty Dispatcher.
@@ -28,12 +77,14 @@ func NewDispatcher() *Dispatcher {
 // RegisterHook registers an EntityHookPlugin for a given entity.
 func (d *Dispatcher) RegisterHook(entityName string, plugin sdk.EntityHookPlugin) {
 	d.hooks[entityName] = append(d.hooks[entityName], plugin)
+	d.track(plugin)
 }
 
 // RegisterRoutePlugin registers all of p's named handlers, prefixed with its own
 // PluginInfo.Name, matching the "handler: <name>.<key>" string endpoints YAML uses
 // to reference it.
 func (d *Dispatcher) RegisterRoutePlugin(p sdk.RouteHandlerPlugin) {
+	d.track(p)
 	prefix := p.Info().Name
 	for name, fn := range p.Handlers() {
 		d.routeHandlers[prefix+"."+name] = fn
@@ -49,12 +100,13 @@ func (d *Dispatcher) RouteHandler(name string) (sdk.RouteHandlerFunc, bool) {
 // buildHookContext constructs a HookContext from a request context,
 // extracting the authenticated subject if present.
 func buildHookContext(ctx context.Context) sdk.HookContext {
-	hCtx := sdk.HookContext{Ctx: ctx}
+	hCtx := sdk.HookContext{Ctx: ctx, RequestID: middleware.RequestIDFromContext(ctx)}
 	if sub := middleware.SubjectFromContext(ctx); sub != nil {
 		hCtx.Subject = &sdk.Subject{
-			ID:    sub.ID,
-			Role:  sub.Role,
-			Email: sub.Email,
+			ID:     sub.ID,
+			Role:   sub.Role,
+			Email:  sub.Email,
+			Tenant: sub.Tenant,
 		}
 	}
 	return hCtx

@@ -31,6 +31,9 @@ entity:
 | `database` | string | default DB | Which database from `yaypi.yaml` to use |
 | `timestamps` | boolean | `false` | Auto-add `created_at` and `updated_at` (both `timestamptz`) |
 | `soft_delete` | boolean | `false` | Auto-add `deleted_at timestamptz`; filters all queries |
+| `audit` | boolean | `false` | Write an audit log row for every change (see [Audit log](#audit-log)) |
+| `tenant_scoped` | boolean | `false` | Isolate rows per tenant (see [Multi-tenancy](#multi-tenancy-tenant_scoped)) |
+| `tenant_field` | string | `tenant_id` | Tenant column for `tenant_scoped` |
 
 ## Field types
 
@@ -143,8 +146,13 @@ fields:
 
 ### Validation response
 
+Every provided field is also type-checked against its declared `type` — even fields without a `validate:` block — before anything reaches the database: integers must be whole numbers, `timestamptz` takes RFC 3339, `date` takes `YYYY-MM-DD`, `uuid` must parse, `enum` must be one of `values`, `bytea` is base64, and an explicit `null` for a non-nullable field is rejected. `pattern` is compiled at startup, so an invalid regex stops the server. Failures return 400:
+
 ```json
 {
+  "error": "validation failed",
+  "code": "validation_failed",
+  "request_id": "…",
   "errors": {
     "email": "must be a valid email address",
     "username": "must be 3–30 lowercase letters, numbers, or underscores",
@@ -152,6 +160,43 @@ fields:
   }
 }
 ```
+
+## Owner fields (`default_from`)
+
+`default_from` fills a field from the authenticated caller on create, ignoring any value the client sends, and makes it read-only afterwards. Use it for owner columns so a user can never create records on someone else's behalf:
+
+```yaml
+- name: author_id
+  type: uuid
+  default_from: subject.id     # subject.id | subject.email | subject.role | subject.tenant
+  references: { entity: User, field: id }
+```
+
+An anonymous create on an entity with a non-nullable `default_from` field is refused with 401.
+
+## Audit log
+
+```yaml
+entity:
+  name: Invoice
+  audit: true
+```
+
+Every create, update and delete of an audited entity writes a row to `yaypi_audit_log` in the same transaction: entity, record id, action, actor id and role, request id, and a field-level diff (`{"field": [old, new]}`). `omit_log` fields are recorded as `"[redacted]"`.
+
+## Multi-tenancy (`tenant_scoped`)
+
+```yaml
+entity:
+  name: Project
+  tenant_scoped: true
+  tenant_field: tenant_id      # default
+  fields:
+    - name: tenant_id
+      type: string
+```
+
+Every list, get, update and delete of a tenant-scoped entity is restricted to rows whose `tenant_field` equals the caller's `tenant` token claim, on top of any `row_access` rules. On create the field is set from the claim. Callers without a tenant claim get 403. The built-in auth issues the claim from a `tenant_id` column on the user (add it under `auth.user.fields`). For other token issuers, include a `"tenant"` claim. Use `:subject.tenant` in `row_access` filters and `subject.tenant` in conditions.
 
 ## Immutable fields
 

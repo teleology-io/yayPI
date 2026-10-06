@@ -1,14 +1,12 @@
-// Package mailer provides SMTP email sending triggered by entity lifecycle events.
-// Configure via "kind: email" YAML files; SMTP credentials come from env vars.
+// Package mailer sends HTML email over SMTP. Configure it with the `smtp:` block in
+// yaypi.yaml; any field left empty falls back to its env var:
 //
-// Required env vars:
-//
-//	SMTP_HOST           — mail server hostname
-//	SMTP_PORT           — mail server port (default: 587)
-//	SMTP_USER           — SMTP username
-//	SMTP_PASS           — SMTP password
-//	SMTP_SENDER_NAME    — display name in From header
-//	SMTP_SENDER_EMAIL   — address in From header
+//	host        SMTP_HOST           — mail server hostname
+//	port        SMTP_PORT           — mail server port (default: 587)
+//	username    SMTP_USER           — SMTP username
+//	password    SMTP_PASS           — SMTP password
+//	from_name   SMTP_SENDER_NAME    — display name in From header
+//	from_email  SMTP_SENDER_EMAIL   — address in From header
 package mailer
 
 import (
@@ -16,23 +14,21 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"html/template"
+	"mime"
 	"mime/quotedprintable"
 	"net"
 	"net/smtp"
 	"os"
-	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
-	"github.com/rs/zerolog/log"
 	"github.com/teleology-io/yayPI/internal/config"
-	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
-// Mailer implements sdk.EntityHookPlugin and fires emails on entity events.
+// Mailer sends HTML email over SMTP. Entity-triggered emails are rendered by the outbox
+// package and delivered through Send with retries.
 type Mailer struct {
-	defs map[string][]config.EmailDef // entity → []EmailDef
 	smtp smtpConfig
 }
 
@@ -45,105 +41,60 @@ type smtpConfig struct {
 	senderEmail string
 }
 
-// New creates a Mailer from a slice of EmailDef. Returns nil if no SMTP host is set.
-func New(defs []config.EmailDef) *Mailer {
-	host := os.Getenv("SMTP_HOST")
-	if host == "" {
-		return nil // SMTP not configured — silently no-op
+// New returns a Mailer from the smtp: config block (nil-safe), filling empty fields from
+// SMTP_* env vars. It returns nil when no host is configured either way.
+func New(cfg *config.SMTPConfig) *Mailer {
+	var c config.SMTPConfig
+	if cfg != nil {
+		c = *cfg
 	}
-	port := os.Getenv("SMTP_PORT")
+	pick := func(v, env string) string {
+		if v != "" {
+			return v
+		}
+		return os.Getenv(env)
+	}
+	host := pick(c.Host, "SMTP_HOST")
+	if host == "" {
+		return nil
+	}
+	port := ""
+	if c.Port > 0 {
+		port = strconv.Itoa(c.Port)
+	}
+	port = pick(port, "SMTP_PORT")
 	if port == "" {
 		port = "587"
 	}
+	return &Mailer{smtp: smtpConfig{
+		host:        host,
+		port:        port,
+		user:        pick(c.Username, "SMTP_USER"),
+		pass:        pick(c.Password, "SMTP_PASS"),
+		senderName:  pick(c.FromName, "SMTP_SENDER_NAME"),
+		senderEmail: pick(c.FromEmail, "SMTP_SENDER_EMAIL"),
+	}}
+}
 
-	m := &Mailer{
-		defs: make(map[string][]config.EmailDef),
-		smtp: smtpConfig{
-			host:        host,
-			port:        port,
-			user:        os.Getenv("SMTP_USER"),
-			pass:        os.Getenv("SMTP_PASS"),
-			senderName:  os.Getenv("SMTP_SENDER_NAME"),
-			senderEmail: os.Getenv("SMTP_SENDER_EMAIL"),
-		},
+// FromEnv returns a Mailer configured only from SMTP_* env vars (nil if SMTP_HOST is unset).
+func FromEnv() *Mailer { return New(nil) }
+
+// Send delivers one HTML email.
+func (m *Mailer) Send(_ context.Context, to, subject, htmlBody string) error {
+	if !isValidEmail(to) {
+		return fmt.Errorf("invalid recipient %q", to)
 	}
-	for _, d := range defs {
-		m.defs[d.Entity] = append(m.defs[d.Entity], d)
-	}
-	return m
-}
-
-// ── sdk.Plugin interface ──────────────────────────────────────────────────────
-
-func (m *Mailer) Info() sdk.PluginInfo {
-	return sdk.PluginInfo{Name: "mailer", Version: "1.0.0", Description: "SMTP email notifications"}
-}
-func (m *Mailer) Init(_ sdk.InitContext) error  { return nil }
-func (m *Mailer) Shutdown(_ context.Context) error { return nil }
-
-// ── sdk.EntityHookPlugin interface ───────────────────────────────────────────
-
-func (m *Mailer) BeforeCreate(_ sdk.HookContext, _ string, data map[string]any) (map[string]any, error) {
-	return data, nil
-}
-func (m *Mailer) BeforeUpdate(_ sdk.HookContext, _ string, _ string, data map[string]any) (map[string]any, error) {
-	return data, nil
-}
-func (m *Mailer) BeforeDelete(_ sdk.HookContext, _ string, _ string) error { return nil }
-
-func (m *Mailer) AfterCreate(ctx sdk.HookContext, entity string, record map[string]any) error {
-	return m.dispatch(ctx.Ctx, entity, "after_create", record)
-}
-func (m *Mailer) AfterUpdate(ctx sdk.HookContext, entity string, record map[string]any) error {
-	return m.dispatch(ctx.Ctx, entity, "after_update", record)
-}
-func (m *Mailer) AfterDelete(ctx sdk.HookContext, entity string, id string) error {
-	return m.dispatch(ctx.Ctx, entity, "after_delete", map[string]any{"id": id})
-}
-
-// ── Dispatch ──────────────────────────────────────────────────────────────────
-
-func (m *Mailer) dispatch(_ context.Context, entity, trigger string, record map[string]any) error {
-	defs := m.defs[entity]
-	for _, d := range defs {
-		if d.Trigger != trigger {
-			continue
-		}
-		if d.Condition != "" && !evalSimpleCondition(d.Condition, record) {
-			continue
-		}
-
-		to, err := renderText(d.To, record)
-		if err != nil || to == "" {
-			log.Warn().Str("email", d.Name).Msg("mailer: could not resolve 'to' address")
-			continue
-		}
-		if !isValidEmail(to) {
-			log.Warn().Str("email", d.Name).Str("to", to).Msg("mailer: invalid 'to' address")
-			continue
-		}
-
-		subject, _ := renderText(d.Subject, record)
-		body, err := renderHTML(d.Body, record)
-		if err != nil {
-			log.Warn().Err(err).Str("email", d.Name).Msg("mailer: template render failed")
-			continue
-		}
-
-		go func(to, subject, body string) {
-			if err := m.send(to, subject, body); err != nil {
-				log.Warn().Err(err).Str("to", to).Msg("mailer: send failed")
-			}
-		}(to, subject, body)
-	}
-	return nil
+	return m.send(to, subject, htmlBody)
 }
 
 // ── SMTP send ─────────────────────────────────────────────────────────────────
 
 func (m *Mailer) send(to, subject, htmlBody string) error {
 	addr := net.JoinHostPort(m.smtp.host, m.smtp.port)
-	from := m.smtp.senderName + " <" + m.smtp.senderEmail + ">"
+	// Header values may come from record data; strip CR/LF so nothing can inject
+	// extra headers (Bcc:, etc.) or end the header block early.
+	to, subject = headerSafe(to), mime.QEncoding.Encode("utf-8", headerSafe(subject))
+	from := mime.QEncoding.Encode("utf-8", headerSafe(m.smtp.senderName)) + " <" + headerSafe(m.smtp.senderEmail) + ">"
 
 	var msg bytes.Buffer
 	msg.WriteString("From: " + from + "\r\n")
@@ -201,69 +152,21 @@ func (m *Mailer) send(to, subject, htmlBody string) error {
 	return err
 }
 
-// ── Template rendering ────────────────────────────────────────────────────────
-
-// renderText renders a string that may contain {{record.field}} placeholders.
-func renderText(tmpl string, record map[string]any) (string, error) {
-	t, err := template.New("").Option("missingkey=zero").Parse(toGoTemplate(tmpl))
-	if err != nil {
-		return "", err
-	}
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, map[string]any{"record": record}); err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(buf.String()), nil
-}
-
-// renderHTML renders an HTML template with {{record.field}} placeholders.
-func renderHTML(tmpl string, record map[string]any) (string, error) {
-	t, err := template.New("").Option("missingkey=zero").Parse(toGoTemplate(tmpl))
-	if err != nil {
-		return "", err
-	}
-	var buf bytes.Buffer
-	if err := t.Execute(&buf, map[string]any{"record": record}); err != nil {
-		return "", err
-	}
-	return buf.String(), nil
-}
-
-// toGoTemplate converts {{record.email}} → {{.record.email}} for Go's text/template.
-var recordFieldRe = regexp.MustCompile(`\{\{(record\.[^}]+)\}\}`)
-
-func toGoTemplate(s string) string {
-	return recordFieldRe.ReplaceAllString(s, `{{.$1}}`)
-}
-
-// ── Condition evaluation ──────────────────────────────────────────────────────
-
-// evalSimpleCondition evaluates a basic condition like `record.reset_token != ""`.
-// Supports != "" and != null checks only for v1. Returns true (fire) on parse error.
-func evalSimpleCondition(cond string, record map[string]any) bool {
-	// Support: record.<field> != ""  and  record.<field> != null
-	re := regexp.MustCompile(`record\.(\w+)\s*!=\s*["']?(\S*)["']?`)
-	m := re.FindStringSubmatch(cond)
-	if m == nil {
-		return true // unknown condition — fire anyway
-	}
-	field, check := m[1], m[2]
-	val, ok := record[field]
-	if !ok {
-		return false
-	}
-	switch check {
-	case `""`, "''", "":
-		s, _ := val.(string)
-		return s != ""
-	case "null", "nil":
-		return val != nil
-	}
-	return true
+// headerSafe removes characters that could break out of a single header line.
+func headerSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\r' || r == '\n' || r == 0 {
+			return -1
+		}
+		return r
+	}, s)
 }
 
 // isValidEmail is a minimal email validator.
 func isValidEmail(s string) bool {
+	if strings.ContainsAny(s, "\r\n<>,; \t") {
+		return false
+	}
 	at := strings.LastIndex(s, "@")
 	if at < 1 || at == len(s)-1 {
 		return false

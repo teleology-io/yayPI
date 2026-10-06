@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://yaypi.dev/schemas/email.schema.json",
   "title": "yayPi Email",
-  "description": "Defines trigger-based HTML email notifications sent via SMTP. Configure SMTP via SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SENDER_NAME, SMTP_SENDER_EMAIL environment variables.",
+  "description": "Defines trigger-based HTML email notifications sent via SMTP. Configure SMTP with the smtp: block in yaypi.yaml (empty fields fall back to SMTP_* environment variables).",
   "type": "object",
   "required": ["kind", "emails"],
   "additionalProperties": false,
@@ -63,6 +63,30 @@
           "type": "string",
           "description": "HTML email body. Supports {{record.field}} and ${ENV_VAR} substitution.",
           "examples": ["<h1>Hi {{record.name}},</h1><p>Welcome!</p>"]
+        },
+        "retry": {
+          "type": "object",
+          "description": "Overrides smtp.retry for this email.",
+          "additionalProperties": false,
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "description": "Total attempts before the message is marked dead."
+            },
+            "backoff": {
+              "type": "string",
+              "description": "exponential (default) or fixed.",
+              "enum": ["exponential", "fixed"]
+            },
+            "initial_delay": {
+              "type": "string",
+              "description": "Delay before the first retry, e.g. 10s."
+            },
+            "max_delay": {
+              "type": "string",
+              "description": "Cap on the delay between retries, e.g. 1h."
+            }
+          }
         }
       }
     }

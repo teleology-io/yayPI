@@ -64,6 +64,22 @@ func builtinUserFields() []Field {
 			Nullable:   true,
 		},
 		{
+			Name:       "email_verified_at",
+			ColumnName: "email_verified_at",
+			Type:       types.FieldTypeTimestamptz,
+			Nullable:   true,
+		},
+		{
+			// Bumped on logout-all / password reset; access tokens carry it as "tv" and
+			// are rejected once stale (when auth.revocation_check is on).
+			Name:         "token_version",
+			ColumnName:   "token_version",
+			Type:         types.FieldTypeInteger,
+			Default:      "0",
+			Nullable:     false,
+			OmitResponse: true,
+		},
+		{
 			Name:       "created_at",
 			ColumnName: "created_at",
 			Type:       types.FieldTypeTimestamptz,

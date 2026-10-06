@@ -37,8 +37,7 @@ func APIKeyAuth(header, queryParam string, lookup APIKeyLookup) func(http.Handle
 				writeJSONError(w, http.StatusUnauthorized, "invalid API key")
 				return
 			}
-			ctx := context.WithValue(r.Context(), ctxKeySubject, sub)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			next.ServeHTTP(w, r.WithContext(WithSubject(r.Context(), sub)))
 		})
 	}
 }

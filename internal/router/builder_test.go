@@ -77,8 +77,7 @@ func TestCustomHandler_RequiresAuth(t *testing.T) {
 
 	h := Build(reg, nil, Config{
 		Dispatcher: dispatcher,
-		AuthSecret: []byte("test-secret"),
-		AuthAlg:    "HS256",
+		Tokens:     testKeys(t),
 		BaseURL:    "/api/v1",
 	})
 

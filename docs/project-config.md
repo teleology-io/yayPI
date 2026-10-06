@@ -1,6 +1,6 @@
 # Project Config (`yaypi.yaml`)
 
-`yaypi.yaml` is the root configuration file. All other YAML files are discovered through the `include:` globs it defines.
+`yaypi.yaml` is the root configuration file. All other YAML files are discovered through the `include:` globs it defines. `${VAR}` and `${VAR:-default}` are replaced from the environment; an unset variable without a default becomes an empty string, which validation rejects for secrets and DSNs.
 
 ## Full annotated example
 
@@ -9,150 +9,171 @@ version: "1"
 
 # ── Project metadata ──────────────────────────────────────────────────────────
 project:
-  name: my-api          # used for logging and scaffolding; no spaces
+  name: my-api          # used in logs, as the default JWT issuer and OpenAPI tag
   base_url: /api/v1     # prefix for all routes (e.g. /api/v1/users)
 
 # ── HTTP server ───────────────────────────────────────────────────────────────
 server:
   port: 8080
-  read_timeout: 30s     # max time to read request body
-  write_timeout: 30s    # max time to write response
-  shutdown_timeout: 10s # graceful shutdown window
+  read_timeout: 30s
+  read_header_timeout: 10s   # default 10s — protects against slow-header attacks
+  write_timeout: 30s
+  idle_timeout: 120s         # keep-alive idle timeout
+  request_timeout: 30s       # deadline for each request and its queries (default: write_timeout) → 504
+  shutdown_timeout: 10s      # graceful shutdown window
+  drain_delay: 5s            # after SIGTERM, /ready fails and serving continues this long
 
-  # Optional size limits
-  max_request_body_size: 4MB
+  max_request_body_size: 1MB # default 1MB; larger bodies get 413
   max_header_bytes: 1MB
 
-  # Optional TLS (omit to use plain HTTP)
   tls:
     cert_file: /etc/ssl/certs/server.crt
     key_file:  /etc/ssl/private/server.key
 
-  # CORS — allowed origins for cross-origin requests
-  # Use ["*"] to allow all origins (not recommended in production)
+  # Reverse proxies / load balancers whose X-Forwarded-For you trust. Without this the
+  # client IP (for rate limiting and logs) is the TCP peer address.
+  trusted_proxies: [10.0.0.0/8]
+
+  # CORS. Listed origins may send credentials (cookies). "*" allows any origin
+  # WITHOUT credentials — it is never combined with credentials.
   allowed_origins:
     - https://app.example.com
-    - http://localhost:3000
+  cors:
+    exposed_headers: [ETag, X-Request-ID]
 
-  # Health/readiness endpoints (for Kubernetes probes)
+  security_headers: true     # nosniff, frame DENY, no-referrer, CSP (default true)
+  hsts_max_age: 31536000     # add HSTS when the API is HTTPS-only (incl. behind a TLS proxy)
+
   health:
     enabled: true
-    path: /health          # liveness: always 200
-    readiness_path: /ready # readiness: 200 if DB reachable, 503 if not
+    path: /health            # liveness: always 200
+    readiness_path: /ready   # readiness: 200 if databases reachable; 503 otherwise or while draining
 
-  # Global rate limiting (token bucket)
-  rate_limit:
+  rate_limit:                # global token bucket
     requests_per_minute: 120
     burst: 30
-    key_by: ip            # ip (default) | user (JWT sub claim)
+    key_by: ip               # ip (default) | user (authenticated subject)
+
+  strict_startup: true       # a degraded subsystem stops the boot instead of warning (default)
+  idempotency_ttl: 24h       # how long Idempotency-Key responses are replayed
 
 # ── Databases ─────────────────────────────────────────────────────────────────
 databases:
   - name: primary
-    driver: postgres           # postgres/postgresql, mysql/mariadb, sqlite/sqlite3
-    dsn: ${DATABASE_URL:-postgres://localhost/myapp}
-    max_open_conns: 25
-    max_idle_conns: 5
-    conn_max_lifetime: 1h
-    default: true         # used when an entity has no explicit database:
+    driver: postgres           # postgres/postgresql, mysql, sqlite/sqlite3
+    dsn: ${DATABASE_URL}
+    max_open_conns: 25         # default 25
+    max_idle_conns: 25         # default = max_open_conns
+    conn_max_lifetime: 30m     # default 30m
+    conn_max_idle_time: 5m     # default 5m
+    default: true
 
-  # Optional second database (entities opt-in with `database: analytics`)
   - name: analytics
     driver: postgres
     dsn: ${ANALYTICS_DATABASE_URL}
-    max_open_conns: 10
-    read_only: true       # disables write operations on this pool
 
 # ── Authentication ────────────────────────────────────────────────────────────
 auth:
-  provider: jwt
-  secret: ${JWT_SECRET}           # HMAC secret for HS256/HS512
-  algorithm: HS256                # HS256, HS384, or HS512
-  reject_algorithms: [none]       # always reject unsigned tokens
-  expiry: 24h                     # informational only — yayPi validates `exp` claim
+  secret: ${JWT_SECRET}        # >= 32 bytes: openssl rand -hex 32
+  algorithm: HS256             # HS256/384/512, RS256/384/512, ES256/384/512
+  # private_key_file: ./keys/jwt.pem   # RS*/ES*
+  # public_key_file: ./keys/jwt.pub
+  # key_id: 2026-10
+  issuer: my-api               # verified when set (issued as project.name otherwise)
+  # audience: my-frontend
+  expiry: 15m                  # access token TTL (default 15m with refresh tokens, else 1h)
+  revocation_check: false      # true = logout-all, resets, role changes and deletes apply instantly
 
-  # Optional API key authentication (alongside JWT)
   api_keys:
-    header: X-API-Key             # header to read the key from (default: X-API-Key)
-    query_param: api_key          # optional: also accept ?api_key= query param
-    # Static key list (use this OR entity below, not both):
+    header: X-API-Key
+    # Static keys:
     keys:
-      - key: ${ADMIN_API_KEY}
-        role: admin
       - key: ${SERVICE_API_KEY}
         role: service
-    # DB-backed alternative:
-    entity: ApiKey                # entity name containing key records
-    key_field: token              # column holding the key value (default: token)
-    role_field: role              # column holding the role (default: role)
+        name: billing-service  # caller id for logs, row_access and audit
+    # Or DB-backed keys (column stores the SHA-256 digest from `yaypi apikey generate`):
+    # entity: ApiKey
+    # key_field: token
+    # role_field: role
+    # subject_field: user_id
 
 # ── Authorization (RBAC) ──────────────────────────────────────────────────────
 policy:
   engine: casbin
-  model: ./policies/model.conf    # Casbin model file path
-  adapter: file                   # "file" or "database"
-  adapter_table: casbin_rules     # table name when adapter: database
+  model: ./policies/model.conf # relative to yaypi.yaml
+  adapter: file
 
-# ── OpenAPI spec generation ───────────────────────────────────────────────────
-# Define one or more named specs. Endpoints are included in all specs by default.
-# See docs/openapi.md for the full guide.
+# ── Email (SMTP) ──────────────────────────────────────────────────────────────
+smtp:                           # email triggers, password reset, verification
+  host: smtp.example.com        # empty fields fall back to SMTP_HOST / SMTP_PORT / SMTP_USER /
+  port: 587                     #   SMTP_PASS / SMTP_SENDER_NAME / SMTP_SENDER_EMAIL
+  username: ${SMTP_USER}
+  password: ${SMTP_PASS}
+  from_name: My App
+  from_email: no-reply@example.com
+  retry:                        # default for all emails (emails[].retry overrides)
+    max_attempts: 5
+    initial_delay: 10s
+    max_delay: 1h
+
+# ── Background delivery, jobs, audit ──────────────────────────────────────────
+outbox:
+  poll_interval: 1s          # webhook/email worker poll interval
+  retention: 7d              # delete delivered messages after this
+cron:
+  distributed: true          # one replica per tick (default when a database is configured)
+audit:
+  retention: 365d            # purge audit rows older than this (default: keep forever)
+
+# ── Observability ─────────────────────────────────────────────────────────────
+log:
+  level: info                  # debug | info | warn | error
+  format: json                 # json | console (default: console on a terminal, json otherwise)
+
+metrics:
+  enabled: true
+  path: /metrics
+  token: ${METRICS_TOKEN}      # optional bearer token for scrapers
+
+# ── OpenAPI ───────────────────────────────────────────────────────────────────
 spec:
   - name: api
     title: "My API"
-    description: "Public REST API"
     version: "1.0.0"
     servers:
       - url: https://api.example.com
-        description: Production
-      - url: http://localhost:8080
-        description: Local
 
-# ── Auto-migrate ──────────────────────────────────────────────────────────────
-# When true, yayPi applies any pending schema diff on startup.
-# Use only in development or CI — never in production.
-auto_migrate: false
+auto_migrate: false            # development only — see Migrations
 
-# ── Plugins ───────────────────────────────────────────────────────────────────
 plugins:
-  - name: hash-password
-    path: ./plugins/hashpassword
-    config:
-      bcrypt_cost: 12
+  - name: my-plugin            # matches PluginInfo.Name; config is passed to Init
+    config: {}
 
-# ── Include patterns ──────────────────────────────────────────────────────────
-# Glob patterns relative to yaypi.yaml. All matched YAML files are loaded
-# and dispatched by their `kind` field.
 include:
   - entities/**/*.yaml
   - endpoints/**/*.yaml
   - policies/**/*.yaml
   - jobs/**/*.yaml
-  - seeds/**/*.yaml       # kind: seed — idempotent startup data
-  - emails/**/*.yaml      # kind: email — SMTP notification hooks
-  - webhooks/**/*.yaml    # kind: webhooks — HTTP webhook hooks
+  - seeds/**/*.yaml
+  - emails/**/*.yaml
+  - webhooks/**/*.yaml
+  - auth.yaml
 ```
 
 ## Minimal `yaypi.yaml`
-
-The only required fields are those without defaults:
 
 ```yaml
 version: "1"
 project:
   name: my-api
   base_url: /api/v1
-server:
-  port: 8080
 databases:
   - name: primary
     driver: postgres
     dsn: ${DATABASE_URL}
     default: true
 auth:
-  provider: jwt
   secret: ${JWT_SECRET}
-  algorithm: HS256
-  reject_algorithms: [none]
 include:
   - entities/**/*.yaml
   - endpoints/**/*.yaml
@@ -160,108 +181,114 @@ include:
 
 ## Field reference
 
-### `project`
-
-| Field | Type | Description |
-|---|---|---|
-| `name` | string | Project name used in logs |
-| `base_url` | string | URL prefix for all routes (e.g. `/api/v1`) |
-
 ### `server`
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `port` | integer | — | Port to listen on |
-| `read_timeout` | duration | — | Max time to read a request |
-| `write_timeout` | duration | — | Max time to write a response |
+| `port` | integer | `8080` | Port to listen on |
+| `read_timeout` | duration | `30s` | Max time to read a request |
+| `read_header_timeout` | duration | `10s` | Max time to read headers |
+| `write_timeout` | duration | `30s` | Max time to write a response |
+| `idle_timeout` | duration | `120s` | Keep-alive idle timeout |
+| `request_timeout` | duration | `write_timeout` | Request context deadline; queries are cancelled; 504 |
 | `shutdown_timeout` | duration | `10s` | Graceful shutdown window |
-| `max_request_body_size` | string | — | e.g. `4MB` |
-| `max_header_bytes` | string | — | e.g. `1MB` |
-| `allowed_origins` | list | `[]` | CORS allowed origins; `["*"]` allows all |
-| `tls.cert_file` | string | — | TLS certificate path |
-| `tls.key_file` | string | — | TLS private key path |
-| `health.enabled` | boolean | `false` | Mount liveness + readiness endpoints |
-| `health.path` | string | `/health` | Liveness path — always 200 |
-| `health.readiness_path` | string | `/ready` | Readiness path — 503 if DB unreachable |
-| `rate_limit.requests_per_minute` | integer | — | Token bucket fill rate |
-| `rate_limit.burst` | integer | equal to rpm | Burst capacity |
-| `rate_limit.key_by` | string | `ip` | `ip` or `user` (JWT sub) |
+| `drain_delay` | duration | `0` | Keep serving after SIGTERM while readiness fails |
+| `max_request_body_size` | size | `1MB` | Larger bodies → 413 |
+| `max_header_bytes` | size | `1MB` | |
+| `trusted_proxies` | list | `[]` | CIDRs/IPs whose forwarding headers are trusted |
+| `allowed_origins` | list | `[]` | CORS origins; `"*"` = any origin, never with credentials |
+| `cors.*` | | | `allowed_headers`, `allowed_methods`, `exposed_headers`, `max_age` |
+| `security_headers` | boolean | `true` | Default security response headers |
+| `hsts_max_age` | integer | `0` | Seconds; `> 0` adds `Strict-Transport-Security` |
+| `strict_startup` | boolean | `true` | Fail boot on degraded subsystems |
+| `idempotency_ttl` | duration | `24h` | Idempotency-Key replay window |
+| `health.*` | | | `enabled`, `path` (`/health`), `readiness_path` (`/ready`) |
+| `rate_limit.*` | | | `requests_per_minute`, `burst` (= rpm), `key_by` (`ip`/`user`) |
 
-Health endpoints are mounted **outside** the `base_url` prefix so they are always reachable.
+Health and metrics endpoints are mounted **outside** `base_url`. The global rate limit and any per-endpoint limit both apply.
 
 ### `databases[]`
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `name` | string | — | Logical name referenced by entities |
-| `driver` | string | — | `postgres`/`postgresql`, `mysql`/`mariadb`, `sqlite`/`sqlite3` |
-| `dsn` | string | — | Connection string |
-| `max_open_conns` | integer | `0` (unlimited) | Max open connections in pool |
-| `max_idle_conns` | integer | `0` | Max idle connections |
-| `conn_max_lifetime` | duration | `0` (no limit) | Max connection lifetime |
-| `default` | boolean | `false` | Mark as the default database |
-| `read_only` | boolean | `false` | Disallow writes on this pool |
-| `schema` | string | `public` | PostgreSQL schema name |
+| Field | Default | Description |
+|---|---|---|
+| `name` | — | Logical name referenced by entities |
+| `driver` | — | `postgres`, `mysql`, `sqlite` |
+| `dsn` | — | Required. For Postgres you can add `options=-c%20statement_timeout%3D5000` to cap query time server-side |
+| `max_open_conns` | `25` | |
+| `max_idle_conns` | `max_open_conns` | |
+| `conn_max_lifetime` | `30m` | |
+| `conn_max_idle_time` | `5m` | |
+| `default` | first entry | The database for entities without `database:` |
 
 ### `auth`
 
-| Field | Type | Description |
-|---|---|---|
-| `provider` | string | Only `jwt` is supported |
-| `secret` | string | HMAC signing secret — **use env var** |
-| `algorithm` | string | `HS256`, `HS384`, or `HS512` |
-| `reject_algorithms` | list | Always include `[none]` |
-| `expiry` | duration | Informational; `exp` claim is always validated |
+| Field | Description |
+|---|---|
+| `secret` | HS* key, at least 32 bytes. Required whenever auth is used |
+| `algorithm` | `HS256` (default) … `ES512`. Only this algorithm is ever accepted |
+| `private_key_file` / `public_key_file` / `key_id` | RS*/ES* keys; the public key is published at `<base>/auth/.well-known/jwks.json` |
+| `issuer` / `audience` | `iss` / `aud` claims. Each is verified on every request when set explicitly (`iss` is issued as `project.name` by default but not checked) |
+| `expiry` | Access token lifetime |
+| `revocation_check` | Per-request user lookup for instant revocation |
 
 ### `auth.api_keys`
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `header` | string | `X-API-Key` | Request header to read the key from |
-| `query_param` | string | — | Also accept the key from this query param |
-| `keys[].key` | string | — | Static key value (use env var) |
-| `keys[].role` | string | — | Role granted to this key |
-| `entity` | string | — | DB-backed: entity name holding key records |
-| `key_field` | string | `token` | DB-backed: column with the key value |
-| `role_field` | string | `role` | DB-backed: column with the role |
+| Field | Default | Description |
+|---|---|---|
+| `header` | `X-API-Key` | Header carrying the key |
+| `query_param` | — | Also accept from the query string (discouraged: keys end up in logs) |
+| `keys[]` | — | `key`, `role`, `name` |
+| `entity` | — | DB-backed key table |
+| `key_field` | `token` | Column holding the key's SHA-256 hex digest |
+| `role_field` | `role` | |
+| `subject_field` | `user_id` if present, else PK | Caller id |
+| `key_hash` | `sha256` | `plain` for legacy cleartext tables |
 
-API keys and JWTs are OR-logic: a request authenticated by either is considered authenticated. If a key is present but not found, the request is rejected (401) regardless of whether a JWT is also present.
+DB-backed keys also honour optional `expires_at`, `revoked_at` and `deleted_at` columns. API keys and JWTs are alternatives: either authenticates a request. A key that is present but unknown is rejected with 401.
 
 ### `policy`
 
-| Field | Type | Description |
+| Field | Description |
+|---|---|
+| `engine` | `casbin` |
+| `model` | Path to `model.conf`, relative to `yaypi.yaml` |
+| `adapter` | `file` (roles from `policies/*.yaml`) |
+
+Any policy error stops the server: running without the engine would skip every check.
+
+### `smtp`
+
+| Field | Env fallback | Description |
 |---|---|---|
-| `engine` | string | Only `casbin` is supported |
-| `model` | string | Path to `model.conf` |
-| `adapter` | string | `file` or `database` |
-| `adapter_table` | string | Table name when `adapter: database` (default: `casbin_rules`) |
+| `host` | `SMTP_HOST` | Required for any email feature |
+| `port` | `SMTP_PORT` | Default 587 |
+| `username` / `password` | `SMTP_USER` / `SMTP_PASS` | Use `${ENV_VAR}` for the password |
+| `from_name` / `from_email` | `SMTP_SENDER_NAME` / `SMTP_SENDER_EMAIL` | From header |
+| `retry` | — | Default delivery retry for all emails (`max_attempts`, `backoff`, `initial_delay`, `max_delay`); `emails[].retry` overrides |
 
-### Top-level fields
+### `outbox`, `cron`, `audit`
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `auto_migrate` | boolean | `false` | Apply schema diff on startup |
-| `plugins` | list | `[]` | Plugins to load (see [Plugins](plugins.md)) |
-| `include` | list | `[]` | Glob patterns for all YAML kinds |
-| `spec` | list | `[]` | Named OpenAPI specs to generate (see [OpenAPI](openapi.md)) |
-
-### `spec[]`
-
-| Field | Type | Description |
+| Field | Default | Description |
 |---|---|---|
-| `name` | string | Unique spec identifier used in the URL (`/openapi/{name}.json`) |
-| `title` | string | API title in the spec `info` block |
-| `description` | string | API description |
-| `version` | string | API version string (e.g. `"1.0.0"`) |
-| `servers[].url` | string | Server base URL |
-| `servers[].description` | string | Server label (e.g. `"Production"`) |
+| `outbox.poll_interval` | `1s` | How often queued webhooks/emails are picked up |
+| `outbox.retention` | `7d` | Delivered messages are deleted after this |
+| `cron.distributed` | `true` (with a DB) | Coordinate job runs across replicas via `yaypi_job_locks`; set `false` for a single instance |
+| `audit.retention` | keep forever | Purge `yaypi_audit_log` rows older than this (checked hourly) |
 
-## Secret hygiene
+Durations accept Go syntax (`90s`, `1h30m`) and days (`7d`).
 
-At startup (and during `yaypi validate`), yayPi scans all config fields whose names contain `secret`, `password`, `token`, `key`, or `dsn`. If a matching field contains a plain-text value instead of a `${VAR}` reference, it logs a warning:
+### `log`, `metrics`
 
-```
-WRN auth.secret contains a plain-text value; use ${ENV_VAR} instead
-```
+See [Production](production.md) for what is logged and the exported metrics.
 
-This is a warning, not an error — the server still starts. But you should always store sensitive values in environment variables.
+## Startup checks
+
+`yaypi validate` and `yaypi run` reject:
+
+- a missing or short (< 32 bytes) `auth.secret` when authentication is used;
+- RS*/ES* without key files; an empty database `dsn`;
+- unknown `crud` operations, invalid regex `pattern`s or `format`s, `delete.soft_delete` on entities without `soft_delete`;
+- invalid webhook/email `condition`s or payload templates;
+- policy engine errors, password reset / email verification without SMTP.
+
+Plain-text values for secrets that look like placeholders (`changeme`, `secret`, `dev-only`, …) produce a warning.

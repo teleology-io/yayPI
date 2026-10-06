@@ -287,10 +287,10 @@ auth:
   secret: ${JWT_SECRET}
   api_keys:
     header: X-API-Key
-    query_param: api_key      # also accept ?api_key= for simple integrations
     entity: ApiKey            # entity holding key records
-    key_field: token          # column with the key value
+    key_field: token          # column with the key's SHA-256 digest (`yaypi apikey generate`)
     role_field: role          # column with the associated role
+    subject_field: user_id    # caller id (default: user_id if present, else PK)
 ```
 
 Entity:
@@ -319,21 +319,21 @@ entity:
 
 ## Email notification on user signup
 
-Requires env: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`.
+Requires the `smtp:` block in `yaypi.yaml` (or `SMTP_*` env vars). Delivered via the outbox (retried per `smtp.retry`, survives restarts).
 
 ```yaml
 # emails/welcome.yaml
 version: "1"
 kind: email
 emails:
-  - entity: User
+  - name: welcome
+    entity: User
     trigger: after_create
     to: "{{record.email}}"
     subject: "Welcome to our platform!"
     body: |
-      Hi {{record.name}},
-
-      Thanks for signing up! Your account is ready.
+      <p>Hi {{record.display_name}},</p>
+      <p>Thanks for signing up! Your account is ready.</p>
 ```
 
 ---
@@ -345,21 +345,22 @@ emails:
 version: "1"
 kind: webhooks
 webhooks:
-  - entity: Order
+  - name: new-order
+    entity: Order
     trigger: after_create
     url: "https://fulfillment.example.com/hooks/new-order"
     method: POST
-    headers:
-      Authorization: "Bearer ${FULFILLMENT_WEBHOOK_SECRET}"
+    secret: ${FULFILLMENT_WEBHOOK_SECRET}   # receiver verifies X-Yaypi-Signature
     payload: |
       {
         "order_id": "{{record.id}}",
         "customer_id": "{{record.customer_id}}",
-        "total": "{{record.total}}"
+        "total": {{record.total}}
       }
     retry:
-      max_attempts: 3
-      backoff: 5s
+      max_attempts: 8
+      initial_delay: 10s
+      max_delay: 1h
 ```
 
 ---
@@ -368,9 +369,10 @@ webhooks:
 
 ```yaml
 webhooks:
-  - entity: Order
+  - name: large-order
+    entity: Order
     trigger: after_create
-    condition: "record.total != \"\""   # fires only when total is set
+    condition: record.total >= 1000 and record.status == "paid"
     url: "https://example.com/hooks/order"
     payload: '{"id":"{{record.id}}"}'
 ```

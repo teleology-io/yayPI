@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
 
+	"github.com/teleology-io/yayPI/internal/apikey"
 	"github.com/teleology-io/yayPI/internal/config"
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/migration"
@@ -38,11 +40,32 @@ func main() {
 		newInitCmd(),
 		newSpecCmd(&configFile),
 		newSeedCmd(&configFile),
+		newAPIKeyCmd(),
 	)
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
+}
+
+// newAPIKeyCmd creates `yaypi apikey generate`, which prints a new API key and the
+// SHA-256 digest to store in the api_keys table (key_hash: sha256).
+func newAPIKeyCmd() *cobra.Command {
+	cmd := &cobra.Command{Use: "apikey", Short: "API key utilities"}
+	cmd.AddCommand(&cobra.Command{
+		Use:   "generate",
+		Short: "Generate an API key and the digest to store in the database",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			key, hash, err := apikey.Generate()
+			if err != nil {
+				return err
+			}
+			fmt.Printf("key:    %s   (give this to the client; it is not stored)\n", key)
+			fmt.Printf("digest: %s   (store this in the key column)\n", hash)
+			return nil
+		},
+	})
+	return cmd
 }
 
 // newSeedCmd creates the `yaypi seed` subcommand.
@@ -151,14 +174,17 @@ func newMigrateCmd(configFile *string) *cobra.Command {
 	generateCmd.Flags().StringVar(&migrateName, "name", "migration", "name for the migration")
 
 	var steps int
+	var allowDrift bool
+	var database string
 	upCmd := &cobra.Command{
 		Use:   "up",
-		Short: "Apply pending migrations",
+		Short: "Apply pending migrations (all databases)",
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runMigrateUp(*configFile, steps)
+			return runMigrateUp(*configFile, steps, allowDrift)
 		},
 	}
-	upCmd.Flags().IntVar(&steps, "steps", 0, "number of migrations to apply (0 = all)")
+	upCmd.Flags().IntVar(&steps, "steps", 0, "number of migrations to apply per database (0 = all)")
+	upCmd.Flags().BoolVar(&allowDrift, "allow-drift", false, "apply even if an applied migration file's checksum changed")
 
 	downCmd := &cobra.Command{
 		Use:   "down",
@@ -167,10 +193,11 @@ func newMigrateCmd(configFile *string) *cobra.Command {
 			if steps <= 0 {
 				return fmt.Errorf("--steps must be > 0")
 			}
-			return runMigrateDown(*configFile, steps)
+			return runMigrateDown(*configFile, steps, database)
 		},
 	}
 	downCmd.Flags().IntVar(&steps, "steps", 1, "number of migrations to rollback")
+	downCmd.Flags().StringVar(&database, "database", "", "database to roll back (default: the default database)")
 	_ = downCmd.MarkFlagRequired("steps")
 
 	statusCmd := &cobra.Command{
@@ -267,153 +294,131 @@ func runSpecGenerate(configFile, specName, outputPath string) error {
 	return nil
 }
 
-// runMigrateGenerate generates migration files from a schema diff.
-func runMigrateGenerate(configFile, name string) error {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return err
-	}
-
-	reg, err := schema.Build(cfg)
-	if err != nil {
-		return err
-	}
-
-	if len(cfg.Databases) == 0 {
-		return fmt.Errorf("no databases configured")
-	}
-
-	dbManager, err := db.NewManager(cfg.Databases)
-	if err != nil {
-		return err
-	}
-	defer dbManager.Close()
-
-	engine := migration.NewEngine(dbManager.Default().SQL, dbManager.Default().Dialect, reg)
-	stmts, err := engine.Diff(context.Background())
-	if err != nil {
-		return fmt.Errorf("schema diff: %w", err)
-	}
-
-	gen := migration.NewGenerator("migrations")
-	m, err := gen.Generate(name, stmts)
-	if err != nil {
-		return err
-	}
-
-	log.Info().Str("up", m.UpPath).Str("down", m.DownPath).Msg("migration files generated")
-	return nil
+// migrationTarget is one configured database with its migrations directory.
+type migrationTarget struct {
+	name      string
+	isDefault bool
+	db        *db.DB
+	dir       string
 }
 
-// runMigrateUp applies pending migrations.
-func runMigrateUp(configFile string, steps int) error {
+// withMigrationTargets loads config, connects every database and calls fn for each.
+// Migration files live next to yaypi.yaml: migrations/ for the default database and
+// migrations/<name>/ for any other.
+func withMigrationTargets(configFile string, fn func(cfg *config.RootConfig, t migrationTarget) error) error {
 	cfg, err := config.Load(configFile)
 	if err != nil {
 		return err
 	}
-
 	if len(cfg.Databases) == 0 {
 		return fmt.Errorf("no databases configured")
 	}
-
 	dbManager, err := db.NewManager(cfg.Databases)
 	if err != nil {
 		return err
 	}
 	defer dbManager.Close()
 
-	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
-	if err := runner.Up(context.Background(), steps); err != nil {
-		return fmt.Errorf("migration up: %w", err)
-	}
-
-	log.Info().Msg("migrations applied")
-	return nil
-}
-
-// runMigrateDown rolls back N migrations.
-func runMigrateDown(configFile string, steps int) error {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return err
-	}
-
-	if len(cfg.Databases) == 0 {
-		return fmt.Errorf("no databases configured")
-	}
-
-	dbManager, err := db.NewManager(cfg.Databases)
-	if err != nil {
-		return err
-	}
-	defer dbManager.Close()
-
-	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
-	if err := runner.Down(context.Background(), steps); err != nil {
-		return fmt.Errorf("migration down: %w", err)
-	}
-
-	log.Info().Int("steps", steps).Msg("migrations rolled back")
-	return nil
-}
-
-// runMigrateStatus shows migration status.
-func runMigrateStatus(configFile string) error {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return err
-	}
-
-	if len(cfg.Databases) == 0 {
-		return fmt.Errorf("no databases configured")
-	}
-
-	dbManager, err := db.NewManager(cfg.Databases)
-	if err != nil {
-		return err
-	}
-	defer dbManager.Close()
-
-	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
-	statuses, err := runner.Status(context.Background())
-	if err != nil {
-		return err
-	}
-
-	for _, s := range statuses {
-		if s.Pending {
-			fmt.Printf("PENDING  %s\n", s.Name)
-		} else {
-			fmt.Printf("APPLIED  %s  (at %s)\n", s.Name, s.AppliedAt)
+	base := filepath.Join(filepath.Dir(configFile), "migrations")
+	for _, name := range dbManager.Names() {
+		dbc, _ := dbManager.Get(name)
+		t := migrationTarget{name: name, isDefault: name == dbManager.DefaultName(), db: dbc, dir: base}
+		if !t.isDefault {
+			t.dir = filepath.Join(base, name)
+		}
+		if err := fn(cfg, t); err != nil {
+			return fmt.Errorf("database %q: %w", name, err)
 		}
 	}
 	return nil
 }
 
-// runMigrateVerify verifies migration checksums.
+// runMigrateGenerate generates migration files from a schema diff, per database.
+func runMigrateGenerate(configFile, name string) error {
+	var reg *schema.Registry
+	generated := 0
+	err := withMigrationTargets(configFile, func(cfg *config.RootConfig, t migrationTarget) error {
+		if reg == nil {
+			var err error
+			if reg, err = schema.Build(cfg); err != nil {
+				return fmt.Errorf("building schema registry: %w", err)
+			}
+		}
+		stmts, err := migration.NewEngine(t.db.SQL, t.db.Dialect, reg).ForDatabase(t.name, t.isDefault).Diff(context.Background())
+		if err != nil {
+			return fmt.Errorf("schema diff: %w", err)
+		}
+		if len(stmts) == 0 {
+			log.Info().Str("database", t.name).Msg("no schema changes")
+			return nil
+		}
+		m, err := migration.NewGenerator(t.dir).Generate(name, stmts)
+		if err != nil {
+			return err
+		}
+		generated++
+		log.Info().Str("database", t.name).Str("up", m.UpPath).Str("down", m.DownPath).Msg("migration files generated")
+		return nil
+	})
+	if err == nil && generated == 0 {
+		log.Info().Msg("schema is up to date; nothing generated")
+	}
+	return err
+}
+
+// runMigrateUp applies pending migrations on every database.
+func runMigrateUp(configFile string, steps int, allowDrift bool) error {
+	return withMigrationTargets(configFile, func(_ *config.RootConfig, t migrationTarget) error {
+		if err := migration.NewRunner(t.db.SQL, t.db.Dialect, t.dir).Up(context.Background(), steps, allowDrift); err != nil {
+			return fmt.Errorf("migration up: %w", err)
+		}
+		log.Info().Str("database", t.name).Msg("migrations applied")
+		return nil
+	})
+}
+
+// runMigrateDown rolls back N migrations on the selected database.
+func runMigrateDown(configFile string, steps int, database string) error {
+	return withMigrationTargets(configFile, func(_ *config.RootConfig, t migrationTarget) error {
+		if (database == "" && !t.isDefault) || (database != "" && database != t.name) {
+			return nil
+		}
+		if err := migration.NewRunner(t.db.SQL, t.db.Dialect, t.dir).Down(context.Background(), steps); err != nil {
+			return fmt.Errorf("migration down: %w", err)
+		}
+		log.Info().Str("database", t.name).Int("steps", steps).Msg("migrations rolled back")
+		return nil
+	})
+}
+
+// runMigrateStatus shows migration status for every database.
+func runMigrateStatus(configFile string) error {
+	return withMigrationTargets(configFile, func(_ *config.RootConfig, t migrationTarget) error {
+		statuses, err := migration.NewRunner(t.db.SQL, t.db.Dialect, t.dir).Status(context.Background())
+		if err != nil {
+			return err
+		}
+		fmt.Printf("database %s (%s):\n", t.name, t.dir)
+		for _, s := range statuses {
+			if s.Pending {
+				fmt.Printf("  PENDING  %s\n", s.Name)
+			} else {
+				fmt.Printf("  APPLIED  %s\n", s.Name)
+			}
+		}
+		return nil
+	})
+}
+
+// runMigrateVerify verifies migration checksums on every database.
 func runMigrateVerify(configFile string) error {
-	cfg, err := config.Load(configFile)
-	if err != nil {
-		return err
+	err := withMigrationTargets(configFile, func(_ *config.RootConfig, t migrationTarget) error {
+		return migration.NewRunner(t.db.SQL, t.db.Dialect, t.dir).Verify(context.Background())
+	})
+	if err == nil {
+		log.Info().Msg("all migration checksums verified")
 	}
-
-	if len(cfg.Databases) == 0 {
-		return fmt.Errorf("no databases configured")
-	}
-
-	dbManager, err := db.NewManager(cfg.Databases)
-	if err != nil {
-		return err
-	}
-	defer dbManager.Close()
-
-	runner := migration.NewRunner(dbManager.Default().SQL, dbManager.Default().Dialect, "migrations")
-	if err := runner.Verify(context.Background()); err != nil {
-		return err
-	}
-
-	log.Info().Msg("all migration checksums verified")
-	return nil
+	return err
 }
 
 // scaffoldProject creates a minimal yaypi project structure.
@@ -447,7 +452,7 @@ databases:
     default: true
 auth:
   provider: jwt
-  secret: ${JWT_SECRET:-changeme-in-production}
+  secret: ${JWT_SECRET:-dev-only-insecure-jwt-key-replace-me-0123456789}
   expiry: 24h
   algorithm: HS256
   reject_algorithms: [none]

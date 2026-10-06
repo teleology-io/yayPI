@@ -1,6 +1,6 @@
 # Auth Endpoints (`kind: auth`)
 
-Adding a `kind: auth` file to your project gives you built-in registration, login, a "me" endpoint, token refresh, and OAuth2 sign-in — all driven from YAML, no code required.
+Adding a `kind: auth` file gives you registration, login, "me", refresh tokens with logout, password reset, email verification, and OAuth2 sign-in — all driven from YAML, no code required.
 
 ## File structure
 
@@ -12,16 +12,11 @@ auth:
   base_path: /auth        # all routes mount under this prefix (default: /auth)
 
   # Optional: extend the built-in User with custom fields.
-  # Built-in fields are always present and cannot be overridden (see "Built-in User" below).
   user:
     fields:
       - name: display_name
         type: string
         length: 128
-        nullable: true
-      - name: avatar_url
-        type: string
-        length: 512
         nullable: true
 
   register:
@@ -29,61 +24,73 @@ auth:
     credential_field: email       # default: email
     password_field: password      # default: password (never stored)
     hash_field: password_hash     # default: password_hash
-    default_role: member          # default: member
+    default_role: member          # role every self-registered user gets
+    min_password_length: 8        # default 8; max is always 72 bytes
 
   login:
     enabled: true
-    credential_field: email
-    password_field: password
-    hash_field: password_hash
+    max_attempts: 5               # failed logins per account (4x per IP) per window → 429
+    lockout_window: 15m
 
   me:
-    enabled: true                 # GET /auth/me — returns the token owner's user record
+    enabled: true
 
   refresh:
-    enabled: true                 # POST /auth/refresh — rotate refresh token, issue new access token
-    expiry: 30d                   # refresh token TTL (supports d/h/m/s and Go duration strings)
-    store: cookie                 # cookie (default, HttpOnly) | body (JSON)
+    enabled: true
+    expiry: 30d                   # refresh token lifetime
+    store: cookie                 # cookie (HttpOnly) | body (JSON, for native apps)
+
+  cookie:
+    secure: true                  # set false only for local http development
+    same_site: lax                # lax | strict | none
+
+  password_reset:                 # requires SMTP (see below)
+    enabled: true
+    expiry: 1h
+    reset_url: ${FRONTEND_URL}/reset-password?token={{token}}
+
+  email_verification:             # requires SMTP
+    enabled: true
+    required: false               # true = refuse password login until verified
+    verify_url: ${FRONTEND_URL}/verify-email?token={{token}}
 
   oauth2:
     providers:
       - name: google
         client_id: ${GOOGLE_CLIENT_ID}
         client_secret: ${GOOGLE_CLIENT_SECRET}
-        redirect_uri: ${APP_URL}/auth/callback/google
-        success_redirect: ${FRONTEND_URL}      # redirect here after success (optional)
-        error_redirect: ${FRONTEND_URL}/login  # redirect here on failure (optional)
-
+        redirect_uri: ${APP_URL}/api/v1/auth/callback/google
+        success_redirect: ${FRONTEND_URL}/auth/done
+        error_redirect: ${FRONTEND_URL}/login
       - name: github
         client_id: ${GITHUB_CLIENT_ID}
         client_secret: ${GITHUB_CLIENT_SECRET}
-        redirect_uri: ${APP_URL}/auth/callback/github
-        success_redirect: ${FRONTEND_URL}
+        redirect_uri: ${APP_URL}/api/v1/auth/callback/github
+        success_redirect: ${FRONTEND_URL}/auth/done
         error_redirect: ${FRONTEND_URL}/login
 ```
 
-Add it to the `include:` list in `yaypi.yaml`:
-
-```yaml
-include:
-  - entities/**/*.yaml
-  - endpoints/**/*.yaml
-  - policies/**/*.yaml
-  - auth.yaml
-```
+`auth.secret` in `yaypi.yaml` must be at least 32 bytes (generate one with `openssl rand -hex 32`); the server refuses to start otherwise. Email features use the `smtp:` block in `yaypi.yaml` (empty fields fall back to `SMTP_*` env vars) and refuse to start without an SMTP host. Reset and verification emails are queued in the outbox and retried per `smtp.retry`.
 
 ## Endpoints
 
-All routes are mounted under `{base_url}{base_path}` (e.g. `/api/v1/auth`).
+All routes are mounted under `{base_url}{base_path}` (e.g. `/api/v1/auth`). Responses carry `Cache-Control: no-store`.
 
-| Method | Path | Auth required | Description |
+| Method | Path | Auth | Description |
 |---|---|---|---|
-| `POST` | `/auth/register` | No | Create account, returns `{token, user}` |
-| `POST` | `/auth/login` | No | Verify credentials, returns `{token, user}` |
-| `GET` | `/auth/me` | Bearer token | Returns current user record |
-| `POST` | `/auth/refresh` | Refresh token | Issue new access + refresh tokens |
-| `GET` | `/auth/{provider}` | No | Redirects to OAuth2 provider |
-| `GET` | `/auth/callback/{provider}` | No | Handles OAuth2 callback, returns/redirects with token |
+| `POST` | `/auth/register` | – | Create account → `{token, expires_in, user[, refresh_token]}` |
+| `POST` | `/auth/login` | – | Verify credentials → same shape |
+| `GET` | `/auth/me` | Bearer | Current user |
+| `POST` | `/auth/refresh` | refresh token | New access + refresh token |
+| `POST` | `/auth/logout` | refresh token | End this session (always 204) |
+| `POST` | `/auth/logout-all` | Bearer | End every session for the user |
+| `POST` | `/auth/password/forgot` | – | Email a reset link (always 202) |
+| `POST` | `/auth/password/reset` | – | Set a new password with the emailed token |
+| `POST` | `/auth/verify-email` | – | Confirm the email with the emailed token |
+| `POST` | `/auth/verify-email/resend` | Bearer | Resend (once a minute) |
+| `GET` | `/auth/{provider}` | – | Start OAuth2 sign-in |
+| `GET` | `/auth/callback/{provider}` | – | OAuth2 callback |
+| `GET` | `/auth/.well-known/jwks.json` | – | Public signing keys (RS*/ES* algorithms only) |
 
 ## Register
 
@@ -91,214 +98,134 @@ All routes are mounted under `{base_url}{base_path}` (e.g. `/api/v1/auth`).
 POST /api/v1/auth/register
 Content-Type: application/json
 
-{
-  "email": "alice@example.com",
-  "username": "alice",
-  "display_name": "Alice",
-  "password": "supersecret123"
-}
+{ "email": "Alice@Example.com", "display_name": "Alice", "password": "supersecret123" }
 ```
 
 **Response `201`:**
 ```json
-{
-  "token": "<jwt>",
-  "user": {
-    "id": "...",
-    "email": "alice@example.com",
-    "username": "alice",
-    "role": "member"
-  }
-}
+{ "token": "<jwt>", "expires_in": 900, "user": { "id": "...", "email": "alice@example.com", "role": "member" } }
 ```
 
-- `password_field` (e.g. `password`) is hashed with **bcrypt** (cost 12) before storage. It is never saved or logged.
-- `hash_field` (e.g. `password_hash`) is stripped from the response automatically via `omit_response: true` on the entity.
-- `default_role` is applied when the caller does not include a `role` in the body.
-- Returns `409 Conflict` if the credential (email) is already taken.
-- Returns `400` if the password is shorter than 8 characters.
+- The password is hashed with **bcrypt** (cost 12); it is never stored or logged. 8–72 bytes.
+- The email is trimmed and lowercased (login does the same), and must look like an email.
+- **The role is always `default_role`.** A `role` in the body is ignored, as are `id`, timestamps, OAuth columns, `email_verified_at`, and any field with `write_roles`.
+- `409` if the email is taken.
+- With `email_verification.enabled`, a verification email is sent.
 
 ## Login
 
 ```bash
 POST /api/v1/auth/login
-Content-Type: application/json
-
-{
-  "email": "alice@example.com",
-  "password": "supersecret123"
-}
+{ "email": "alice@example.com", "password": "supersecret123" }
 ```
 
-**Response `200`:**
+- `401 "invalid credentials"` for both unknown user and wrong password, with equal timing.
+- After `max_attempts` failures for an account (or 4× that from one IP) within `lockout_window`, attempts get `429` with `Retry-After` — even with the right password — until the window passes. Counters are per server instance.
+- With `email_verification.required`, unverified users get `403`.
+
+## Tokens
+
+**Access tokens** are JWTs signed with `auth.algorithm` (HS256 by default; RS*/ES* with `auth.private_key_file`). Lifetime is `auth.expiry` — default 15 minutes with refresh enabled, otherwise 1 hour.
+
 ```json
-{
-  "token": "<jwt>",
-  "user": { ... }
-}
+{ "sub": "<user id>", "role": "member", "email": "...", "tv": 0, "typ": "access",
+  "iss": "<auth.issuer or project.name>", "aud": "<auth.audience>", "iat": 0, "nbf": 0, "exp": 0 }
 ```
 
-- Returns `401` for both "user not found" and "wrong password" — a generic `"invalid credentials"` message prevents user enumeration.
-- A constant-time dummy bcrypt comparison runs even when the user is not found, preventing timing-based enumeration.
+`iss` defaults to `project.name`; when `auth.issuer` is set explicitly it is also verified on every request, as is `aud` when `auth.audience` is set. If the user has a `tenant_id` column, its value is issued as a `tenant` claim (see `tenant_scoped` entities).
 
-## Me
+**Refresh tokens** are opaque random strings, stored only as SHA-256 hashes in `yaypi_refresh_tokens`:
+
+- Issued on register, login, and OAuth sign-in.
+- **Rotated** on every `/auth/refresh`. Each login starts a session "family".
+- **Reuse detection:** presenting an already-used refresh token means it was copied; the whole family is revoked, so both the attacker and the victim must sign in again.
+- `/auth/logout` revokes the current family; `/auth/logout-all` revokes all of the user's sessions and bumps `token_version`.
+
+### Cookie store (default, for browsers)
+
+The refresh token is an `HttpOnly`, `Secure`, `SameSite=Lax` cookie scoped to the auth path, so it isn't sent with ordinary API calls. `POST /auth/refresh` needs no body and returns `{token, expires_in}` while setting the rotated cookie.
+
+### Body store (native/mobile)
 
 ```bash
-GET /api/v1/auth/me
-Authorization: Bearer <token>
-```
-
-**Response `200`:**
-```json
-{
-  "user": { ... }
-}
-```
-
-Returns the user record for the `sub` claim in the token. Sensitive fields (e.g. `password_hash`) are stripped.
-
-## Token refresh
-
-Token refresh issues short-lived access tokens (JWTs) alongside long-lived refresh tokens. This allows access tokens to be kept short-lived (minutes/hours) for security while keeping users logged in for days or weeks without re-authenticating.
-
-### Cookie store (default, recommended for web apps)
-
-With `store: cookie`:
-
-- Login response sets `refresh_token` as an **HttpOnly** cookie and returns the access token in the JSON body.
-- The cookie is `Secure` when the connection is TLS, `SameSite: Lax`.
-- `POST /auth/refresh` reads the cookie automatically (no body needed).
-
-```bash
-# No body needed — the browser sends the cookie automatically
 POST /api/v1/auth/refresh
-
-# Response 200:
-{
-  "token": "<new access jwt>"
-}
-# Also sets a new refresh_token cookie (the old one is now invalid)
+{ "refresh_token": "<refresh>" }
+→ { "token": "<access>", "expires_in": 900, "refresh_token": "<new refresh>" }
 ```
 
-### Body store (for native/mobile apps)
+### Immediate revocation
 
-With `store: body`:
+Access tokens are stateless, so by default a deleted user, a role change, `logout-all` or a password reset takes effect when the token expires (≤ 15 min with refresh). Set `auth.revocation_check: true` in `yaypi.yaml` to re-read the user on every authenticated request (one indexed query): revoked tokens are then rejected immediately, and the current role is used.
 
-- Login response returns both tokens in the JSON body.
-- `POST /auth/refresh` reads `refresh_token` from the request body.
+## Password reset
 
 ```bash
-# Login
-POST /api/v1/auth/login
-→ { "token": "<access jwt>", "refresh_token": "<refresh jwt>" }
-
-# Refresh
-POST /api/v1/auth/refresh
-Content-Type: application/json
-{ "refresh_token": "<refresh jwt>" }
-
-→ { "token": "<new access jwt>", "refresh_token": "<new refresh jwt>" }
+POST /api/v1/auth/password/forgot   { "email": "alice@example.com" }   → 202 always
+POST /api/v1/auth/password/reset    { "token": "<from email>", "password": "new-password" } → 200
 ```
 
-### Refresh token security
+The emailed link is `reset_url` with `{{token}}` replaced. Customise the email with `subject` and `body` (HTML; `{{link}}` is replaced). Tokens are single-use, stored hashed, and expire after `expiry` (default 1h). A successful reset revokes all of the user's sessions and marks the email verified.
 
-- Refresh tokens are **single-use** — every call to `/auth/refresh` issues a new refresh token and invalidates the old one.
-- Refresh tokens contain `"type": "refresh"` in their claims. They cannot be used as access tokens.
-- The default TTL is 30 days. Configure with `expiry: 7d`, `expiry: 90d`, etc.
+## Email verification
+
+On register a link (`verify_url` with `{{token}}`) is emailed. `POST /auth/verify-email {"token": "..."}` sets `email_verified_at`. Logged-in users can request another email with `POST /auth/verify-email/resend`. With `required: true`, password login is refused until verified.
 
 ## OAuth2
 
-### Initiating sign-in
+### Flow
 
-Redirect the user's browser to:
+1. Send the browser to `GET /api/v1/auth/google`. yayPi sets a short-lived `HttpOnly` state cookie and redirects to the provider with a random `state` and a **PKCE** challenge.
+2. The provider redirects to `redirect_uri` (`/auth/callback/google?code&state`). yayPi checks `state` against the cookie (this blocks login-CSRF), exchanges the code with the PKCE verifier, and fetches the profile.
+3. yayPi resolves the account:
+   - an account already linked to this provider user id → sign in;
+   - otherwise an account with the same email → linked **only if the provider says the email is verified**;
+   - otherwise a new account → **only with a verified email** (created with `email_verified_at` set and no password).
+4. Tokens are issued. With `success_redirect`, the browser goes to `success_redirect#token=<jwt>` — the URL **fragment** is never sent to servers or leaked in `Referer`. Read it client-side with `location.hash`. (`token_delivery: query` restores the legacy `?token=`.) With cookie refresh, the refresh cookie is set as well.
 
-```
-GET /api/v1/auth/google
-GET /api/v1/auth/github
-```
-
-yayPi redirects to the provider's auth page with a signed `state` parameter (HMAC-SHA256, expires in 10 minutes).
-
-### Callback
-
-After the user authorises, the provider redirects back to `redirect_uri`:
-
-```
-GET /api/v1/auth/callback/google?code=...&state=...
-```
-
-yayPi:
-1. Verifies the `state` signature and expiry
-2. Exchanges the `code` for an access token
-3. Fetches the user's profile from the provider's userinfo endpoint
-4. **Finds or creates** a user by email (upsert)
-5. Issues a JWT
-
-If `success_redirect` is configured, the user is redirected there with `?token=<jwt>` appended. Otherwise the response is JSON `{token, user}`.
-
-If `error_redirect` is configured, errors redirect there with `?error=<message>`. Otherwise errors return JSON.
+Errors redirect to `error_redirect?error=<message>`, or return JSON.
 
 ### Built-in providers
 
-| `name` | Auth URL | Userinfo URL | Default scopes |
-|---|---|---|---|
-| `google` | `accounts.google.com/o/oauth2/v2/auth` | `googleapis.com/oauth2/v2/userinfo` | `openid email profile` |
-| `github` | `github.com/login/oauth/authorize` | `api.github.com/user` | `user:email` |
+| `name` | Verified-email source | Default scopes |
+|---|---|---|
+| `google` | `verified_email` in userinfo | `openid email profile` |
+| `github` | primary entry of `GET /user/emails` | `read:user user:email` |
 
 ### Custom providers
 
-Supply `auth_url`, `token_url`, and `userinfo_url` explicitly:
-
 ```yaml
-- name: my-provider
-  client_id: ${MY_CLIENT_ID}
-  client_secret: ${MY_CLIENT_SECRET}
-  auth_url: https://sso.company.com/oauth2/authorize
-  token_url: https://sso.company.com/oauth2/token
-  userinfo_url: https://sso.company.com/oauth2/userinfo
-  redirect_uri: ${APP_URL}/auth/callback/my-provider
-  email_field: email       # JSON key in userinfo response for email
-  name_field: full_name    # JSON key for display name
-  username_field: username # JSON key for username
+- name: corp-sso
+  client_id: ${SSO_CLIENT_ID}
+  client_secret: ${SSO_CLIENT_SECRET}
+  auth_url: https://sso.example.com/oauth2/authorize
+  token_url: https://sso.example.com/oauth2/token
+  userinfo_url: https://sso.example.com/oauth2/userinfo
+  redirect_uri: ${APP_URL}/api/v1/auth/callback/corp-sso
+  id_field: sub                     # default "sub"
+  email_field: email
+  email_verified_field: email_verified
+  trust_email: false                # true only if the IdP guarantees verified emails
+  name_field: name
+  username_field: preferred_username
+  pkce: true
 ```
 
-### OAuth2 users and passwords
-
-Users created via OAuth2 are assigned a **random unusable bcrypt hash** as their `hash_field`. They cannot log in via `POST /auth/login`. To let OAuth2 users set a password later, build a separate "set password" endpoint using a plugin.
+OAuth-only accounts have no password. They can set one through the password-reset flow.
 
 ## Built-in User
 
-yayPi owns the user account model. A `users` table is always created with these fields — you do not need to define a User entity:
-
 | Column | Type | Notes |
 |---|---|---|
-| `id` | `uuid` | Primary key, auto-generated |
-| `email` | `varchar(255)` | Unique, required, validated as email |
-| `password_hash` | `varchar(255)` | Nullable (null for OAuth-only users); never returned in responses or logs |
-| `role` | `varchar(64)` | Default: `'member'` |
-| `oauth_provider` | `varchar(64)` | Nullable; set on OAuth2 sign-in |
-| `oauth_id` | `varchar(256)` | Nullable; set on OAuth2 sign-in |
-| `created_at` | `timestamptz` | Auto-set |
-| `updated_at` | `timestamptz` | Auto-set |
-| `deleted_at` | `timestamptz` | Nullable; soft delete |
+| `id` | `uuid` | Primary key |
+| `email` | `varchar(255)` | Unique, lowercased |
+| `password_hash` | `varchar(255)` | Null for OAuth-only users; never returned |
+| `role` | `varchar(64)` | Default `'member'` |
+| `oauth_provider`, `oauth_id` | `varchar` | Provider link |
+| `email_verified_at` | `timestamptz` | Set by verification, reset, or OAuth |
+| `token_version` | `integer` | Bumped by logout-all / reset; never returned |
+| `created_at`, `updated_at`, `deleted_at` | `timestamptz` | Soft delete |
 
-To add application-specific fields (e.g. `display_name`, `bio`), use the `user.fields` block in `auth.yaml` — they are merged into the `users` table and participate in migrations automatically.
-
-## Token format
-
-The JWT issued by all auth endpoints contains:
-
-```json
-{
-  "sub": "<user id>",
-  "role": "<user role>",
-  "email": "<user email>",
-  "iat": 1711234567,
-  "exp": 1711320967
-}
-```
-
-Refresh tokens additionally contain `"type": "refresh"`. They are validated separately and cannot be used as access tokens.
+Add your own columns with `user.fields`.
 
 ## Complete example
 

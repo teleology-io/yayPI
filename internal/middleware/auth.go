@@ -2,29 +2,34 @@ package middleware
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
+
+	"github.com/teleology-io/yayPI/internal/apierr"
+	"github.com/teleology-io/yayPI/internal/token"
 )
 
 // Subject holds the authenticated user's identity extracted from a JWT.
 type Subject struct {
-	ID    string
-	Role  string
-	Email string
+	ID     string
+	Role   string
+	Email  string
+	Tenant string // from the "tenant" claim; scopes tenant_scoped entities
 }
 
-// RequireAuth is a JWT authentication middleware.
-// If requireAuth is false, it still parses the token if present but does not reject
-// requests without tokens.
-func RequireAuth(secret []byte, algorithm string, requireAuth bool) func(http.Handler) http.Handler {
-	parser := jwt.NewParser(
-		jwt.WithValidMethods([]string{algorithm}),
-		jwt.WithExpirationRequired(),
-	)
+// SubjectValidator re-checks a verified token's subject against current state (e.g. the
+// user still exists and the token version has not been bumped by logout-all or a password
+// reset). It returns the subject to use — typically with the current role — or an error
+// to reject the request. tokenVersion is the token's "tv" claim (0 when absent).
+type SubjectValidator func(ctx context.Context, sub *Subject, tokenVersion int64) (*Subject, error)
 
+// RequireAuth is a JWT authentication middleware. Tokens are verified with keys (which
+// pins the algorithm, issuer, audience and expiry). If requireAuth is false it still
+// parses a token when present but does not reject anonymous requests; a present but
+// invalid token is always rejected. validate may be nil.
+func RequireAuth(keys *token.Keys, requireAuth bool, validate SubjectValidator) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// If a prior middleware (e.g. APIKeyAuth) already authenticated this
@@ -35,8 +40,7 @@ func RequireAuth(secret []byte, algorithm string, requireAuth bool) func(http.Ha
 			}
 
 			tokenStr := extractBearerToken(r)
-
-			if tokenStr == "" {
+			if tokenStr == "" || keys == nil {
 				if requireAuth {
 					writeJSONError(w, http.StatusUnauthorized, "authentication required")
 					return
@@ -45,31 +49,46 @@ func RequireAuth(secret []byte, algorithm string, requireAuth bool) func(http.Ha
 				return
 			}
 
-			// Always reject "none" algorithm
-			if isNoneAlgorithm(tokenStr) {
-				writeJSONError(w, http.StatusUnauthorized, "invalid token algorithm")
-				return
-			}
-
-			token, err := parser.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(t *jwt.Token) (interface{}, error) {
-				return secret, nil
-			})
-			if err != nil || !token.Valid {
+			claims, err := keys.Parse(tokenStr)
+			if err != nil {
 				writeJSONError(w, http.StatusUnauthorized, "invalid or expired token")
 				return
 			}
 
-			claims, ok := token.Claims.(*jwt.MapClaims)
-			if !ok {
+			sub := extractSubject(claims)
+			if sub.ID == "" {
 				writeJSONError(w, http.StatusUnauthorized, "invalid token claims")
 				return
 			}
-
-			sub := extractSubject(claims)
-			ctx := context.WithValue(r.Context(), ctxKeySubject, sub)
-			next.ServeHTTP(w, r.WithContext(ctx))
+			if validate != nil {
+				tv, _ := claims["tv"].(float64)
+				sub, err = validate(r.Context(), sub, int64(tv))
+				if err != nil || sub == nil {
+					writeJSONError(w, http.StatusUnauthorized, "token revoked")
+					return
+				}
+			}
+			next.ServeHTTP(w, r.WithContext(WithSubject(r.Context(), sub)))
 		})
 	}
+}
+
+// subjectHolder lets the outer logging middleware learn the subject that inner auth
+// middleware resolved (contexts only flow inward).
+type subjectHolder struct{ sub *Subject }
+
+type subjectHolderKey struct{}
+
+func withSubjectHolder(ctx context.Context, h *subjectHolder) context.Context {
+	return context.WithValue(ctx, subjectHolderKey{}, h)
+}
+
+// WithSubject returns a copy of ctx carrying sub (for tests and custom auth flows).
+func WithSubject(ctx context.Context, sub *Subject) context.Context {
+	if h, ok := ctx.Value(subjectHolderKey{}).(*subjectHolder); ok {
+		h.sub = sub
+	}
+	return context.WithValue(ctx, ctxKeySubject, sub)
 }
 
 // GetSubject retrieves the authenticated Subject from the request context.
@@ -97,6 +116,8 @@ func SubjectAttr(s *Subject, key string) string {
 		return s.Role
 	case "email":
 		return s.Email
+	case "tenant":
+		return s.Tenant
 	}
 	return ""
 }
@@ -110,42 +131,26 @@ func extractBearerToken(r *http.Request) string {
 	return strings.TrimPrefix(auth, "Bearer ")
 }
 
-// isNoneAlgorithm checks the JWT header without verification to detect "none" alg.
-func isNoneAlgorithm(tokenStr string) bool {
-	parts := strings.SplitN(tokenStr, ".", 3)
-	if len(parts) < 1 {
-		return false
-	}
-	// The jwt library will reject "none" via WithValidMethods, but belt-and-suspenders:
-	headerJSON, err := jwt.NewParser().DecodeSegment(parts[0])
-	if err != nil {
-		return false
-	}
-	var header struct {
-		Alg string `json:"alg"`
-	}
-	_ = json.Unmarshal(headerJSON, &header)
-	return strings.ToLower(header.Alg) == "none"
-}
-
 // extractSubject extracts identity fields from JWT claims.
-func extractSubject(claims *jwt.MapClaims) *Subject {
+func extractSubject(claims jwt.MapClaims) *Subject {
 	sub := &Subject{}
-	if v, ok := (*claims)["sub"].(string); ok {
+	if v, ok := claims["sub"].(string); ok {
 		sub.ID = v
 	}
-	if v, ok := (*claims)["role"].(string); ok {
+	if v, ok := claims["role"].(string); ok {
 		sub.Role = v
 	}
-	if v, ok := (*claims)["email"].(string); ok {
+	if v, ok := claims["email"].(string); ok {
 		sub.Email = v
+	}
+	if v, ok := claims["tenant"].(string); ok {
+		sub.Tenant = v
 	}
 	return sub
 }
 
-// writeJSONError writes a JSON error response.
+// writeJSONError writes the standard error envelope. The request ID header is set by the
+// RequestID middleware before anything else runs, so it is read back from the response.
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+	apierr.Write(w, w.Header().Get(RequestIDHeader), status, msg)
 }

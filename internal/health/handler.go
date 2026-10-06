@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sync/atomic"
 	"time"
+
+	"github.com/rs/zerolog/log"
 )
 
 // Checker is implemented by anything that can ping its backends.
@@ -19,6 +22,7 @@ type Handler struct {
 	checker       Checker // nil if no databases configured
 	livenessPath  string
 	readinessPath string
+	draining      atomic.Bool
 }
 
 // New creates a Handler. checker may be nil (liveness-only mode).
@@ -36,6 +40,10 @@ func New(checker Checker, livenessPath, readinessPath string) *Handler {
 	}
 }
 
+// SetDraining makes readiness fail so load balancers stop routing new traffic here
+// while in-flight requests finish (called at the start of graceful shutdown).
+func (h *Handler) SetDraining() { h.draining.Store(true) }
+
 // Mount registers /health and /ready on r.
 func (h *Handler) Mount(r interface {
 	Get(pattern string, handlerFn http.HandlerFunc)
@@ -49,8 +57,14 @@ func (h *Handler) liveness(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// readiness pings all databases. Returns 503 with details if any fail.
+// readiness pings all databases. Failures are reported per database as ok:false only;
+// driver error text (which can contain hostnames or DSN fragments) goes to the log, not
+// the response.
 func (h *Handler) readiness(w http.ResponseWriter, r *http.Request) {
+	if h.draining.Load() {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "draining"})
+		return
+	}
 	if h.checker == nil {
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 		return
@@ -60,32 +74,29 @@ func (h *Handler) readiness(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	type dbResult struct {
-		OK  bool   `json:"ok"`
-		Err string `json:"error,omitempty"`
+		OK bool `json:"ok"`
 	}
-
 	checks := h.checker.HealthCheck(ctx)
 	results := make(map[string]dbResult, len(checks))
 	allOK := true
-
 	for name, err := range checks {
 		if err != nil {
-			results[name] = dbResult{OK: false, Err: err.Error()}
+			log.Warn().Str("database", name).Err(err).Msg("readiness check failed")
 			allOK = false
-		} else {
-			results[name] = dbResult{OK: true}
 		}
+		results[name] = dbResult{OK: err == nil}
 	}
 
-	if allOK {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "databases": results})
-	} else {
-		writeJSON(w, http.StatusServiceUnavailable, map[string]interface{}{"status": "unavailable", "databases": results})
+	status, code := "ok", http.StatusOK
+	if !allOK {
+		status, code = "unavailable", http.StatusServiceUnavailable
 	}
+	writeJSON(w, code, map[string]any{"status": status, "databases": results})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v interface{}) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
 }

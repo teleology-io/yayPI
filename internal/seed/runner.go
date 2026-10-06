@@ -4,8 +4,11 @@ package seed
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+
+	"golang.org/x/crypto/bcrypt"
 
 	"github.com/rs/zerolog/log"
 	"github.com/teleology-io/yayPI/internal/config"
@@ -43,6 +46,9 @@ func applySeed(ctx context.Context, sd config.SeedDef, reg *schema.Registry, dbM
 	inserted, skipped := 0, 0
 
 	for _, row := range sd.Data {
+		if err := prepareUserRow(entity, row); err != nil {
+			return err
+		}
 		keyVal, ok := row[sd.KeyField]
 		if !ok {
 			return fmt.Errorf("row missing key_field %q", sd.KeyField)
@@ -73,10 +79,10 @@ func rowExists(ctx context.Context, dbc *db.DB, quotedTable, quotedKeyCol string
 	row := dbc.SQL.QueryRowContext(ctx, q, keyVal)
 	var n int
 	if err := row.Scan(&n); err != nil {
-		if err == sql.ErrNoRows {
+		if errors.Is(err, sql.ErrNoRows) {
 			return false, nil
 		}
-		return false, nil // treat scan errors as "not found" — row doesn't exist
+		return false, err
 	}
 	return true, nil
 }
@@ -103,6 +109,30 @@ func insertRow(ctx context.Context, dbc *db.DB, quotedTable string, row map[stri
 
 	_, err := dbc.SQL.ExecContext(ctx, q, vals...)
 	return err
+}
+
+// prepareUserRow lets seeds for the built-in User entity specify a plain `password`
+// (typically ${ENV_VAR}): it is bcrypt-hashed into password_hash and never stored as is.
+// Emails are normalised the same way registration does.
+func prepareUserRow(entity *schema.Entity, row map[string]interface{}) error {
+	if entity.Name != schema.BuiltinUserEntityName {
+		return nil
+	}
+	if email, ok := row["email"].(string); ok {
+		row["email"] = strings.ToLower(strings.TrimSpace(email))
+	}
+	if pw, ok := row["password"].(string); ok {
+		delete(row, "password")
+		if pw == "" {
+			return fmt.Errorf("seed user password is empty (is the env var set?)")
+		}
+		hash, err := bcrypt.GenerateFromPassword([]byte(pw), 12)
+		if err != nil {
+			return err
+		}
+		row["password_hash"] = string(hash)
+	}
+	return nil
 }
 
 // toSnakeCase converts camelCase/PascalCase to snake_case.

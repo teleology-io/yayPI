@@ -10,20 +10,20 @@ yaypi run
 
 ## What you get
 
-- **CRUD endpoints** with filtering, sorting, cursor and offset pagination, eager-loaded relations
+- **CRUD endpoints** — operator filters, search, sorting, keyset/offset pagination, sparse fields, embedded relations, PATCH and PUT
+- **Safe writes** — strict type checking, transactions, ETag/If-Match concurrency control, Idempotency-Key retries, all-or-nothing bulk create
 - **Field validation** — required, min/max length, min/max value, regex pattern, format checks (email, url, uuid, slug)
-- **Immutable fields** — accepted on create, silently dropped on update
-- **Bulk create** — POST an array; abort on first error or continue with partial success (207)
-- **Auth endpoints** — register, login, `/me`, token refresh, OAuth2 (Google, GitHub, custom)
-- **API key auth** — static keys in YAML or DB-backed lookup; works alongside JWT (either is sufficient)
-- **RBAC + ABAC** — role-based access, per-subject conditions, row-level and field-level filtering
-- **Rate limiting** — global token bucket or per-endpoint overrides
-- **Health/readiness** — liveness and readiness probes for Kubernetes
-- **Migrations** — diff-based schema migrations; auto-apply or generate SQL to review
-- **Background jobs** — cron-scheduled SQL, HTTP, or plugin handlers with retry
-- **Seed data** — idempotent rows inserted at startup or via `yaypi seed`
-- **Email hooks** — transactional email on entity lifecycle events (SMTP)
-- **Webhook hooks** — outbound HTTP on entity lifecycle events, with SSRF protection and retry
+- **Auth endpoints** — register, login, `/me`, rotating refresh tokens, logout(-all), password reset, email verification, OAuth2 with PKCE (Google, GitHub, custom)
+- **Tokens** — HS/RS/ES signing, issuer/audience, JWKS, optional instant revocation
+- **API key auth** — static or DB-backed (hashed) keys; works alongside JWT
+- **RBAC + ABAC** — roles, per-subject conditions, row-level and field-level filtering, owner fields, multi-tenancy
+- **Rate limiting** — global and per-endpoint, trusted-proxy aware; login brute-force lockout
+- **Migrations** — per-database, transactional, locked, drift-checked
+- **Background jobs** — cron-scheduled SQL or HTTP jobs with retry, executed once across replicas
+- **Email & webhooks** — transactional outbox with retries, HMAC-signed webhooks, SSRF protection
+- **Audit log** — `audit: true` records who changed what
+- **Operations** — JSON logs, Prometheus metrics, trace-context, health/readiness with graceful draining
+- **Seed data** — idempotent rows via `yaypi seed`
 - **Plugins** — hook into any lifecycle event; write Go plugins for custom logic
 - **OpenAPI 3.1** — auto-generated spec, served live, exportable
 
@@ -101,7 +101,7 @@ auth:
   expiry: 15m
   algorithm: HS256
 
-auto_migrate: true
+auto_migrate: true   # development only; use `yaypi migrate up` in production
 
 include:
   - entities/**/*.yaml
@@ -116,7 +116,7 @@ yaypi run            # start the server
 yaypi migrate        # generate and apply schema migrations
 yaypi seed           # run seed files
 yaypi spec           # export OpenAPI spec to JSON
-yaypi build          # compile registered plugins
+yaypi apikey generate  # create an API key and its storable digest
 ```
 
 ## IDE autocomplete
@@ -143,6 +143,7 @@ See [docs/intellisense.md](docs/intellisense.md) for details and manual setup in
 | Plugins | [docs/plugins.md](docs/plugins.md) |
 | OpenAPI | [docs/openapi.md](docs/openapi.md) |
 | CLI Reference | [docs/cli.md](docs/cli.md) |
+| Running in Production | [docs/production.md](docs/production.md) |
 | Patterns Cookbook | [docs/patterns.md](docs/patterns.md) |
 | YAML IntelliSense | [docs/intellisense.md](docs/intellisense.md) |
 

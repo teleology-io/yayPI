@@ -34,15 +34,19 @@
       "type": "array",
       "description": "Glob patterns for YAML files to include (entities, endpoints, jobs, seeds, emails, webhooks, auth, policies).",
       "items": { "type": "string" },
-      "examples": [
-        ["entities/**/*.yaml", "endpoints/**/*.yaml", "jobs/**/*.yaml"]
-      ]
+      "examples": [["entities/**/*.yaml", "endpoints/**/*.yaml", "jobs/**/*.yaml"]]
     },
     "spec": {
       "type": "array",
       "description": "OpenAPI spec definitions. Each spec is a separate API documentation artifact.",
       "items": { "$ref": "#/$defs/SpecConfig" }
-    }
+    },
+    "log": { "$ref": "#/$defs/LogConfig" },
+    "metrics": { "$ref": "#/$defs/MetricsConfig" },
+    "smtp": { "$ref": "#/$defs/SMTPConfig" },
+    "outbox": { "$ref": "#/$defs/OutboxConfig" },
+    "cron": { "$ref": "#/$defs/CronConfig" },
+    "audit": { "$ref": "#/$defs/AuditConfig" }
   },
   "$defs": {
     "ProjectConfig": {
@@ -105,13 +109,57 @@
         },
         "allowed_origins": {
           "type": "array",
-          "description": "CORS allowed origins. Use '*' to allow all.",
+          "description": "CORS allowed origins. Use '*' to allow all. \"*\" allows any origin but never with credentials; credentials are only allowed for listed origins.",
           "items": { "type": "string" },
           "examples": [["https://app.example.com", "https://admin.example.com"]]
         },
         "tls": { "$ref": "#/$defs/TLSConfig" },
         "health": { "$ref": "#/$defs/HealthConfig" },
-        "rate_limit": { "$ref": "#/$defs/RateLimitConfig" }
+        "rate_limit": { "$ref": "#/$defs/RateLimitConfig" },
+        "read_header_timeout": {
+          "type": "string",
+          "description": "Max time to read request headers (slowloris protection). Duration, e.g. 30s, 5m.",
+          "default": "10s"
+        },
+        "idle_timeout": {
+          "type": "string",
+          "description": "Keep-alive idle timeout. Duration, e.g. 30s, 5m.",
+          "default": "120s"
+        },
+        "request_timeout": {
+          "type": "string",
+          "description": "Deadline for each request context, including its queries; exceeding it returns 504. Default: write_timeout. Duration, e.g. 30s, 5m."
+        },
+        "drain_delay": {
+          "type": "string",
+          "description": "After SIGTERM, keep serving this long while /ready reports draining so load balancers move traffic away (e.g. 5s on Kubernetes). Duration, e.g. 30s, 5m."
+        },
+        "trusted_proxies": {
+          "type": "array",
+          "description": "CIDRs/IPs of reverse proxies whose X-Forwarded-For / X-Real-IP are trusted for the client IP. Empty = use the TCP peer address.",
+          "items": { "type": "string" }
+        },
+        "cors": { "$ref": "#/$defs/CORSConfig" },
+        "strict_startup": {
+          "type": "boolean",
+          "description": "Fail startup when a subsystem is degraded (cron, OpenAPI, email without SMTP) instead of warning.",
+          "default": true
+        },
+        "security_headers": {
+          "type": "boolean",
+          "description": "Add nosniff, frame-deny, no-referrer and CSP headers.",
+          "default": true
+        },
+        "hsts_max_age": {
+          "type": "integer",
+          "description": "Seconds for Strict-Transport-Security; set (e.g. 31536000) when served only over HTTPS. 0 = off.",
+          "default": 0
+        },
+        "idempotency_ttl": {
+          "type": "string",
+          "description": "How long Idempotency-Key responses are replayed.",
+          "default": "24h"
+        }
       }
     },
     "TLSConfig": {
@@ -200,14 +248,11 @@
         "dsn": {
           "type": "string",
           "description": "Data source name / connection string. Supports ${ENV_VAR} substitution.",
-          "examples": [
-            "postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=require",
-            "${DATABASE_URL}"
-          ]
+          "examples": ["postgres://${DB_USER}:${DB_PASS}@${DB_HOST}:5432/${DB_NAME}?sslmode=require", "${DATABASE_URL}"]
         },
         "max_open_conns": {
           "type": "integer",
-          "description": "Maximum number of open connections.",
+          "description": "Max open connections (default 25).",
           "minimum": 1,
           "default": 25,
           "examples": [25, 100]
@@ -239,6 +284,11 @@
           "type": "string",
           "description": "Default schema/search_path for PostgreSQL connections.",
           "examples": ["public", "app"]
+        },
+        "conn_max_idle_time": {
+          "type": "string",
+          "description": "Close connections idle this long. Duration, e.g. 30s, 5m.",
+          "default": "5m"
         }
       }
     },
@@ -254,12 +304,12 @@
         },
         "secret": {
           "type": "string",
-          "description": "JWT signing secret. Supports ${ENV_VAR} substitution. Use a strong random value in production.",
+          "description": "HMAC key for HS* algorithms; at least 32 bytes. Use ${ENV_VAR}.",
           "examples": ["${JWT_SECRET}"]
         },
         "expiry": {
           "type": "string",
-          "description": "Access token TTL.",
+          "description": "Access token lifetime. Default: 15m with refresh tokens enabled, otherwise 1h.",
           "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h|d)$",
           "default": "15m",
           "examples": ["15m", "1h", "24h"]
@@ -276,7 +326,32 @@
           "items": { "type": "string" },
           "examples": [["none", "RS256"]]
         },
-        "api_keys": { "$ref": "#/$defs/APIKeyConfig" }
+        "api_keys": { "$ref": "#/$defs/APIKeyConfig" },
+        "private_key_file": {
+          "type": "string",
+          "description": "PEM private key for RS*/ES* signing."
+        },
+        "public_key_file": {
+          "type": "string",
+          "description": "PEM public key for RS*/ES* verification (derived from the private key if unset). The auth endpoints publish it at <base>/auth/.well-known/jwks.json."
+        },
+        "key_id": {
+          "type": "string",
+          "description": "\"kid\" header and JWKS key id."
+        },
+        "issuer": {
+          "type": "string",
+          "description": "\"iss\" claim. Issued as project.name by default; verified on every request when set."
+        },
+        "audience": {
+          "type": "string",
+          "description": "\"aud\" claim, verified on every request when set."
+        },
+        "revocation_check": {
+          "type": "boolean",
+          "description": "Re-read the user on each authenticated request so deletion, role changes, logout-all and password resets apply immediately (one indexed query per request).",
+          "default": false
+        }
       }
     },
     "APIKeyConfig": {
@@ -316,6 +391,16 @@
           "description": "Entity field holding the role to inject into the authenticated subject.",
           "default": "role",
           "examples": ["role"]
+        },
+        "subject_field": {
+          "type": "string",
+          "description": "Column used as the caller id (default: user_id if present, else the primary key)."
+        },
+        "key_hash": {
+          "type": "string",
+          "description": "How the key column is stored. sha256 (default) stores the hex digest from `yaypi apikey generate`; plain is legacy.",
+          "enum": ["sha256", "plain"],
+          "default": "sha256"
         }
       }
     },
@@ -334,6 +419,10 @@
           "type": "string",
           "description": "Role injected into the subject when this key is used.",
           "examples": ["service", "admin", "readonly"]
+        },
+        "name": {
+          "type": "string",
+          "description": "Caller id for this key (default apikey:<index>)."
         }
       }
     },
@@ -355,9 +444,9 @@
         },
         "adapter": {
           "type": "string",
-          "description": "Casbin adapter type.",
-          "enum": ["file", "db"],
-          "examples": ["file", "db"]
+          "description": "Casbin adapter. Only file is supported; anything else fails startup.",
+          "enum": ["file"],
+          "default": "file"
         },
         "adapter_table": {
           "type": "string",
@@ -441,6 +530,168 @@
           "type": "string",
           "description": "Human-readable description of this server.",
           "examples": ["Production", "Local development"]
+        }
+      }
+    },
+    "LogConfig": {
+      "type": "object",
+      "description": "Process logging.",
+      "additionalProperties": false,
+      "properties": {
+        "level": {
+          "type": "string",
+          "description": "Minimum log level.",
+          "enum": ["debug", "info", "warn", "error"],
+          "default": "info"
+        },
+        "format": {
+          "type": "string",
+          "description": "json (one object per line) or console. Default: console on a terminal, json otherwise.",
+          "enum": ["json", "console"]
+        }
+      }
+    },
+    "MetricsConfig": {
+      "type": "object",
+      "description": "Prometheus metrics endpoint (dependency-free text exposition).",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Expose metrics.",
+          "default": false
+        },
+        "path": {
+          "type": "string",
+          "description": "Path, mounted outside base_url like /health.",
+          "default": "/metrics"
+        },
+        "token": {
+          "type": "string",
+          "description": "Bearer token required to scrape. Use ${ENV_VAR}."
+        }
+      }
+    },
+    "CORSConfig": {
+      "type": "object",
+      "description": "CORS tuning beyond allowed_origins.",
+      "additionalProperties": false,
+      "properties": {
+        "allowed_headers": {
+          "type": "array",
+          "description": "Request headers allowed cross-origin. Default: Authorization, Content-Type, Accept, X-API-Key, X-Request-ID, If-Match, Idempotency-Key.",
+          "items": { "type": "string" }
+        },
+        "allowed_methods": {
+          "type": "array",
+          "description": "Methods allowed cross-origin. Default: GET, POST, PUT, PATCH, DELETE, OPTIONS.",
+          "items": { "type": "string" }
+        },
+        "exposed_headers": {
+          "type": "array",
+          "description": "Response headers readable by browser JavaScript (e.g. ETag, X-Request-ID).",
+          "items": { "type": "string" }
+        },
+        "max_age": {
+          "type": "integer",
+          "description": "Preflight cache seconds.",
+          "default": 600
+        }
+      }
+    },
+    "SMTPConfig": {
+      "type": "object",
+      "description": "Outgoing email for email triggers, password reset and verification. Empty fields fall back to SMTP_* env vars.",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "description": "SMTP server host (env: SMTP_HOST)."
+        },
+        "port": {
+          "type": "integer",
+          "description": "SMTP port (env: SMTP_PORT).",
+          "default": 587
+        },
+        "username": {
+          "type": "string",
+          "description": "SMTP username (env: SMTP_USER)."
+        },
+        "password": {
+          "type": "string",
+          "description": "SMTP password; use ${ENV_VAR} (env: SMTP_PASS)."
+        },
+        "from_name": {
+          "type": "string",
+          "description": "Display name in From (env: SMTP_SENDER_NAME)."
+        },
+        "from_email": {
+          "type": "string",
+          "description": "Sender address (env: SMTP_SENDER_EMAIL)."
+        },
+        "retry": {
+          "type": "object",
+          "description": "Delivery retry policy.",
+          "additionalProperties": false,
+          "properties": {
+            "max_attempts": {
+              "type": "integer",
+              "description": "Total attempts before the message is marked dead."
+            },
+            "backoff": {
+              "type": "string",
+              "description": "exponential (default) or fixed.",
+              "enum": ["exponential", "fixed"]
+            },
+            "initial_delay": {
+              "type": "string",
+              "description": "Delay before the first retry, e.g. 10s."
+            },
+            "max_delay": {
+              "type": "string",
+              "description": "Cap on the delay between retries, e.g. 1h."
+            }
+          }
+        }
+      }
+    },
+    "OutboxConfig": {
+      "type": "object",
+      "description": "Webhook/email delivery worker.",
+      "additionalProperties": false,
+      "properties": {
+        "poll_interval": {
+          "type": "string",
+          "description": "How often due messages are picked up.",
+          "default": "1s"
+        },
+        "retention": {
+          "type": "string",
+          "description": "Delivered messages are deleted after this (supports d, e.g. 7d).",
+          "default": "7d"
+        }
+      }
+    },
+    "CronConfig": {
+      "type": "object",
+      "description": "Job scheduling across replicas.",
+      "additionalProperties": false,
+      "properties": {
+        "distributed": {
+          "type": "boolean",
+          "description": "Coordinate runs through yaypi_job_locks so each tick runs on one replica (needs a database).",
+          "default": true
+        }
+      }
+    },
+    "AuditConfig": {
+      "type": "object",
+      "description": "Audit log (entities with audit: true).",
+      "additionalProperties": false,
+      "properties": {
+        "retention": {
+          "type": "string",
+          "description": "Delete audit rows older than this, e.g. 365d. Default: keep forever."
         }
       }
     }

@@ -11,16 +11,35 @@ Plugins let you add custom logic that runs during entity lifecycle events (befor
 | Send email when a record is created/updated/deleted | `kind: email` YAML file — no code needed |
 | Fire an HTTP webhook on lifecycle events | `kind: webhooks` YAML file — no code needed |
 | Hash passwords before saving | Custom plugin (or use the built-in auth `/register` endpoint) |
-| Write an audit log to a database table | Custom plugin |
+| Write an audit log | `audit: true` on the entity — no code needed |
 | Validate business rules that can't be expressed in field constraints | Custom plugin |
 | Bulk export/import, a report, a file upload — anything that isn't one CRUD row | Custom route plugin ([below](#custom-route-plugins)) |
 | Complex data transformation before a write | Custom plugin |
 
+## Delivery model for email and webhooks
+
+Built-in emails and webhooks use a **transactional outbox** (tune with `outbox.poll_interval` and `outbox.retention`). When a write commits, matching messages are rendered and stored in the `yaypi_outbox` table *in the same transaction*. A background worker then delivers them with exponential backoff (default: 8 attempts for webhooks, 5 for emails); undeliverable messages end up `status = 'dead'` with `last_error`. Delivery survives restarts and is coordinated across replicas. It is at-least-once, so receivers should dedupe on `X-Yaypi-Event-Id`. A failing receiver never affects the API response.
+
+Triggers are `after_create`, `after_update` and `after_delete`. The record passed to templates is the row after the change (before it, for deletes).
+
 ## Built-in email hooks (`kind: email`)
 
-Create a YAML file with `kind: email` to send transactional email on entity lifecycle events. yayPi reads SMTP configuration from environment variables.
+**SMTP** is configured in `yaypi.yaml`. Any empty field falls back to its env var (`SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SMTP_SENDER_NAME`, `SMTP_SENDER_EMAIL`). Without a host the server refuses to start (unless `server.strict_startup: false`).
 
-**Required env vars:** `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`
+```yaml
+# yaypi.yaml
+smtp:
+  host: smtp.example.com
+  port: 587
+  username: ${SMTP_USER}
+  password: ${SMTP_PASS}
+  from_name: My App
+  from_email: no-reply@example.com
+  retry:                 # default for every email; an email's own retry: overrides it
+    max_attempts: 5
+    initial_delay: 10s
+    max_delay: 1h
+```
 
 ```yaml
 # emails/welcome.yaml
@@ -28,43 +47,27 @@ version: "1"
 kind: email
 
 emails:
-  - entity: User
+  - name: welcome
+    entity: User
     trigger: after_create
     to: "{{record.email}}"
     subject: "Welcome to our platform!"
     body: |
-      Hi {{record.name}},
-
-      Thanks for signing up. Your account is ready.
-    html: |
-      <p>Hi {{record.name}},</p>
+      <p>Hi {{record.display_name}},</p>
       <p>Thanks for signing up. Your account is ready.</p>
 
-  - entity: Order
+  - name: order-confirmation
+    entity: Order
     trigger: after_create
-    condition: "record.email != \"\""
+    condition: record.email != ""
     to: "{{record.email}}"
     subject: "Order confirmation #{{record.id}}"
-    body: "Your order has been received. Total: {{record.total}}"
+    body: "<p>Your order has been received. Total: {{record.total}}</p>"
 ```
 
-**Template syntax:** `{{record.FIELD}}` where `FIELD` is any column name in the entity.
-
-**Condition syntax:** `record.FIELD != ""` or `record.FIELD == "value"` (simple equality/inequality only). Omit to always fire.
-
-**Triggers:** `before_create` | `after_create` | `before_update` | `after_update` | `before_delete` | `after_delete`
-
-Add the file to your `include:` globs:
-```yaml
-include:
-  - emails/**/*.yaml
-```
-
-Emails are sent in a goroutine (non-blocking) so they do not slow down the HTTP response.
+`body` is HTML. Record values are HTML-escaped, and CR/LF are stripped from `to` and `subject`, so record data can't inject markup or headers.
 
 ## Built-in webhook hooks (`kind: webhooks`)
-
-Create a YAML file with `kind: webhooks` to fire HTTP webhooks on entity lifecycle events.
 
 ```yaml
 # webhooks/orders.yaml
@@ -72,36 +75,29 @@ version: "1"
 kind: webhooks
 
 webhooks:
-  - entity: Order
+  - name: new-order
+    entity: Order
     trigger: after_create
-    url: "https://fulfillment.example.com/hooks/new-order"
+    condition: record.total >= 100 and record.status == "paid"
+    url: "https://fulfillment.example.com/hooks/orders/{{record.id}}"
     method: POST
-    headers:
-      Authorization: "Bearer ${FULFILLMENT_SECRET}"
-      Content-Type: "application/json"
+    secret: ${FULFILLMENT_WEBHOOK_SECRET}
     payload: |
-      {
-        "event": "order.created",
-        "order_id": "{{record.id}}",
-        "customer_id": "{{record.customer_id}}"
-      }
+      { "event": "order.created", "order_id": "{{record.id}}", "total": {{record.total}} }
     timeout: 10s
     retry:
-      max_attempts: 3
-      backoff: 5s
+      max_attempts: 8
+      initial_delay: 10s
+      max_delay: 1h
 ```
 
-**Template syntax:** same `{{record.FIELD}}` as email hooks.
+- **Payload.** Values substituted into `payload` are JSON-escaped, so record data can't break out of a string or add keys. The template must be valid JSON (checked at startup). Without `payload`, the body is `{"event": "Order.created", "entity": "Order", "id": "…", "data": {…record…}}`.
+- **URL.** Substituted values are path-escaped.
+- **Signature.** With `secret`, each delivery carries `X-Yaypi-Timestamp` and `X-Yaypi-Signature: v1=<hex HMAC-SHA256(secret, timestamp + "." + body)>`. Verify it, and reject timestamps older than a few minutes.
+- **SSRF protection.** Connections to private, loopback, link-local (including cloud metadata), CGNAT and unspecified addresses are refused after DNS resolution, including on redirects. Set `allow_private_network: true` for internal receivers.
+- **Success.** Any 2xx response; anything else is retried.
 
-**SSRF protection:** webhook targets are blocked if they resolve to RFC-1918 (private), loopback, or link-local addresses.
-
-**Non-blocking:** webhooks fire in a goroutine; failures don't affect the HTTP response.
-
-Add the file to your `include:` globs:
-```yaml
-include:
-  - webhooks/**/*.yaml
-```
+**Conditions** (emails and webhooks): `record.<field> <op> <value>` with `==`, `!=`, `>`, `>=`, `<`, `<=`; the value is a quoted string, number, `true`/`false` or `null`; combine with `and`. An invalid condition fails startup.
 
 ## Custom plugins (code)
 
@@ -183,9 +179,18 @@ type HookContext struct {
 }
 
 type Subject struct {
-    ID    string
-    Role  string
-    Email string
+    ID     string
+    Role   string
+    Email  string
+    Tenant string
+}
+
+// Return from a Before* hook to reject the request with a specific status.
+type HookError struct {
+    Status  int               // e.g. 422
+    Message string            // returned as "error"
+    Code    string            // optional machine code
+    Fields  map[string]string // optional per-field messages
 }
 
 type Logger interface {
@@ -207,16 +212,18 @@ type RouteHandlerFunc func(RouteContext)
 
 | Hook | Runs | Can modify data | Error effect |
 |---|---|---|---|
-| `BeforeCreate` | Before INSERT | Yes — return modified map | Aborts the operation (returns 400) |
-| `AfterCreate` | After INSERT | No | Logged only — operation is not rolled back |
-| `BeforeUpdate` | Before UPDATE | Yes — return modified map | Aborts the operation (returns 400) |
-| `AfterUpdate` | After UPDATE | No | Logged only |
-| `BeforeDelete` | Before DELETE | No | Aborts the operation (returns 400) |
-| `AfterDelete` | After DELETE | No | Logged only |
+| `BeforeCreate` | After validation, before INSERT | Yes — return modified map | Aborts the operation |
+| `AfterCreate` | After the transaction commits | No | Logged only |
+| `BeforeUpdate` | Inside the transaction, after the row is found, locked and access-checked | Yes — return modified map | Aborts and rolls back |
+| `AfterUpdate` | After commit | No | Logged only |
+| `BeforeDelete` | Inside the transaction, after the row is found and access-checked | No | Aborts and rolls back |
+| `AfterDelete` | After commit | No | Logged only |
 
-**Before hooks** that return a non-nil error cancel the operation and return an HTTP error to the caller. Use this for validation and data transformation.
+**Before hooks** that return an error cancel the operation. Return `&sdk.HookError{Status: 422, Message: "…", Code: "…"}` to send that status and message to the client. Any other error becomes a generic 500, and its text is only logged. `BeforeUpdate`/`BeforeDelete` never run for rows that don't exist or that the caller can't access.
 
-**After hooks** that return a non-nil error are logged but do not affect the response. The database operation is not rolled back. Use this for side effects like audit logs.
+**After hooks** run once the change is committed. Errors are logged and don't affect the response. For side effects that must not be lost, prefer the built-in outbox (webhooks/emails) over a best-effort after-hook.
+
+**Lifecycle.** `Init` is called once at startup with the plugin's `config:` block from `yaypi.yaml` (matched by `PluginInfo.Name`), and an error stops startup. `Shutdown` is called during graceful shutdown. `HookContext.RequestID` carries the request id for log correlation.
 
 ## Project layout
 

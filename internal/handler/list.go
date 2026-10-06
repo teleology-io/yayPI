@@ -1,247 +1,243 @@
 package handler
 
 import (
-	"encoding/json"
-	"errors"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"github.com/teleology-io/yayPI/internal/middleware"
-	"github.com/teleology-io/yayPI/internal/policy"
 	"github.com/teleology-io/yayPI/internal/query"
 	"github.com/teleology-io/yayPI/internal/schema"
 )
 
+// reservedListParams are query parameters with built-in meaning, never filters.
+var reservedListParams = map[string]bool{
+	"sort": true, "limit": true, "offset": true, "cursor": true, "fields": true, "include": true, "q": true,
+}
+
 // List creates a handler that lists records for the given entity.
+//
+// Query parameters:
+//
+//	?col=v / ?col[op]=v   filters on allow_filter_by columns (ops: eq ne gt gte lt lte in nin contains starts_with is_null)
+//	?sort=col[:asc|desc]  or ?sort=-col
+//	?limit=N              capped at pagination.max_limit
+//	?cursor=…             keyset pagination (default style) — pass meta.next_cursor
+//	?offset=N             offset pagination (pagination.style: offset)
+//	?fields=a,b           sparse fieldset
+//	?include=rel          relations listed in the endpoint's include:
 func (f *Factory) List(entity *schema.Entity, opts *schema.ListOpts) http.HandlerFunc {
+	if opts == nil {
+		opts = &schema.ListOpts{}
+	}
+	allowedFilter := map[string]bool{}
+	for _, c := range opts.AllowFilterBy {
+		allowedFilter[c] = true
+	}
+	allowedSort := map[string]bool{}
+	for _, c := range opts.AllowSortBy {
+		allowedSort[c] = true
+	}
+
 	return func(w http.ResponseWriter, r *http.Request) {
 		dbc, err := f.db.ForEntity(entity.Name)
 		if err != nil {
-			writeError(w, http.StatusInternalServerError, "database unavailable")
+			writeError(w, r, http.StatusInternalServerError, "database unavailable")
+			return
+		}
+		q := r.URL.Query()
+		sub := middleware.GetSubject(r)
+
+		filters, ok := parseListFilters(w, r, entity, allowedFilter)
+		if !ok {
 			return
 		}
 
-		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
-
-		// Build allowed columns set from opts
-		allowedFilter := make(map[string]struct{})
-		if opts != nil {
-			for _, col := range opts.AllowFilterBy {
-				allowedFilter[col] = struct{}{}
-			}
-		}
-		allowedSort := make(map[string]struct{})
-		if opts != nil {
-			for _, col := range opts.AllowSortBy {
-				allowedSort[col] = struct{}{}
-			}
-		}
-
-		// Parse query parameters
-		q := r.URL.Query()
-
-		// Filters
-		filters := make(map[string]interface{})
-		for col := range allowedFilter {
-			if v := q.Get(col); v != "" {
-				filters[col] = v
-			}
-		}
-
-		// Sort
 		sortParam := q.Get("sort")
-		if sortParam == "" && opts != nil {
+		if sortParam == "" {
 			sortParam = opts.DefaultSort
 		}
-		// Validate sort column
-		if sortParam != "" {
-			parts := strings.SplitN(sortParam, ":", 2)
-			if _, ok := allowedSort[parts[0]]; !ok && len(allowedSort) > 0 {
-				writeError(w, http.StatusBadRequest, "invalid sort column")
-				return
-			}
+		sort, ok := parseSort(w, r, sortParam, allowedSort)
+		if !ok {
+			return
 		}
 
-		// Pagination
-		limit := 20
-		maxLimit := 100
-		if opts != nil && opts.Pagination.DefaultLimit > 0 {
-			limit = opts.Pagination.DefaultLimit
+		limit := opts.Pagination.DefaultLimit
+		if limit <= 0 {
+			limit = 20
 		}
-		if opts != nil && opts.Pagination.MaxLimit > 0 {
-			maxLimit = opts.Pagination.MaxLimit
+		maxLimit := opts.Pagination.MaxLimit
+		if maxLimit <= 0 {
+			maxLimit = 100
 		}
 		if lStr := q.Get("limit"); lStr != "" {
 			parsed, err := strconv.Atoi(lStr)
 			if err != nil || parsed < 1 {
-				writeError(w, http.StatusBadRequest, "invalid limit")
+				writeError(w, r, http.StatusBadRequest, "invalid limit")
 				return
 			}
-			if parsed > maxLimit {
-				parsed = maxLimit
-			}
-			limit = parsed
+			limit = min(parsed, maxLimit)
 		}
 
-		// Resolve row-level access filter
-		sub := middleware.GetSubject(r)
-		var rowFilter string
-		var rowArgs []interface{}
-		if opts != nil && len(opts.RowAccess) > 0 {
-			var rowErr error
-			rowFilter, rowArgs, rowErr = policy.ResolveRowFilter(opts.RowAccess, sub)
-			if errors.Is(rowErr, policy.ErrRowAccessDenied) {
-				writeError(w, http.StatusForbidden, "access denied")
+		row, ok := resolveRowFilter(w, r, opts.RowAccess, sub, http.StatusForbidden)
+		if !ok {
+			return
+		}
+		if row, ok = scopeTenant(w, r, entity, row, sub, dbc.Dialect, http.StatusForbidden); !ok {
+			return
+		}
+		var search query.Search
+		if term := q.Get("q"); term != "" {
+			if len(opts.Search) == 0 {
+				writeError(w, r, http.StatusBadRequest, "search is not enabled for this endpoint")
 				return
 			}
-			if rowErr != nil {
-				writeError(w, http.StatusInternalServerError, "row access evaluation failed")
-				return
-			}
+			search = query.Search{Columns: opts.Search, Term: term}
+		}
+		fields, ok := parseFields(w, r, entity)
+		if !ok {
+			return
+		}
+		rels, ok := parseIncludes(w, r, entity, opts.Include)
+		if !ok {
+			return
 		}
 
-		useOffset := opts != nil && opts.Pagination.Style == "offset"
-
+		lq := query.ListQuery{Filters: filters, Sort: sort, Limit: limit + 1, Row: row, Search: search}
+		useOffset := opts.Pagination.Style == "offset"
 		if useOffset {
-			// --- Offset pagination ---
-			offset := 0
 			if oStr := q.Get("offset"); oStr != "" {
 				parsed, err := strconv.Atoi(oStr)
 				if err != nil || parsed < 0 {
-					writeError(w, http.StatusBadRequest, "invalid offset")
+					writeError(w, r, http.StatusBadRequest, "invalid offset")
 					return
 				}
-				offset = parsed
+				lq.Offset = parsed
 			}
-
-			oq := query.OffsetQuery{
-				Filters: filters,
-				Sort:    sortParam,
-				Limit:   limit,
-				Offset:  offset,
-			}
-
-			rows, err := builder.ListOffset(r.Context(), oq, rowFilter, rowArgs)
+		} else if cursorStr := q.Get("cursor"); cursorStr != "" {
+			c, err := query.DecodeCursor(cursorStr, f.secret)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "query failed")
+				writeError(w, r, http.StatusBadRequest, "invalid cursor")
 				return
 			}
+			lq.Cursor = c
+		}
 
-			for _, row := range rows {
-				stripOmitFields(entity, row)
-				applyFieldAccess(entity, row, sub)
+		builder := query.NewBuilder(entity, dbc.SQL, dbc.Dialect)
+		rows, err := builder.List(r.Context(), lq)
+		if err != nil {
+			writeDBError(w, r, dbc.Dialect, err, "query")
+			return
+		}
+		hasMore := len(rows) > limit
+		if hasMore {
+			rows = rows[:limit]
+		}
+
+		meta := map[string]any{"count": len(rows), "limit": limit, "has_more": hasMore}
+		if useOffset {
+			meta["offset"] = lq.Offset
+			meta["page"] = lq.Offset/limit + 1
+		} else if hasMore {
+			resolved := sort
+			if resolved.Column == "" {
+				resolved.Column = entity.PKColumn()
 			}
-
-			page := 1
-			if limit > 0 && offset > 0 {
-				page = offset/limit + 1
+			if f, ok := fieldByKey(entity, resolved.Column); ok {
+				resolved.Column = f.ColumnName
 			}
-
-			meta := map[string]interface{}{
-				"count":  len(rows),
-				"limit":  limit,
-				"offset": offset,
-				"page":   page,
+			meta["next_cursor"] = query.EncodeCursor(query.NewCursor(entity, resolved, rows[len(rows)-1]), f.secret)
+		}
+		if opts.Pagination.IncludeTotal {
+			if total, err := builder.Count(r.Context(), filters, row, search); err == nil {
+				meta["total"] = total
 			}
+		}
 
-			if opts.Pagination.IncludeTotal {
-				total, err := builder.Count(r.Context(), filters, rowFilter, rowArgs)
-				if err == nil {
-					meta["total"] = total
-				}
+		if !f.loadIncludes(w, r, builder, rows, rels, sub) {
+			return
+		}
+		for _, rec := range rows {
+			presentRecord(entity, rec, sub)
+			selectFields(rec, fields, rels)
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"data": rows, "meta": meta})
+	}
+}
+
+// parseListFilters turns ?col=v and ?col[op]=v parameters into typed filters. Unknown
+// plain parameters are ignored (cache busters etc.); a known field that is not in
+// allow_filter_by, or a malformed operator, is a 400 so callers never silently get
+// unfiltered results.
+func parseListFilters(w http.ResponseWriter, r *http.Request, entity *schema.Entity, allowed map[string]bool) ([]query.Filter, bool) {
+	var filters []query.Filter
+	for key, vals := range r.URL.Query() {
+		name, op := key, ""
+		if i := strings.IndexByte(key, '['); i > 0 && strings.HasSuffix(key, "]") {
+			name, op = key[:i], key[i+1:len(key)-1]
+		}
+		if reservedListParams[name] {
+			continue
+		}
+		field, isField := fieldByKey(entity, name)
+		if !isField {
+			if op != "" {
+				writeError(w, r, http.StatusBadRequest, "unknown filter field: "+name)
+				return nil, false
 			}
-
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"data": rows,
-				"meta": meta,
-			})
-		} else {
-			// --- Cursor pagination ---
-			var cursor *query.Cursor
-			if cursorStr := q.Get("cursor"); cursorStr != "" {
-				c, err := query.DecodeCursor(cursorStr, f.secret)
-				if err != nil {
-					writeError(w, http.StatusBadRequest, "invalid cursor")
-					return
-				}
-				cursor = c
-			}
-
-			lq := query.ListQuery{
-				Filters: filters,
-				Sort:    sortParam,
-				Limit:   limit,
-				Cursor:  cursor,
-			}
-
-			rows, err := builder.List(r.Context(), lq, rowFilter, rowArgs)
+			continue
+		}
+		if !allowed[field.Name] && !allowed[field.ColumnName] {
+			writeError(w, r, http.StatusBadRequest, "filtering by "+name+" is not allowed")
+			return nil, false
+		}
+		for _, v := range vals {
+			flt, err := query.ParseFilter(field, op, v)
 			if err != nil {
-				writeError(w, http.StatusInternalServerError, "query failed")
-				return
+				writeError(w, r, http.StatusBadRequest, err.Error())
+				return nil, false
 			}
-
-			for _, row := range rows {
-				stripOmitFields(entity, row)
-				applyFieldAccess(entity, row, sub)
-			}
-
-			var nextCursor string
-			if len(rows) == limit && len(rows) > 0 {
-				last := rows[len(rows)-1]
-				c := query.Cursor{ID: stringVal(last["id"])}
-				if ts, ok := last["created_at"]; ok {
-					c.CreatedAt = stringVal(ts)
-				}
-				nextCursor = query.EncodeCursor(c, f.secret)
-			}
-
-			meta := map[string]interface{}{
-				"count": len(rows),
-			}
-			if nextCursor != "" {
-				meta["next_cursor"] = nextCursor
-			}
-
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"data": rows,
-				"meta": meta,
-			})
+			filters = append(filters, flt)
 		}
 	}
+	return filters, true
 }
 
-// stringVal converts an interface{} to its string representation.
-func stringVal(v interface{}) string {
-	if v == nil {
-		return ""
+// parseSort accepts "col", "col:asc", "col:desc" or "-col".
+func parseSort(w http.ResponseWriter, r *http.Request, s string, allowed map[string]bool) (query.Sort, bool) {
+	if s == "" {
+		return query.Sort{}, true
 	}
-	switch s := v.(type) {
-	case string:
-		return s
-	default:
-		return ""
-	}
-}
-
-// stripOmitFields removes fields marked omit_response from a row.
-func stripOmitFields(entity *schema.Entity, row map[string]interface{}) {
-	for _, f := range entity.Fields {
-		if f.OmitResponse {
-			delete(row, f.ColumnName)
-			delete(row, f.Name)
+	var out query.Sort
+	if strings.HasPrefix(s, "-") {
+		out = query.Sort{Column: s[1:], Desc: true}
+	} else {
+		parts := strings.SplitN(s, ":", 2)
+		out.Column = parts[0]
+		if len(parts) == 2 {
+			switch strings.ToLower(parts[1]) {
+			case "asc":
+			case "desc":
+				out.Desc = true
+			default:
+				writeError(w, r, http.StatusBadRequest, "invalid sort direction")
+				return query.Sort{}, false
+			}
 		}
 	}
+	if len(allowed) > 0 && !allowed[out.Column] {
+		writeError(w, r, http.StatusBadRequest, "invalid sort column")
+		return query.Sort{}, false
+	}
+	return out, true
 }
 
-// writeJSON encodes v as JSON and writes to w with the given status code.
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// writeError writes a JSON error response.
-func writeError(w http.ResponseWriter, status int, msg string) {
-	writeJSON(w, status, map[string]string{"error": msg})
+func fieldByKey(entity *schema.Entity, key string) (*schema.Field, bool) {
+	for i := range entity.Fields {
+		f := &entity.Fields[i]
+		if f.Name == key || f.ColumnName == key {
+			return f, true
+		}
+	}
+	return nil, false
 }

@@ -37,6 +37,31 @@ type Engine struct {
 	db       *sql.DB
 	dialect  dialect.Dialect
 	registry *schema.Registry
+	// When scoped, only entities stored in dbName are diffed (entities with no explicit
+	// database belong to the default one).
+	scoped    bool
+	dbName    string
+	isDefault bool
+}
+
+// ForDatabase restricts the diff to entities stored in the named database.
+func (e *Engine) ForDatabase(name string, isDefault bool) *Engine {
+	e.scoped, e.dbName, e.isDefault = true, name, isDefault
+	return e
+}
+
+func (e *Engine) entities() []*schema.Entity {
+	all := e.registry.Entities()
+	if !e.scoped {
+		return all
+	}
+	var out []*schema.Entity
+	for _, ent := range all {
+		if ent.Database == e.dbName || (ent.Database == "" && e.isDefault) {
+			out = append(out, ent)
+		}
+	}
+	return out
 }
 
 // NewEngine creates a migration Engine.
@@ -63,7 +88,7 @@ func (e *Engine) Diff(ctx context.Context) ([]DDLStatement, error) {
 
 	var stmts []DDLStatement
 
-	for _, entity := range topoSortEntities(e.registry.Entities()) {
+	for _, entity := range topoSortEntities(e.entities()) {
 		table := entity.Table
 
 		if !existingTables[table] {
@@ -297,7 +322,7 @@ func (e *Engine) columnDef(f schema.Field) string {
 	}
 
 	if f.Default != "" {
-		def += " DEFAULT " + f.Default
+		def += " DEFAULT " + e.dialect.TranslateDefault(f.Default)
 	}
 
 	return def
@@ -326,7 +351,9 @@ func topoSortEntities(entities []*schema.Entity) []*schema.Entity {
 				continue
 			}
 			deps[e.Name] = append(deps[e.Name], ref)
-			inDegree[ref] = inDegree[ref]
+			if _, ok := inDegree[ref]; !ok {
+				inDegree[ref] = 0
+			}
 			inDegree[e.Name]++
 		}
 	}

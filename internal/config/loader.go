@@ -11,9 +11,6 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// sensitiveKeys are field key substrings that should not have plain-text values.
-var sensitiveKeys = []string{"secret", "password", "token", "key", "dsn"}
-
 // envVarRe matches ${VAR} and ${VAR:-default}.
 var envVarRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}`)
 
@@ -53,6 +50,9 @@ func Load(rootFile string) (*RootConfig, error) {
 
 	// Apply defaults
 	applyServerDefaults(&cfg.Server)
+	if cfg.Auth.Algorithm == "" {
+		cfg.Auth.Algorithm = "HS256"
+	}
 
 	// Expand includes
 	for _, pattern := range cfg.Include {
@@ -86,6 +86,15 @@ func applyServerDefaults(s *ServerConfig) {
 	}
 	if s.ShutdownTimeout == 0 {
 		s.ShutdownTimeout = 10e9 // 10s
+	}
+	if s.ReadHeaderTimeout == 0 {
+		s.ReadHeaderTimeout = 10e9 // 10s
+	}
+	if s.IdleTimeout == 0 {
+		s.IdleTimeout = 120e9 // 120s
+	}
+	if s.RequestTimeout == 0 {
+		s.RequestTimeout = s.WriteTimeout
 	}
 }
 
@@ -197,7 +206,7 @@ func isSensitivePlain(v string) bool {
 	}
 	// Heuristic: if the value is one of a handful of safe placeholder strings, skip
 	lower := strings.ToLower(v)
-	for _, unsafe := range []string{"changeme", "secret", "password", "example"} {
+	for _, unsafe := range []string{"changeme", "secret", "password", "example", "dev-only", "replace-me"} {
 		if strings.Contains(lower, unsafe) {
 			// It's a known-bad placeholder — warn
 			return true
@@ -242,17 +251,6 @@ func globDoubleStar(pattern string) ([]string, error) {
 		return nil
 	})
 	return matches, err
-}
-
-// hasSensitiveKey checks if a key name contains a sensitive substring.
-func hasSensitiveKey(key string) bool {
-	lower := strings.ToLower(key)
-	for _, s := range sensitiveKeys {
-		if strings.Contains(lower, s) {
-			return true
-		}
-	}
-	return false
 }
 
 // AllJobDefs returns a flat list of all job definitions from all loaded job files.

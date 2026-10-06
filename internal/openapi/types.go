@@ -92,6 +92,8 @@ type Schema struct {
 	Items       *Schema            `json:"items,omitempty"`
 	Required    []string           `json:"required,omitempty"`
 	ReadOnly    bool               `json:"readOnly,omitempty"`
+
+	AdditionalProperties *Schema `json:"additionalProperties,omitempty"`
 }
 
 // Components holds reusable schema and security definitions.

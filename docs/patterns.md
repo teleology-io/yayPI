@@ -91,7 +91,7 @@ This is common for comment creation: any logged-in user can comment regardless o
 
 ## 4. Soft delete with public read
 
-Soft-deleted records are invisible to all API operations automatically. No special endpoint config needed beyond `soft_delete: true` on both the entity and the delete operation.
+Soft-deleted records are invisible to all API operations automatically. `soft_delete: true` on the entity is all that's needed — deletes then set `deleted_at` (the endpoint's `delete.soft_delete` is optional and only allowed when the entity has it).
 
 **Entity:**
 ```yaml
@@ -103,7 +103,6 @@ entity:
 **Endpoint:**
 ```yaml
 delete:
-  soft_delete: true   # sets deleted_at instead of DELETE FROM
   auth:
     require: true
     roles: [admin]
@@ -147,9 +146,9 @@ entity:
         message: "must be a valid https:// URL"
 ```
 
-Validation errors return 422 with a field-keyed map:
+Validation errors return 400 with a field-keyed map:
 ```json
-{ "errors": { "sku": "SKU must be uppercase letters, numbers, and hyphens only" } }
+{ "error": "validation failed", "code": "validation_failed", "errors": { "sku": "SKU must be uppercase letters, numbers, and hyphens only" } }
 ```
 
 ---
@@ -314,7 +313,7 @@ API keys and JWTs are OR-logic — either authenticates the request.
 auth:
   api_keys:
     entity: ApiKey
-    key_field: token
+    key_field: token       # stores the SHA-256 digest from `yaypi apikey generate`
     role_field: role
 
 # Entity
@@ -337,7 +336,7 @@ entity:
 
 ## 14. Email notification on signup
 
-Requires env: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`.
+Requires the `smtp:` block in `yaypi.yaml` (empty fields fall back to `SMTP_*` env vars).
 
 ```yaml
 # emails/welcome.yaml
@@ -369,18 +368,20 @@ include:
 version: "1"
 kind: webhooks
 webhooks:
-  - entity: Order
+  - name: fulfillment
+    entity: Order
     trigger: after_create
     url: "https://fulfillment.example.com/hooks"
     method: POST
-    headers:
-      Authorization: "Bearer ${FULFILLMENT_SECRET}"
+    secret: ${FULFILLMENT_WEBHOOK_SECRET}   # signs X-Yaypi-Signature
     payload: |
-      {"order_id": "{{record.id}}", "total": "{{record.total}}"}
+      {"order_id": "{{record.id}}", "total": {{record.total}}}
     retry:
-      max_attempts: 3
-      backoff: 5s
+      max_attempts: 8
+      initial_delay: 10s
 ```
+
+Delivered from the transactional outbox: retried with backoff, deduplicable by `X-Yaypi-Event-Id`.
 
 ---
 

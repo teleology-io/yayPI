@@ -41,7 +41,8 @@ func methodToAction(method string) string {
 }
 
 // RBAC returns an authorization middleware that enforces:
-//  1. Casbin RBAC policy (role, resource, action)
+//  1. Casbin RBAC policy (role, resource, action) — skipped when enforcer is nil
+//     (no policy engine configured); roles and conditions are still enforced.
 //  2. auth.roles — subject's role must be in the allowed list (if non-empty)
 //  3. auth.conditions — all CEL-lite expressions must pass (if non-empty)
 //
@@ -61,15 +62,17 @@ func RBAC(enforcer RBACEnforcer, resource string, auth AuthOpts, checkConditions
 			}
 
 			// Casbin policy check.
-			action := methodToAction(r.Method)
-			allowed, err := enforcer.Enforce(sub.Role, resource, action)
-			if err != nil {
-				writeJSONError(w, http.StatusInternalServerError, "authorization error")
-				return
-			}
-			if !allowed {
-				writeJSONError(w, http.StatusForbidden, "forbidden")
-				return
+			if enforcer != nil {
+				action := methodToAction(r.Method)
+				allowed, err := enforcer.Enforce(sub.Role, resource, action)
+				if err != nil {
+					writeJSONError(w, http.StatusInternalServerError, "authorization error")
+					return
+				}
+				if !allowed {
+					writeJSONError(w, http.StatusForbidden, "forbidden")
+					return
+				}
 			}
 
 			// Role allowlist check (auth.roles).

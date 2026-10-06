@@ -1,8 +1,11 @@
 package dialect
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/teleology-io/yayPI/internal/schema"
 )
@@ -29,8 +32,15 @@ func (Postgres) UpsertIgnore(table string, cols []string, placeholders []string)
 	)
 }
 
-func (Postgres) IsUniqueViolation(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "23505")
+func (Postgres) IsUniqueViolation(err error) bool { return pgCode(err) == "23505" }
+
+// pgCode extracts the SQLSTATE from a pgx error ("" if err is not a Postgres error).
+func pgCode(err error) string {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) {
+		return pgErr.Code
+	}
+	return ""
 }
 
 func (Postgres) FieldTypeToSQL(f schema.Field) string {
@@ -109,3 +119,13 @@ func (d Postgres) MigrationsTableDDL(tableName string) string {
 			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
 		)`, d.QuoteIdent(tableName))
 }
+
+// TranslateDefault: the portable form is Postgres syntax already.
+func (Postgres) TranslateDefault(expr string) string { return expr }
+
+// SQLSTATE 23503 foreign_key_violation, 23502 not_null_violation, 23514 check_violation.
+func (Postgres) IsForeignKeyViolation(err error) bool { return pgCode(err) == "23503" }
+
+func (Postgres) IsNotNullViolation(err error) bool { return pgCode(err) == "23502" }
+
+func (Postgres) IsCheckViolation(err error) bool { return pgCode(err) == "23514" }

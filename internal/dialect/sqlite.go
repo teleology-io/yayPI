@@ -93,3 +93,28 @@ func (d SQLite) MigrationsTableDDL(tableName string) string {
 			applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`, d.QuoteIdent(tableName))
 }
+
+// TranslateDefault maps portable defaults to SQLite expressions. SQLite requires
+// non-literal defaults to be parenthesised.
+func (SQLite) TranslateDefault(expr string) string {
+	switch {
+	case isNowDefault(expr):
+		return "CURRENT_TIMESTAMP"
+	case isUUIDDefault(expr):
+		// RFC 4122 v4 layout built from randomblob.
+		return "(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab', 1 + (abs(random()) % 4), 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))))"
+	}
+	return expr
+}
+
+func (SQLite) IsForeignKeyViolation(err error) bool {
+	return errContainsAny(err, "foreign key constraint failed")
+}
+
+func (SQLite) IsNotNullViolation(err error) bool {
+	return errContainsAny(err, "not null constraint failed")
+}
+
+func (SQLite) IsCheckViolation(err error) bool {
+	return errContainsAny(err, "check constraint failed")
+}

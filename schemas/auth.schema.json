@@ -41,7 +41,10 @@
         "login": { "$ref": "#/$defs/LoginDef" },
         "me": { "$ref": "#/$defs/MeDef" },
         "refresh": { "$ref": "#/$defs/RefreshDef" },
-        "oauth2": { "$ref": "#/$defs/OAuth2Def" }
+        "oauth2": { "$ref": "#/$defs/OAuth2Def" },
+        "cookie": { "$ref": "#/$defs/CookieDef" },
+        "password_reset": { "$ref": "#/$defs/PasswordResetDef" },
+        "email_verification": { "$ref": "#/$defs/EmailVerificationDef" }
       }
     },
     "UserExtensionDef": {
@@ -62,35 +65,87 @@
       "required": ["name", "type"],
       "additionalProperties": false,
       "properties": {
-        "name": { "type": "string", "description": "Field name.", "examples": ["display_name", "bio"] },
+        "name": {
+          "type": "string",
+          "description": "Field name.",
+          "examples": ["display_name", "bio"]
+        },
         "type": {
           "type": "string",
           "description": "Column type.",
-          "enum": ["uuid","string","text","integer","bigint","float","decimal","boolean","timestamptz","date","jsonb","enum","array","bytea"]
+          "enum": ["uuid", "string", "text", "integer", "bigint", "float", "decimal", "boolean", "timestamptz", "date", "jsonb", "enum", "array", "bytea"]
         },
-        "length": { "type": "integer", "description": "Max length for string columns.", "minimum": 1 },
-        "precision": { "type": "integer", "description": "Total digits for decimal columns.", "minimum": 1 },
-        "scale": { "type": "integer", "description": "Decimal digits for decimal columns.", "minimum": 0 },
-        "nullable": { "type": "boolean", "description": "Allow NULL values.", "default": false },
-        "unique": { "type": "boolean", "description": "Add a UNIQUE constraint.", "default": false },
-        "default": { "type": "string", "description": "SQL default expression.", "examples": ["'active'", "now()"] },
-        "index": { "type": "boolean", "description": "Add a single-column index.", "default": false },
-        "immutable": { "type": "boolean", "description": "Accepted on create but stripped from PATCH.", "default": false },
-        "values": { "type": "array", "description": "Allowed values for enum type.", "items": { "type": "string" } },
+        "length": {
+          "type": "integer",
+          "description": "Max length for string columns.",
+          "minimum": 1
+        },
+        "precision": {
+          "type": "integer",
+          "description": "Total digits for decimal columns.",
+          "minimum": 1
+        },
+        "scale": {
+          "type": "integer",
+          "description": "Decimal digits for decimal columns.",
+          "minimum": 0
+        },
+        "nullable": {
+          "type": "boolean",
+          "description": "Allow NULL values.",
+          "default": false
+        },
+        "unique": {
+          "type": "boolean",
+          "description": "Add a UNIQUE constraint.",
+          "default": false
+        },
+        "default": {
+          "type": "string",
+          "description": "SQL default expression.",
+          "examples": ["'active'", "now()"]
+        },
+        "index": {
+          "type": "boolean",
+          "description": "Add a single-column index.",
+          "default": false
+        },
+        "immutable": {
+          "type": "boolean",
+          "description": "Accepted on create but stripped from PATCH.",
+          "default": false
+        },
+        "values": {
+          "type": "array",
+          "description": "Allowed values for enum type.",
+          "items": { "type": "string" }
+        },
         "serialization": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "omit_response": { "type": "boolean", "default": false },
-            "omit_log": { "type": "boolean", "default": false }
+            "omit_response": {
+              "type": "boolean",
+              "default": false
+            },
+            "omit_log": {
+              "type": "boolean",
+              "default": false
+            }
           }
         },
         "access": {
           "type": "object",
           "additionalProperties": false,
           "properties": {
-            "read_roles": { "type": "array", "items": { "type": "string" } },
-            "write_roles": { "type": "array", "items": { "type": "string" } }
+            "read_roles": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "write_roles": {
+              "type": "array",
+              "items": { "type": "string" }
+            }
           }
         },
         "validate": {
@@ -103,7 +158,10 @@
             "min": { "type": "number" },
             "max": { "type": "number" },
             "pattern": { "type": "string" },
-            "format": { "type": "string", "enum": ["email","url","uuid","slug"] },
+            "format": {
+              "type": "string",
+              "enum": ["email", "url", "uuid", "slug"]
+            },
             "message": { "type": "string" }
           }
         }
@@ -136,8 +194,13 @@
         },
         "default_role": {
           "type": "string",
-          "description": "Role assigned to new users.",
+          "description": "Role given to every self-registered user. Callers can never choose their role.",
           "examples": ["member", "user"]
+        },
+        "min_password_length": {
+          "type": "integer",
+          "description": "Minimum password length (max is always 72 bytes, the bcrypt limit).",
+          "default": 8
         }
       }
     },
@@ -165,6 +228,16 @@
           "type": "string",
           "description": "Entity field storing the bcrypt hash to verify against.",
           "examples": ["password_hash"]
+        },
+        "max_attempts": {
+          "type": "integer",
+          "description": "Failed logins per account (4x per IP) within lockout_window before 429. -1 disables.",
+          "default": 5
+        },
+        "lockout_window": {
+          "type": "string",
+          "description": "Window for max_attempts. Duration, e.g. 30s, 5m.",
+          "default": "15m"
         }
       }
     },
@@ -284,6 +357,115 @@
         "username_field": {
           "type": "string",
           "description": "Userinfo JSON field to use as the username."
+        },
+        "id_field": {
+          "type": "string",
+          "description": "Stable provider user id field (default: id for google/github, sub otherwise)."
+        },
+        "email_verified_field": {
+          "type": "string",
+          "description": "Boolean userinfo field asserting the email is verified (default: verified_email for google, email_verified otherwise; GitHub uses /user/emails). Unverified emails are never linked or used to create accounts."
+        },
+        "trust_email": {
+          "type": "boolean",
+          "description": "Skip the verified-email check (only for IdPs that guarantee verified addresses).",
+          "default": false
+        },
+        "pkce": {
+          "type": "boolean",
+          "description": "Use PKCE (S256).",
+          "default": true
+        },
+        "token_delivery": {
+          "type": "string",
+          "description": "How the token reaches success_redirect: fragment (#token=…, default; never sent to servers) or query (legacy).",
+          "enum": ["fragment", "query"],
+          "default": "fragment"
+        }
+      }
+    },
+    "CookieDef": {
+      "type": "object",
+      "description": "Auth cookie settings (refresh token, OAuth state).",
+      "additionalProperties": false,
+      "properties": {
+        "secure": {
+          "type": "boolean",
+          "description": "Secure flag. Set false only for local http development.",
+          "default": true
+        },
+        "same_site": {
+          "type": "string",
+          "description": "SameSite policy.",
+          "enum": ["lax", "strict", "none"],
+          "default": "lax"
+        },
+        "domain": {
+          "type": "string",
+          "description": "Cookie domain."
+        }
+      }
+    },
+    "PasswordResetDef": {
+      "type": "object",
+      "description": "POST /auth/password/forgot and /auth/password/reset. Requires SMTP.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Enable password reset.",
+          "default": false
+        },
+        "expiry": {
+          "type": "string",
+          "description": "Reset token lifetime. Duration, e.g. 30s, 5m.",
+          "default": "1h"
+        },
+        "reset_url": {
+          "type": "string",
+          "description": "Link emailed to the user; {{token}} is replaced. e.g. https://app.example.com/reset?token={{token}}"
+        },
+        "subject": {
+          "type": "string",
+          "description": "Email subject."
+        },
+        "body": {
+          "type": "string",
+          "description": "HTML body; {{link}} is replaced with the reset URL."
+        }
+      }
+    },
+    "EmailVerificationDef": {
+      "type": "object",
+      "description": "Email verification. Requires SMTP.",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Send a verification email on register; enables POST /auth/verify-email and /auth/verify-email/resend.",
+          "default": false
+        },
+        "required": {
+          "type": "boolean",
+          "description": "Refuse password login until verified.",
+          "default": false
+        },
+        "expiry": {
+          "type": "string",
+          "description": "Verification token lifetime. Duration, e.g. 30s, 5m.",
+          "default": "24h"
+        },
+        "verify_url": {
+          "type": "string",
+          "description": "Link emailed to the user; {{token}} is replaced."
+        },
+        "subject": {
+          "type": "string",
+          "description": "Email subject."
+        },
+        "body": {
+          "type": "string",
+          "description": "HTML body; {{link}} is replaced with the verify URL."
         }
       }
     }

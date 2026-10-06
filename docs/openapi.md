@@ -134,11 +134,14 @@ For each CRUD operation on each included endpoint:
 
 | Operation | HTTP | Path | Generated |
 |---|---|---|---|
-| `list` | GET | `/path` | Query params: filter fields, `sort`, `limit`, `cursor`/`page` |
-| `get` | GET | `/path/{id}` | Path param `id`; 200 + 404 responses |
-| `create` | POST | `/path` | Request body with required writable fields; 201 + 422 responses |
-| `update` | PATCH | `/path/{id}` | Path param `id`; optional request body (respects `allowed_fields`); 200 + 404 |
-| `delete` | DELETE | `/path/{id}` | Path param `id`; 204 + 404 responses |
+| `list` | GET | `/path` | Query params: filter fields (with operator note), `sort`, `limit`, `cursor` or `offset`, `fields`, `include` |
+| `get` | GET | `/path/{id}` | Path param `id`, `fields`, `include`; 200 + 404 |
+| `create` | POST | `/path` | `Idempotency-Key` header; body with writable fields (excludes `default_from`); 201, 409, 422 |
+| `update` | PATCH | `/path/{id}` | `If-Match` header; optional body (respects `allowed_fields`, excludes immutable); 200, 404, 409, 412, 422 |
+| `replace` | PUT | `/path/{id}` | Same as `update` |
+| `delete` | DELETE | `/path/{id}` | `If-Match` header; 204, 404, 412 |
+
+Every operation also documents 400 and 429, and 401/403 when auth is required. All errors reference the shared `Error` schema (`error`, `code`, `request_id`, `errors`). Internal tables (refresh tokens, outbox, audit log, …) never appear in specs.
 
 **Entity schemas** in `components/schemas`:
 - All fields except those with `serialization.omit_response: true`

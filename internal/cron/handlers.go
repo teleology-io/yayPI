@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,6 +11,7 @@ import (
 
 	"github.com/teleology-io/yayPI/internal/config"
 	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/internal/netsafe"
 )
 
 // sqlHandler executes a SQL statement on a named database.
@@ -71,11 +71,6 @@ func httpHandler(jobCfg config.JobDef) func(ctx context.Context) error {
 			return fmt.Errorf("job %q: invalid URL: %w", jobCfg.Name, err)
 		}
 
-		// Block private/loopback addresses
-		if err := validateHost(parsed.Hostname()); err != nil {
-			return fmt.Errorf("job %q: %w", jobCfg.Name, err)
-		}
-
 		// Check against allowlist
 		if allowedRaw, ok := jobCfg.Config["allowed_hosts"]; ok {
 			allowed := toStringSlice(allowedRaw)
@@ -99,7 +94,9 @@ func httpHandler(jobCfg config.JobDef) func(ctx context.Context) error {
 			return fmt.Errorf("job %q: creating request: %w", jobCfg.Name, err)
 		}
 
-		resp, err := http.DefaultClient.Do(req)
+		allowPrivate, _ := jobCfg.Config["allow_private_network"].(bool)
+		client := netsafe.NewClient(netsafe.Options{Timeout: timeout, AllowPrivate: allowPrivate})
+		resp, err := client.Do(req)
 		if err != nil {
 			return fmt.Errorf("job %q: HTTP request failed: %w", jobCfg.Name, err)
 		}
@@ -111,48 +108,6 @@ func httpHandler(jobCfg config.JobDef) func(ctx context.Context) error {
 		}
 		return nil
 	}
-}
-
-// validateHost returns an error if the host resolves to a private or loopback address.
-func validateHost(host string) error {
-	// Direct IP check
-	ip := net.ParseIP(host)
-	if ip != nil {
-		return checkIP(ip)
-	}
-	// DNS lookup
-	addrs, err := net.LookupHost(host)
-	if err != nil {
-		return fmt.Errorf("resolving host %q: %w", host, err)
-	}
-	for _, addr := range addrs {
-		ip := net.ParseIP(addr)
-		if ip != nil {
-			if err := checkIP(ip); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// checkIP returns an error if ip is loopback, link-local, or RFC-1918 private.
-func checkIP(ip net.IP) error {
-	if ip.IsLoopback() {
-		return fmt.Errorf("requests to loopback addresses are not allowed")
-	}
-	if ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
-		return fmt.Errorf("requests to link-local addresses are not allowed")
-	}
-	// RFC-1918
-	privateRanges := []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
-	for _, cidr := range privateRanges {
-		_, network, _ := net.ParseCIDR(cidr)
-		if network.Contains(ip) {
-			return fmt.Errorf("requests to private RFC-1918 addresses are not allowed")
-		}
-	}
-	return nil
 }
 
 // hostAllowed checks if host matches any pattern in the allowlist.

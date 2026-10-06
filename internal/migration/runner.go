@@ -61,8 +61,17 @@ func (r *Runner) Status(ctx context.Context) ([]MigrationStatus, error) {
 	applied := make(map[string]MigrationStatus)
 	for rows.Next() {
 		var s MigrationStatus
-		if err := rows.Scan(&s.Name, &s.Checksum, &s.AppliedAt); err != nil {
+		var appliedAt any // time.Time on Postgres/MySQL, text on SQLite
+		if err := rows.Scan(&s.Name, &s.Checksum, &appliedAt); err != nil {
 			return nil, err
+		}
+		switch v := appliedAt.(type) {
+		case time.Time:
+			s.AppliedAt = &v
+		case string:
+			if t, err := time.Parse("2006-01-02 15:04:05", v); err == nil {
+				s.AppliedAt = &t
+			}
 		}
 		s.Pending = false
 		applied[s.Name] = s
@@ -90,10 +99,23 @@ func (r *Runner) Status(ctx context.Context) ([]MigrationStatus, error) {
 	return statuses, nil
 }
 
-// Up applies pending migrations, up to steps (0 = all).
-func (r *Runner) Up(ctx context.Context, steps int) error {
+// Up applies pending migrations, up to steps (0 = all). It holds a cross-process lock
+// for the duration, and refuses to run if an already-applied migration file was edited
+// (checksum drift) unless allowDrift is set.
+func (r *Runner) Up(ctx context.Context, steps int, allowDrift ...bool) error {
+	unlock, err := AcquireLock(ctx, r.db, r.dialect)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	if err := r.ensureTable(ctx); err != nil {
 		return fmt.Errorf("ensuring migrations table: %w", err)
+	}
+	if len(allowDrift) == 0 || !allowDrift[0] {
+		if err := r.Verify(ctx); err != nil {
+			return fmt.Errorf("refusing to migrate: %w (fix the files or pass --allow-drift)", err)
+		}
 	}
 
 	statuses, err := r.Status(ctx)
@@ -121,6 +143,12 @@ func (r *Runner) Up(ctx context.Context, steps int) error {
 
 // Down rolls back applied migrations, exactly steps migrations.
 func (r *Runner) Down(ctx context.Context, steps int) error {
+	unlock, err := AcquireLock(ctx, r.db, r.dialect)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
 	if err := r.ensureTable(ctx); err != nil {
 		return fmt.Errorf("ensuring migrations table: %w", err)
 	}
@@ -199,56 +227,118 @@ func (r *Runner) Verify(ctx context.Context) error {
 	return nil
 }
 
-// applyMigration executes a migration file against the database.
+// applyMigration executes a migration file. The transactional part and the bookkeeping
+// row commit together, so a failure leaves neither behind (on Postgres and SQLite; MySQL
+// commits DDL implicitly, so a failed MySQL migration may be partially applied).
+// Statements after "-- Run outside transaction:" (Postgres CREATE INDEX CONCURRENTLY)
+// run afterwards; they are IF NOT EXISTS, so re-running them by hand is safe.
 func (r *Runner) applyMigration(ctx context.Context, path, name string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading migration file: %w", err)
 	}
-
 	checksum := fmt.Sprintf("%x", sha256.Sum256(data))
-	sqlContent := string(data)
+	txSQL, concurrentSQL := splitConcurrent(string(data))
 
-	txSQL, concurrentSQL := splitConcurrent(sqlContent)
-
-	if strings.TrimSpace(txSQL) != "" {
-		if _, err := r.db.ExecContext(ctx, txSQL); err != nil {
-			return fmt.Errorf("executing migration SQL: %w", err)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	for _, stmt := range SplitStatements(txSQL) {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("executing %q: %w", firstLine(stmt), err)
 		}
 	}
-
-	// Concurrent statements (Postgres CONCURRENTLY indexes) run outside a transaction
-	for _, stmt := range concurrentSQL {
-		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("executing concurrent statement: %w", err)
-		}
-	}
-
 	insert := r.dialect.Rebind(fmt.Sprintf(
 		"INSERT INTO %s (name, checksum) VALUES ($1, $2)",
 		r.dialect.QuoteIdent(migrationsTable),
 	))
-	_, err = r.db.ExecContext(ctx, insert, name, checksum)
-	return err
+	if _, err := tx.ExecContext(ctx, insert, name, checksum); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	for _, stmt := range concurrentSQL {
+		if _, err := r.db.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("migration recorded, but a statement outside the transaction failed (re-run it manually): %q: %w", stmt, err)
+		}
+	}
+	return nil
 }
 
-// rollbackMigration executes a down migration file.
+// rollbackMigration executes a down migration file and removes the bookkeeping row,
+// in one transaction.
 func (r *Runner) rollbackMigration(ctx context.Context, path, upName string) error {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("reading down migration file: %w", err)
 	}
-
-	if _, err := r.db.ExecContext(ctx, string(data)); err != nil {
-		return fmt.Errorf("executing down migration SQL: %w", err)
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
 	}
-
+	for _, stmt := range SplitStatements(string(data)) {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("executing %q: %w", firstLine(stmt), err)
+		}
+	}
 	del := r.dialect.Rebind(fmt.Sprintf(
 		"DELETE FROM %s WHERE name = $1",
 		r.dialect.QuoteIdent(migrationsTable),
 	))
-	_, err = r.db.ExecContext(ctx, del, upName)
-	return err
+	if _, err := tx.ExecContext(ctx, del, upName); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	return tx.Commit()
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i] + " …"
+	}
+	return s
+}
+
+// ApplyStatements runs DDL produced by Engine.Diff directly (auto_migrate), under the
+// migration lock, transactional statements in one transaction and CONCURRENTLY ones
+// after it. Nothing is written to disk or recorded in the migrations table.
+func ApplyStatements(ctx context.Context, db *sql.DB, d dialect.Dialect, stmts []DDLStatement) error {
+	unlock, err := AcquireLock(ctx, db, d)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	var concurrent []DDLStatement
+	for _, s := range stmts {
+		if s.Concurrent {
+			concurrent = append(concurrent, s)
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, s.SQL); err != nil {
+			_ = tx.Rollback()
+			return fmt.Errorf("%s: %w", s.Description, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, s := range concurrent {
+		if _, err := db.ExecContext(ctx, s.SQL); err != nil {
+			return fmt.Errorf("%s: %w", s.Description, err)
+		}
+	}
+	return nil
 }
 
 // splitConcurrent separates regular SQL from lines after "-- Run outside transaction:".

@@ -46,7 +46,8 @@ type Endpoint struct {
 	Handler         string
 	Middleware      []string
 	Auth            *Auth
-	RateLimit       *RateLimit              // optional per-endpoint rate limit
+	RateLimit       *RateLimit // optional per-endpoint rate limit
+	MaxBodyBytes    int64      // > 0 overrides the server body limit
 	List            *ListOpts
 	Get             *GetOpts
 	Create          *CreateOpts
@@ -80,6 +81,7 @@ type RowAccessRule struct {
 // ListOpts holds list endpoint options.
 type ListOpts struct {
 	AllowFilterBy []string
+	Search        []string // fields matched by ?q=
 	AllowSortBy   []string
 	DefaultSort   string
 	Pagination    Pagination
@@ -111,11 +113,13 @@ type CreateOpts struct {
 	Bulk          bool
 	BulkMax       int
 	BulkErrorMode string // abort | partial
+	Strict        bool   // reject unknown body fields
 }
 
 // UpdateOpts holds update endpoint options.
 type UpdateOpts struct {
 	AllowedFields []string
+	Strict        bool // reject unknown body fields
 	Auth          *Auth
 	RowAccess     []RowAccessRule // ABAC: row-level filter rules
 }
@@ -178,6 +182,18 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 		return nil, fmt.Errorf("building built-in User entity: %w", err)
 	}
 	reg.RegisterEntity(builtinUser)
+	reg.RegisterEntity(NewIdempotencyEntity())
+	if len(cfg.Jobs) > 0 && (cfg.Cron.Distributed == nil || *cfg.Cron.Distributed) {
+		reg.RegisterEntity(NewJobLockEntity())
+	}
+	if len(cfg.EmailFiles) > 0 || len(cfg.WebhookFiles) > 0 || authSendsEmail(cfg) {
+		reg.RegisterEntity(NewOutboxEntity())
+	}
+	if cfg.AuthEndpoint != nil {
+		for _, e := range NewAuthTokenEntities() {
+			reg.RegisterEntity(e)
+		}
+	}
 
 	// Register entities; skip any YAML-defined "User" — the built-in takes precedence.
 	for _, ec := range cfg.Entities {
@@ -191,6 +207,13 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 			return nil, fmt.Errorf("building entity %q from %s: %w", ec.Entity.Name, ec.FilePath, err)
 		}
 		reg.RegisterEntity(entity)
+	}
+
+	for _, e := range reg.entities {
+		if e.Audit {
+			reg.RegisterEntity(NewAuditEntity())
+			break
+		}
 	}
 
 	// Register endpoints
@@ -230,6 +253,7 @@ func buildEndpoint(def *config.EndpointDef) *Endpoint {
 		Auth:       buildAuth(def.Auth),
 		RateLimit:  buildRateLimit(def.RateLimit),
 	}
+	ep.MaxBodyBytes, _ = config.ParseByteSize(def.MaxBodySize) // validated in config.Validate
 	if def.List != nil {
 		ep.List = buildListOpts(def.List)
 	}
@@ -291,6 +315,7 @@ func buildRowAccess(rules []config.RowAccessRule) []RowAccessRule {
 func buildListOpts(l *config.ListConfig) *ListOpts {
 	opts := &ListOpts{
 		AllowFilterBy: l.AllowFilterBy,
+		Search:        l.Search,
 		AllowSortBy:   l.AllowSortBy,
 		DefaultSort:   l.DefaultSort,
 		Include:       l.Include,
@@ -334,13 +359,27 @@ func buildCreateOpts(c *config.CreateConfig) *CreateOpts {
 		Bulk:          c.Bulk,
 		BulkMax:       bulkMax,
 		BulkErrorMode: mode,
+		Strict:        c.Strict,
 	}
 }
 
 func buildUpdateOpts(u *config.UpdateConfig) *UpdateOpts {
-	return &UpdateOpts{AllowedFields: u.AllowedFields, Auth: buildAuth(u.Auth), RowAccess: buildRowAccess(u.RowAccess)}
+	return &UpdateOpts{AllowedFields: u.AllowedFields, Strict: u.Strict, Auth: buildAuth(u.Auth), RowAccess: buildRowAccess(u.RowAccess)}
 }
 
 func buildDeleteOpts(d *config.DeleteConfig) *DeleteOpts {
 	return &DeleteOpts{Auth: buildAuth(d.Auth), SoftDelete: d.SoftDelete, RowAccess: buildRowAccess(d.RowAccess)}
 }
+
+// authSendsEmail reports whether the auth endpoints send email (password reset or
+// verification), which goes through the outbox.
+func authSendsEmail(cfg *config.RootConfig) bool {
+	if cfg.AuthEndpoint == nil {
+		return false
+	}
+	a := cfg.AuthEndpoint.Auth
+	return (a.PasswordReset != nil && a.PasswordReset.Enabled) || (a.EmailVerification != nil && a.EmailVerification.Enabled)
+}
+
+// AuthSendsEmail is exported for the server's outbox wiring.
+func AuthSendsEmail(cfg *config.RootConfig) bool { return authSendsEmail(cfg) }

@@ -38,7 +38,7 @@ Or export directly:
 
 ```bash
 export DATABASE_URL=postgres://localhost/my_api
-export JWT_SECRET=a-long-random-string-change-this-in-production
+export JWT_SECRET=$(openssl rand -hex 32)   # must be at least 32 bytes
 ```
 
 The generated `yaypi.yaml` uses `${DATABASE_URL}` and `${JWT_SECRET}` so you never need to hard-code secrets. See [Project Config](project-config.md) for all options.
@@ -199,10 +199,10 @@ curl -X POST http://localhost:8080/api/v1/items \
   -d '{"name": "Widget", "price": "9.99"}'
 ```
 ```json
-{"error": "authentication required"}
+{"error": "authentication required", "code": "unauthorized", "request_id": "…"}
 ```
 
-**Create an item with a validation error (→ 422):**
+**Create an item with a validation error (→ 400):**
 ```bash
 curl -X POST http://localhost:8080/api/v1/items \
   -H "Content-Type: application/json" \
@@ -210,7 +210,8 @@ curl -X POST http://localhost:8080/api/v1/items \
   -d '{"name": "X", "price": "-1"}'
 ```
 ```json
-{"errors": {"name": "must be at least 2 characters", "price": "must be between 0 and 99999.99"}}
+{"error": "validation failed", "code": "validation_failed", "request_id": "…",
+ "errors": {"name": "name must be at least 2 characters", "price": "price must be at least 0"}}
 ```
 
 **Create a valid item (authenticated → 201):**

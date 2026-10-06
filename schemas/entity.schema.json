@@ -70,7 +70,22 @@
           "description": "Database constraints on this entity.",
           "items": { "$ref": "#/$defs/ConstraintDef" }
         },
-        "hooks": { "$ref": "#/$defs/EntityHooksDef" }
+        "hooks": { "$ref": "#/$defs/EntityHooksDef" },
+        "audit": {
+          "type": "boolean",
+          "description": "Record every create/update/delete (actor, field diff) in yaypi_audit_log, in the same transaction. omit_log fields are redacted.",
+          "default": false
+        },
+        "tenant_scoped": {
+          "type": "boolean",
+          "description": "Isolate rows per tenant: queries are restricted to tenant_field = the caller's tenant claim, and the field is set from it on create.",
+          "default": false
+        },
+        "tenant_field": {
+          "type": "string",
+          "description": "Tenant column for tenant_scoped.",
+          "default": "tenant_id"
+        }
       }
     },
     "FieldDef": {
@@ -87,11 +102,7 @@
         "type": {
           "type": "string",
           "description": "Column type.",
-          "enum": [
-            "uuid", "string", "text", "integer", "bigint",
-            "float", "decimal", "boolean", "timestamptz",
-            "date", "jsonb", "enum", "array", "bytea"
-          ]
+          "enum": ["uuid", "string", "text", "integer", "bigint", "float", "decimal", "boolean", "timestamptz", "date", "jsonb", "enum", "array", "bytea"]
         },
         "length": {
           "type": "integer",
@@ -148,7 +159,12 @@
         "references": { "$ref": "#/$defs/ReferenceDef" },
         "serialization": { "$ref": "#/$defs/SerializationDef" },
         "access": { "$ref": "#/$defs/FieldAccessDef" },
-        "validate": { "$ref": "#/$defs/FieldValidateDef" }
+        "validate": { "$ref": "#/$defs/FieldValidateDef" },
+        "default_from": {
+          "type": "string",
+          "description": "Set from the caller on create (client value ignored) and read-only afterwards.",
+          "enum": ["subject.id", "subject.email", "subject.role", "subject.tenant"]
+        }
       }
     },
     "FieldValidateDef": {

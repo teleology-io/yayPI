@@ -2,6 +2,8 @@
 
 Background jobs run on a schedule inside the same process as your API server. They start and stop with `yaypi run`.
 
+**Multiple replicas:** when a database is configured (and `cron.distributed` isn't `false` in `yaypi.yaml`), every run takes a lease row in `yaypi_job_locks`, so each scheduled tick executes on exactly one replica, however many are running. A job never overlaps a still-running previous run on the same instance.
+
 ## File structure
 
 ```yaml
@@ -33,21 +35,21 @@ jobs:
 | `name` | string | yes | Unique name for logging and identification |
 | `description` | string | no | Human-readable description |
 | `schedule` | string | yes | Cron expression or shortcut (see below) |
-| `timezone` | string | no | IANA timezone name (e.g. `America/New_York`); default UTC |
+| `timezone` | string | no | IANA timezone name (e.g. `America/New_York`); default UTC. Invalid names fail startup |
 | `handler` | string | yes | `sql` or `http` |
-| `timeout` | duration | no | Max execution time (default: 30s for HTTP) |
+| `timeout` | duration | no | Max time per attempt (default 5m); the job's context is cancelled after it |
 | `retry` | object | no | Retry configuration |
-| `on_failure` | string | no | `log` (default) |
+| `on_failure` | string | no | `log` (default). Failures are also counted in `yaypi_cron_runs_total` |
 | `config` | map | yes | Handler-specific configuration |
 
 ### `retry` fields
 
 | Field | Type | Description |
 |---|---|---|
-| `max_attempts` | integer | Maximum number of total attempts |
-| `backoff` | string | `exponential` or `linear` |
-| `initial_delay` | duration | Delay before first retry |
-| `max_delay` | duration | Cap on delay between retries |
+| `max_attempts` | integer | Maximum number of total attempts (default 1 — no retry) |
+| `backoff` | string | `exponential` (default, doubles each time) or `fixed` |
+| `initial_delay` | duration | Delay before the first retry (default 1s) |
+| `max_delay` | duration | Cap on the delay between retries (default 1m) |
 
 ## Schedules
 
@@ -106,10 +108,9 @@ config:
   database: primary    # optional; defaults to the default database
 ```
 
-**Security restrictions:**
-- DDL statements (`CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`) are rejected at startup
-- Multi-statement SQL (containing `;` mid-statement) is rejected
-- Only uses parameterized queries via the connection pool
+**Guardrails** (job SQL is trusted config, so these catch mistakes rather than defend against attackers):
+- Statements starting with DDL (`CREATE`, `DROP`, `ALTER`, `TRUNCATE`, `GRANT`, `REVOKE`) are rejected when the job runs
+- Multi-statement SQL (a `;` before the end) is rejected
 
 ## HTTP handler
 
@@ -126,13 +127,10 @@ config:
 ```
 
 **Security restrictions:**
-- Requests to loopback addresses (`127.x.x.x`, `::1`) are always blocked
-- Requests to link-local addresses (`169.254.x.x`) are always blocked
-- Requests to RFC-1918 private addresses (`10.x`, `172.16-31.x`, `192.168.x`) are always blocked
-- DNS names are resolved before checking — hostnames that resolve to blocked IPs are rejected
-- The `allowed_hosts` list is an allowlist; if set, the target hostname must be in the list
-
-These restrictions prevent SSRF (Server-Side Request Forgery) attacks if job configs are user-configurable.
+- The connection is refused if the target's resolved IP is loopback, private (RFC 1918, IPv6 ULA), link-local (including the `169.254.169.254` cloud metadata address), CGNAT, or unspecified. The check runs at connect time, so DNS names and redirects can't be used to bypass it.
+- Set `allow_private_network: true` in `config` for jobs that intentionally call internal services.
+- `allowed_hosts`, if set, is an allowlist of target hostnames.
+- Responses with status ≥ 400 count as failures (and are retried per `retry`).
 
 ## Complete example
 

@@ -39,13 +39,16 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 				},
 			}
 		}
-		// Reusable error schema
+		// Reusable error schema — the envelope every yayPi error uses.
 		s.Components.Schemas["Error"] = &Schema{
 			Type: "object",
 			Properties: map[string]*Schema{
-				"error": {Type: "string"},
+				"error":      {Type: "string", Description: "Human-readable message"},
+				"code":       {Type: "string", Description: "Stable machine-readable code, e.g. validation_failed, not_found, conflict"},
+				"request_id": {Type: "string"},
+				"errors":     {Type: "object", Description: "Per-field messages (validation errors)", AdditionalProperties: &Schema{Type: "string"}},
 			},
-			Required: []string{"error"},
+			Required: []string{"error", "code"},
 		}
 		specs[sm.Name] = s
 	}
@@ -57,6 +60,9 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 	// Build entity component schemas and register in all specs.
 	entitySchemas := make(map[string]*Schema)
 	for _, entity := range reg.Entities() {
+		if entity.Internal {
+			continue
+		}
 		entitySchemas[entity.Name] = entityToSchema(entity)
 	}
 	for _, s := range specs {
@@ -170,7 +176,7 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 	if ep.Specs != nil && ep.Specs.Summary != "" {
 		operation.Summary = ep.Specs.Summary
 	} else {
-		operation.Summary = fmt.Sprintf("%s %s", strings.Title(op), entity.Name) //nolint:staticcheck
+		operation.Summary = fmt.Sprintf("%s %s", strings.ToUpper(op[:1])+op[1:], entity.Name)
 	}
 
 	// Description
@@ -204,36 +210,27 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 		if ep.List != nil {
 			for _, field := range ep.List.AllowFilterBy {
 				params = append(params, Parameter{
-					Name:   field,
-					In:     "query",
-					Schema: &Schema{Type: "string"},
+					Name:        field,
+					In:          "query",
+					Description: "Equality filter. Operators: " + field + "[gt|gte|lt|lte|ne|in|nin|contains|starts_with|is_null]=value (in/nin take comma-separated values).",
+					Schema:      &Schema{Type: "string"},
 				})
 			}
 			if len(ep.List.AllowSortBy) > 0 {
 				params = append(params, Parameter{
 					Name:        "sort",
 					In:          "query",
-					Description: fmt.Sprintf("Sort field and direction. Allowed: %s", strings.Join(ep.List.AllowSortBy, ", ")),
+					Description: fmt.Sprintf("col, col:asc, col:desc or -col. Allowed: %s", strings.Join(ep.List.AllowSortBy, ", ")),
 					Schema:      &Schema{Type: "string"},
 				})
 			}
-			switch ep.List.Pagination.Style {
-			case "cursor":
-				params = append(params,
-					Parameter{Name: "limit", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}},
-					Parameter{Name: "cursor", In: "query", Schema: &Schema{Type: "string"}},
-				)
-			case "offset":
-				params = append(params,
-					Parameter{Name: "limit", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}},
-					Parameter{Name: "offset", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}},
-				)
-			default:
-				params = append(params,
-					Parameter{Name: "limit", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}},
-					Parameter{Name: "page", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}},
-				)
+			params = append(params, Parameter{Name: "limit", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}})
+			if ep.List.Pagination.Style == "offset" {
+				params = append(params, Parameter{Name: "offset", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}})
+			} else {
+				params = append(params, Parameter{Name: "cursor", In: "query", Description: "meta.next_cursor from the previous page", Schema: &Schema{Type: "string"}})
 			}
+			params = append(params, sparseAndIncludeParams(ep.List.Include)...)
 		}
 		operation.Parameters = params
 		operation.Responses["200"] = Response{
@@ -245,7 +242,12 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 						"data": {Type: "array", Items: &Schema{Ref: entityRef}},
 						"meta": {Type: "object", Properties: map[string]*Schema{
 							"count":       {Type: "integer"},
+							"limit":       {Type: "integer"},
+							"has_more":    {Type: "boolean"},
 							"next_cursor": {Type: "string", Nullable: true},
+							"offset":      {Type: "integer"},
+							"page":        {Type: "integer"},
+							"total":       {Type: "integer"},
 						}},
 					},
 				}},
@@ -254,6 +256,9 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 
 	case "get":
 		operation.Parameters = []Parameter{idParam}
+		if ep.Get != nil {
+			operation.Parameters = append(operation.Parameters, sparseAndIncludeParams(ep.Get.Include)...)
+		}
 		operation.Responses["200"] = Response{
 			Description: "OK",
 			Content: map[string]MediaType{
@@ -271,6 +276,11 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 		}
 
 	case "create":
+		operation.Parameters = []Parameter{{
+			Name: "Idempotency-Key", In: "header",
+			Description: "Makes the request safe to retry: the first response is replayed for 24h.",
+			Schema:      &Schema{Type: "string"},
+		}}
 		operation.RequestBody = &RequestBody{
 			Required: true,
 			Content: map[string]MediaType{
@@ -293,8 +303,8 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 			Content:     map[string]MediaType{"application/json": {Schema: errorRef}},
 		}
 
-	case "update":
-		operation.Parameters = []Parameter{idParam}
+	case "update", "replace":
+		operation.Parameters = []Parameter{idParam, ifMatchParam}
 		operation.RequestBody = &RequestBody{
 			Required: true,
 			Content: map[string]MediaType{
@@ -318,7 +328,7 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 		}
 
 	case "delete":
-		operation.Parameters = []Parameter{idParam}
+		operation.Parameters = []Parameter{idParam, ifMatchParam}
 		operation.Responses["204"] = Response{Description: "No Content"}
 		operation.Responses["404"] = Response{
 			Description: "Not Found",
@@ -326,7 +336,56 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 		}
 	}
 
+	addErrorResponses(operation, op, authConfigured && requiresAuth(op, ep))
 	return operation
+}
+
+var ifMatchParam = Parameter{
+	Name: "If-Match", In: "header",
+	Description: "ETag from a previous read; the write fails with 412 if the record changed since.",
+	Schema:      &Schema{Type: "string"},
+}
+
+func sparseAndIncludeParams(include []string) []Parameter {
+	params := []Parameter{{Name: "fields", In: "query", Description: "Comma-separated fields to return", Schema: &Schema{Type: "string"}}}
+	if len(include) > 0 {
+		params = append(params, Parameter{
+			Name: "include", In: "query",
+			Description: "Comma-separated relations to embed: " + strings.Join(include, ", "),
+			Schema:      &Schema{Type: "string"},
+		})
+	}
+	return params
+}
+
+// addErrorResponses documents the error statuses each operation can return.
+func addErrorResponses(op *Operation, kind string, authed bool) {
+	errRef := map[string]MediaType{"application/json": {Schema: &Schema{Ref: "#/components/schemas/Error"}}}
+	add := func(code, desc string) {
+		if _, exists := op.Responses[code]; !exists {
+			op.Responses[code] = Response{Description: desc, Content: errRef}
+		}
+	}
+	add("400", "Bad Request (validation_failed, bad_request)")
+	if authed {
+		add("401", "Unauthorized")
+		add("403", "Forbidden")
+	}
+	switch kind {
+	case "create":
+		add("409", "Conflict (duplicate unique value)")
+		add("422", "Unprocessable (reference or constraint violation, or hook rejection)")
+	case "update", "replace":
+		add("404", "Not Found")
+		add("409", "Conflict (duplicate unique value)")
+		add("412", "Precondition Failed (If-Match did not match)")
+		add("422", "Unprocessable (reference or constraint violation, or hook rejection)")
+	case "delete":
+		add("404", "Not Found")
+		add("412", "Precondition Failed (If-Match did not match)")
+		add("422", "Unprocessable (still referenced)")
+	}
+	add("429", "Too Many Requests")
 }
 
 // buildCreateSchema returns an inline request body schema for create — all writable fields.
@@ -340,7 +399,7 @@ func buildCreateSchema(entity *schema.Entity) *Schema {
 		if f.PrimaryKey || f.OmitResponse {
 			continue
 		}
-		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" {
+		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" || f.DefaultFrom != "" {
 			continue
 		}
 		prop := fieldSchema(f.Type, f.EnumValues)
@@ -374,7 +433,7 @@ func buildUpdateSchema(entity *schema.Entity, ep *schema.Endpoint) *Schema {
 		Properties: make(map[string]*Schema),
 	}
 	for _, f := range entity.Fields {
-		if f.PrimaryKey || f.OmitResponse {
+		if f.PrimaryKey || f.OmitResponse || f.Immutable || f.DefaultFrom != "" {
 			continue
 		}
 		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" {
@@ -415,7 +474,7 @@ func buildIDParam(entity *schema.Entity) Parameter {
 // list/create use the base path; get/update/delete append /{id} if not already present.
 func resolvePath(path, op string) string {
 	switch op {
-	case "get", "update", "delete":
+	case "get", "update", "replace", "delete":
 		if strings.Contains(path, "{") {
 			return path
 		}
@@ -436,6 +495,8 @@ func attachOperation(item *PathItem, op string, operation *Operation) {
 		item.Post = operation
 	case "update":
 		item.Patch = operation
+	case "replace":
+		item.Put = operation
 	case "delete":
 		item.Delete = operation
 	}
@@ -458,7 +519,7 @@ func requiresAuth(op string, ep *schema.Endpoint) bool {
 		if ep.Create != nil {
 			opAuth = ep.Create.Auth
 		}
-	case "update":
+	case "update", "replace":
 		if ep.Update != nil {
 			opAuth = ep.Update.Auth
 		}
@@ -467,8 +528,8 @@ func requiresAuth(op string, ep *schema.Endpoint) bool {
 			opAuth = ep.Delete.Auth
 		}
 	}
-	if opAuth != nil {
-		return opAuth.Require
+	if opAuth == nil {
+		opAuth = ep.Auth
 	}
-	return ep.Auth != nil && ep.Auth.Require
+	return opAuth != nil && (opAuth.Require || len(opAuth.Roles) > 0 || len(opAuth.Conditions) > 0)
 }

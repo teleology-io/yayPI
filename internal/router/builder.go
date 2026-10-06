@@ -3,10 +3,11 @@ package router
 import (
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
-	chiMiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/rs/zerolog/log"
+	"github.com/teleology-io/yayPI/internal/apierr"
 	"github.com/teleology-io/yayPI/internal/auth"
 	"github.com/teleology-io/yayPI/internal/handler"
 	"github.com/teleology-io/yayPI/internal/health"
@@ -15,24 +16,34 @@ import (
 	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/policy"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/internal/token"
 	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
 // Config holds router-building configuration.
 type Config struct {
-	BaseURL        string
-	AuthSecret     []byte
-	AuthAlg        string
-	Enforcer       *policy.Engine
-	AuthHandler    *auth.Handler           // optional; mounts register/login/me/oauth2 routes
-	OpenAPIHandler *openapi.Handler        // optional; serves /openapi/{name}.json
-	HealthHandler  *health.Handler         // optional; mounts /health and /ready
-	AllowedOrigins []string                // CORS: permitted origins; ["*"] allows all
-	RateLimit      *middleware.RateLimiter // optional; global rate limiter
-	APIKeyHeader   string                  // header name for API key (default: X-API-Key)
-	APIKeyParam    string                  // optional query param for API key
-	APIKeyLookup   middleware.APIKeyLookup // optional; enables API key auth
-	Dispatcher     *plugin.Dispatcher      // optional; resolves custom-route `handler:` names
+	BaseURL         string
+	Tokens          *token.Keys                 // access token verifier; nil = no JWT auth
+	ValidateSubject middleware.SubjectValidator // optional per-request revocation / role refresh
+	Enforcer        *policy.Engine
+	AuthHandler     *auth.Handler              // optional; mounts register/login/me/oauth2 routes
+	OpenAPIHandler  *openapi.Handler           // optional; serves /openapi/{name}.json
+	HealthHandler   *health.Handler            // optional; mounts /health and /ready
+	MaxBodyBytes    int64                      // request body cap; <= 0 disables
+	RequestTimeout  time.Duration              // request context deadline; <= 0 disables
+	CORS            middleware.CORSOptions     // CORS: AllowedOrigins empty disables; ["*"] allows any origin without credentials
+	RateLimit       *middleware.RateLimiter    // optional; global rate limiter
+	TrustedProxies  middleware.TrustedProxies  // peers whose X-Forwarded-For / X-Real-IP are believed
+	APIKeyHeader    string                     // header name for API key (default: X-API-Key)
+	APIKeyParam     string                     // optional query param for API key
+	APIKeyLookup    middleware.APIKeyLookup    // optional; enables API key auth
+	Dispatcher      *plugin.Dispatcher         // optional; resolves custom-route `handler:` names
+	RequestObserver middleware.RequestObserver // optional; per-request metrics
+	SecurityHeaders bool                       // add default security headers
+	HSTSMaxAge      int                        // > 0 adds Strict-Transport-Security
+	MetricsHandler  http.Handler               // optional; mounted at MetricsPath outside base_url
+	MetricsPath     string
+	MetricsToken    string // bearer token required to scrape metrics ("" = open)
 }
 
 // Build constructs a chi.Router from the schema registry and config.
@@ -44,14 +55,26 @@ func Build(
 	r := chi.NewRouter()
 
 	// Global middleware
-	r.Use(chiMiddleware.RealIP)
+	r.Use(middleware.ClientIP(cfg.TrustedProxies))
 	r.Use(middleware.RequestID)
-	r.Use(middleware.DefaultLogger())
+	r.Use(middleware.Trace)
+	r.Use(middleware.Logger(log.Logger, cfg.RequestObserver))
 	r.Use(middleware.Recover)
-	if len(cfg.AllowedOrigins) > 0 {
-		r.Use(middleware.CORS(cfg.AllowedOrigins))
+	if cfg.SecurityHeaders {
+		r.Use(middleware.SecurityHeaders(cfg.HSTSMaxAge))
 	}
-	if cfg.RateLimit != nil {
+	// The body limit is applied per route (see buildMiddlewareChain) rather than globally,
+	// so an endpoint can raise it with max_body_size — a global MaxBytesReader could only
+	// ever be tightened further down the chain.
+	if cfg.RequestTimeout > 0 {
+		r.Use(middleware.Timeout(cfg.RequestTimeout))
+	}
+	if len(cfg.CORS.AllowedOrigins) > 0 {
+		r.Use(middleware.CORS(cfg.CORS))
+	}
+	// An IP-keyed global limiter runs for every request. A user-keyed one needs the
+	// authenticated subject, so it is mounted per route after auth (buildMiddlewareChain).
+	if cfg.RateLimit != nil && !cfg.RateLimit.KeyByUser() {
 		r.Use(cfg.RateLimit.Handler)
 	}
 
@@ -60,6 +83,21 @@ func Build(
 	if cfg.HealthHandler != nil {
 		cfg.HealthHandler.Mount(r)
 	}
+	if cfg.MetricsHandler != nil {
+		path := cfg.MetricsPath
+		if path == "" {
+			path = "/metrics"
+		}
+		r.Get(path, middleware.BearerToken(cfg.MetricsToken, cfg.MetricsHandler).ServeHTTP)
+	}
+
+	// JSON 404/405 in the standard error envelope instead of chi's plain text.
+	r.NotFound(func(w http.ResponseWriter, req *http.Request) {
+		apierr.Write(w, middleware.GetRequestID(req), http.StatusNotFound, "route not found")
+	})
+	r.MethodNotAllowed(func(w http.ResponseWriter, req *http.Request) {
+		apierr.Write(w, middleware.GetRequestID(req), http.StatusMethodNotAllowed, "method not allowed")
+	})
 
 	// Global OPTIONS catch-all so chi never returns 405 for CORS preflight.
 	// The CORS middleware above has already written the Allow-* headers before
@@ -75,7 +113,12 @@ func Build(
 
 	r.Route(baseURL, func(r chi.Router) {
 		if cfg.AuthHandler != nil {
-			cfg.AuthHandler.Mount(r)
+			r.Group(func(r chi.Router) {
+				if cfg.MaxBodyBytes > 0 {
+					r.Use(middleware.BodyLimit(cfg.MaxBodyBytes))
+				}
+				cfg.AuthHandler.Mount(r)
+			})
 		}
 		if cfg.OpenAPIHandler != nil {
 			cfg.OpenAPIHandler.Mount(r)
@@ -158,6 +201,13 @@ func registerCRUDOp(
 		}
 		r.With(mws...).Patch(itemPath, factory.Update(entity, opts))
 
+	case "replace":
+		opts := ep.Update
+		if opts == nil {
+			opts = &schema.UpdateOpts{}
+		}
+		r.With(mws...).Put(itemPath, factory.Replace(entity, opts))
+
 	case "delete":
 		opts := ep.Delete
 		if opts == nil {
@@ -194,7 +244,7 @@ func wrapRouteHandler(fn sdk.RouteHandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		rc := sdk.RouteContext{Ctx: r.Context(), Request: r, Response: w}
 		if sub := middleware.SubjectFromContext(r.Context()); sub != nil {
-			rc.Subject = &sdk.Subject{ID: sub.ID, Role: sub.Role, Email: sub.Email}
+			rc.Subject = &sdk.Subject{ID: sub.ID, Role: sub.Role, Email: sub.Email, Tenant: sub.Tenant}
 		}
 		fn(rc)
 	}
@@ -217,7 +267,7 @@ func resolveOpAuth(ep *schema.Endpoint, op string) *schema.Auth {
 		if ep.Create != nil {
 			opAuth = ep.Create.Auth
 		}
-	case "update":
+	case "update", "replace":
 		if ep.Update != nil {
 			opAuth = ep.Update.Auth
 		}
@@ -241,38 +291,63 @@ func buildMiddlewareChain(
 ) []func(http.Handler) http.Handler {
 	var mws []func(http.Handler) http.Handler
 
-	// Per-endpoint rate limiter (takes precedence over global).
+	if limit := cfg.MaxBodyBytes; limit > 0 || ep.MaxBodyBytes > 0 {
+		if ep.MaxBodyBytes > 0 {
+			limit = ep.MaxBodyBytes
+		}
+		mws = append(mws, middleware.BodyLimit(limit))
+	}
+
+	// Per-endpoint rate limiter. It applies in addition to the global limiter — a request
+	// must pass both. IP-keyed limiters run first so they shed load before auth work;
+	// user-keyed ones run after auth so the subject is known.
+	var epLimiter *middleware.RateLimiter
 	if ep.RateLimit != nil && ep.RateLimit.RequestsPerMinute > 0 {
 		rps := float64(ep.RateLimit.RequestsPerMinute) / 60.0
 		burst := ep.RateLimit.Burst
 		if burst <= 0 {
 			burst = ep.RateLimit.RequestsPerMinute
 		}
-		mws = append(mws, middleware.NewRateLimiter(burst, rps).Handler)
+		epLimiter = middleware.NewRateLimiter(burst, rps, ep.RateLimit.KeyBy)
+	}
+	if epLimiter != nil && !epLimiter.KeyByUser() {
+		mws = append(mws, epLimiter.Handler)
 	}
 
 	auth := resolveOpAuth(ep, op)
 
-	requireAuth := auth != nil && auth.Require
+	// roles/conditions only make sense for an authenticated caller, so declaring either
+	// implies require: true — otherwise an anonymous request would skip the check.
+	requireAuth := auth != nil && (auth.Require || len(auth.Roles) > 0 || len(auth.Conditions) > 0)
 
 	// API key auth middleware (runs before JWT so either can satisfy auth).
 	if cfg.APIKeyLookup != nil {
 		mws = append(mws, middleware.APIKeyAuth(cfg.APIKeyHeader, cfg.APIKeyParam, cfg.APIKeyLookup))
 	}
 
-	// JWT auth middleware
-	if cfg.AuthSecret != nil && cfg.AuthAlg != "" {
-		mws = append(mws, middleware.RequireAuth(cfg.AuthSecret, cfg.AuthAlg, requireAuth))
+	// JWT auth middleware. Mounted whenever tokens are configured so optional-auth routes
+	// still see the caller; with no token config, RBAC below fails closed for require: true.
+	if cfg.Tokens != nil {
+		mws = append(mws, middleware.RequireAuth(cfg.Tokens, requireAuth, cfg.ValidateSubject))
 	}
 
-	// RBAC + roles + conditions middleware
-	if cfg.Enforcer != nil && requireAuth {
-		opts := middleware.AuthOpts{Require: requireAuth}
-		if auth != nil {
-			opts.Roles = auth.Roles
-			opts.Conditions = auth.Conditions
+	if cfg.RateLimit != nil && cfg.RateLimit.KeyByUser() {
+		mws = append(mws, cfg.RateLimit.Handler)
+	}
+	if epLimiter != nil && epLimiter.KeyByUser() {
+		mws = append(mws, epLimiter.Handler)
+	}
+
+	// RBAC + roles + conditions middleware. Mounted for every authenticated route: the
+	// Casbin check runs only when a policy engine is configured, but roles/conditions are
+	// always enforced — they must never silently disappear because Casbin is absent.
+	if requireAuth {
+		opts := middleware.AuthOpts{Require: true, Roles: auth.Roles, Conditions: auth.Conditions}
+		var enforcer middleware.RBACEnforcer
+		if cfg.Enforcer != nil {
+			enforcer = cfg.Enforcer
 		}
-		mws = append(mws, middleware.RBAC(cfg.Enforcer, entity.Name, opts, policy.EvalConditions))
+		mws = append(mws, middleware.RBAC(enforcer, entity.Name, opts, policy.EvalConditions))
 	}
 
 	return mws

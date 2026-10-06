@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 	"unicode"
 
@@ -24,6 +25,7 @@ func buildEntity(ec *config.EntityConfig) (*Entity, error) {
 		Database:   def.Database,
 		SoftDelete: def.SoftDelete,
 		Timestamps: def.Timestamps,
+		Audit:      def.Audit,
 	}
 
 	// Build fields
@@ -33,6 +35,24 @@ func buildEntity(ec *config.EntityConfig) (*Entity, error) {
 			return nil, fmt.Errorf("field %q: %w", fd.Name, err)
 		}
 		entity.Fields = append(entity.Fields, field)
+	}
+
+	if def.TenantScoped {
+		col := def.TenantField
+		if col == "" {
+			col = "tenant_id"
+		}
+		found := false
+		for i := range entity.Fields {
+			if entity.Fields[i].Name == col || entity.Fields[i].ColumnName == col {
+				entity.Fields[i].DefaultFrom = "subject.tenant"
+				entity.TenantColumn = entity.Fields[i].ColumnName
+				found = true
+			}
+		}
+		if !found {
+			return nil, fmt.Errorf("tenant_scoped: entity has no field %q (set tenant_field or add the field)", col)
+		}
 	}
 
 	// Add timestamp fields if enabled
@@ -122,6 +142,12 @@ func buildField(fd config.FieldDef) (Field, error) {
 		Scale:        fd.Scale,
 		Index:        fd.Index,
 		Immutable:    fd.Immutable,
+		DefaultFrom:  fd.DefaultFrom,
+	}
+	switch fd.DefaultFrom {
+	case "", "subject.id", "subject.email", "subject.role", "subject.tenant":
+	default:
+		return Field{}, fmt.Errorf("default_from %q must be subject.id, subject.email or subject.role", fd.DefaultFrom)
 	}
 
 	if fd.References != nil {
@@ -148,6 +174,18 @@ func buildField(fd config.FieldDef) (Field, error) {
 			Pattern:   fd.Validate.Pattern,
 			Format:    fd.Validate.Format,
 			Message:   fd.Validate.Message,
+		}
+		if fd.Validate.Pattern != "" {
+			re, err := regexp.Compile(fd.Validate.Pattern)
+			if err != nil {
+				return Field{}, fmt.Errorf("validate.pattern: %w", err)
+			}
+			f.Validate.Regexp = re
+		}
+		switch fd.Validate.Format {
+		case "", "email", "url", "uuid", "slug":
+		default:
+			return Field{}, fmt.Errorf("validate.format %q must be email, url, uuid or slug", fd.Validate.Format)
 		}
 	}
 

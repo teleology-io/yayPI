@@ -28,6 +28,7 @@ type Manager struct {
 	dbs       map[string]*DB
 	defaultDB string
 	entityDB  map[string]string // entity name → db name
+	order     []string
 }
 
 // NewManager creates a Manager from a list of DBConfig entries and connects to each.
@@ -59,15 +60,28 @@ func NewManager(cfg []config.DBConfig) (*Manager, error) {
 			return nil, fmt.Errorf("opening database %q (%s): %w", dbCfg.Name, dsn, err)
 		}
 
-		if dbCfg.MaxOpenConns > 0 {
-			sqlDB.SetMaxOpenConns(dbCfg.MaxOpenConns)
+		// Bounded pool by default: an unbounded pool lets a traffic spike exhaust the
+		// database's connection limit.
+		maxOpen := dbCfg.MaxOpenConns
+		if maxOpen <= 0 {
+			maxOpen = 25
 		}
-		if dbCfg.MaxIdleConns > 0 {
-			sqlDB.SetMaxIdleConns(dbCfg.MaxIdleConns)
+		maxIdle := dbCfg.MaxIdleConns
+		if maxIdle <= 0 || maxIdle > maxOpen {
+			maxIdle = maxOpen
 		}
-		if dbCfg.ConnMaxLifetime > 0 {
-			sqlDB.SetConnMaxLifetime(dbCfg.ConnMaxLifetime)
+		lifetime := dbCfg.ConnMaxLifetime
+		if lifetime <= 0 {
+			lifetime = 30 * time.Minute
 		}
+		idleTime := dbCfg.ConnMaxIdleTime
+		if idleTime <= 0 {
+			idleTime = 5 * time.Minute
+		}
+		sqlDB.SetMaxOpenConns(maxOpen)
+		sqlDB.SetMaxIdleConns(maxIdle)
+		sqlDB.SetConnMaxLifetime(lifetime)
+		sqlDB.SetConnMaxIdleTime(idleTime)
 
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := sqlDB.PingContext(ctx); err != nil {
@@ -77,6 +91,7 @@ func NewManager(cfg []config.DBConfig) (*Manager, error) {
 		cancel()
 
 		m.dbs[dbCfg.Name] = &DB{SQL: sqlDB, Dialect: d}
+		m.order = append(m.order, dbCfg.Name)
 
 		if dbCfg.Default || m.defaultDB == "" {
 			m.defaultDB = dbCfg.Name
@@ -98,6 +113,12 @@ func (m *Manager) Get(name string) (*DB, error) {
 	}
 	return db, nil
 }
+
+// Names returns the configured database names in config order.
+func (m *Manager) Names() []string { return m.order }
+
+// DefaultName returns the name of the default database.
+func (m *Manager) DefaultName() string { return m.defaultDB }
 
 // Default returns the default DB.
 func (m *Manager) Default() *DB {

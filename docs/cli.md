@@ -104,7 +104,7 @@ On startup, seed files (`kind: seed`) are applied automatically before routes ar
 
 ### `yaypi seed`
 
-Run seed files manually (outside of server startup). Useful for populating a fresh database or re-seeding in CI.
+Apply seed files. Seeds are not applied by `yaypi run`; run this after `yaypi migrate up` (in a deploy step or CI). In `User` seeds, a `password` value is bcrypt-hashed into `password_hash`.
 
 ```bash
 yaypi seed
@@ -151,7 +151,7 @@ yaypi migrate generate --name add_user_bio
 INF migration files generated up=migrations/20240315120000_add_user_bio.up.sql down=migrations/20240315120000_add_user_bio.down.sql
 ```
 
-If the schema is already up to date (no diff), no files are generated and the command exits cleanly.
+Each configured database is diffed separately. Files for the default database go to `migrations/` next to `yaypi.yaml`, and files for any other database go to `migrations/<name>/`. If the schema is already up to date (no diff), no files are generated and the command exits cleanly.
 
 ---
 
@@ -168,7 +168,10 @@ yaypi migrate up --steps 1
 
 | Flag | Default | Description |
 |---|---|---|
-| `--steps` | `0` (all) | Number of pending migrations to apply |
+| `--steps` | `0` (all) | Number of pending migrations to apply per database |
+| `--allow-drift` | `false` | Apply even if an already-applied file's checksum changed |
+
+Runs for every database, holding a database lock so concurrent runs wait their turn. Each migration and its bookkeeping row commit in one transaction. If an applied migration file was edited since it ran, the command refuses to continue unless you pass `--allow-drift`.
 
 **Output:**
 ```
@@ -190,6 +193,7 @@ yaypi migrate down --steps 1
 | Flag | Required | Description |
 |---|---|---|
 | `--steps` | yes | Number of migrations to roll back |
+| `--database` | no | Database to roll back (default: the default database) |
 
 `--steps` is required to prevent accidental rollbacks.
 
@@ -205,9 +209,10 @@ yaypi migrate status
 
 **Output:**
 ```
-APPLIED  20240315120000_create_users     (at 2024-03-15 12:00:00 +0000 UTC)
-APPLIED  20240315120001_create_posts     (at 2024-03-15 12:00:01 +0000 UTC)
-PENDING  20240315120002_add_user_bio
+database primary (migrations):
+  APPLIED  20240315120000_create_users.up.sql
+  APPLIED  20240315120001_create_posts.up.sql
+  PENDING  20240315120002_add_user_bio.up.sql
 ```
 
 ---
@@ -229,6 +234,18 @@ INF all migration checksums verified
 ```
 ERR checksum mismatch for migration "20240315120000_create_users"
 ```
+
+### `yaypi apikey generate`
+
+Create an API key for a DB-backed key table (`auth.api_keys.entity`). Prints the key, which you give to the client, and its SHA-256 digest, which you store in the key column. Only the digest is ever stored.
+
+```bash
+yaypi apikey generate
+key:    yk_Qm9…   (give this to the client; it is not stored)
+digest: 4be1…     (store this in the key column)
+```
+
+---
 
 ## CI/CD recommended pipeline
 

@@ -1,6 +1,6 @@
 # Complete Config Field Reference
 
-Every YAML field accepted by yayPi, organized by file kind.
+Every YAML field accepted by yayPi, organized by file kind. `${VAR}` and `${VAR:-default}` are interpolated from the environment in every file; an unset variable becomes `""` (which validation then rejects for secrets and DSNs).
 
 ---
 
@@ -9,89 +9,135 @@ Every YAML field accepted by yayPi, organized by file kind.
 ```yaml
 version: "1"                    # required
 project:
-  name: string                  # project name; used in logs and default OpenAPI tags
+  name: string                  # project name; default JWT issuer and OpenAPI tag
   base_url: /api/v1             # URL prefix for all routes
 
 server:
   port: 8080
   read_timeout: 30s
+  read_header_timeout: 10s      # slowloris protection (default 10s)
   write_timeout: 30s
+  idle_timeout: 120s            # keep-alive idle (default 120s)
+  request_timeout: 30s          # request context deadline incl. queries → 504 (default: write_timeout)
   shutdown_timeout: 10s
-  max_request_body_size: 4MB
+  drain_delay: 0s               # after SIGTERM: /ready fails, keep serving this long (e.g. 5s on k8s)
+  max_request_body_size: 1MB    # default 1MB; oversize → 413
   max_header_bytes: 1MB
-  allowed_origins: []           # CORS origins; ["*"] = allow all
+  trusted_proxies: [10.0.0.0/8] # only these peers' X-Forwarded-For / X-Real-IP are believed
+  allowed_origins: []           # CORS; "*" = any origin WITHOUT credentials; listed origins get credentials
+  cors:
+    allowed_headers: [...]      # default: Authorization, Content-Type, Accept, X-API-Key, X-Request-ID, If-Match, Idempotency-Key
+    allowed_methods: [...]      # default: GET, POST, PUT, PATCH, DELETE, OPTIONS
+    exposed_headers: [ETag, X-Request-ID]
+    max_age: 600
+  security_headers: true        # nosniff / frame DENY / no-referrer / CSP (default true)
+  hsts_max_age: 0               # > 0 adds Strict-Transport-Security (set when HTTPS-only)
+  idempotency_ttl: 24h          # Idempotency-Key replay window
+  strict_startup: true          # degraded subsystems (cron, OpenAPI, email w/o SMTP) fail boot (default true)
   tls:
     cert_file: string
     key_file: string
   health:
-    enabled: true               # mount liveness + readiness endpoints
-    path: /health               # GET /health → 200 always (liveness)
-    readiness_path: /ready      # GET /ready  → 200 if all DBs reachable, 503 otherwise
+    enabled: true
+    path: /health               # liveness: always 200
+    readiness_path: /ready      # 200 if all DBs reachable; 503 otherwise or while draining (no error text exposed)
   rate_limit:
-    requests_per_minute: 60     # token bucket fill rate
-    burst: 20                   # bucket capacity (allows short bursts above the rate)
-    key_by: ip                  # ip (default) | user (JWT sub claim)
+    requests_per_minute: 60     # token bucket refill rate
+    burst: 20                   # bucket capacity
+    key_by: ip                  # ip (default) | user (subject id; mounted after auth per route)
 
 databases:
   - name: primary               # logical name; referenced by entity.database
-    driver: postgres            # postgres/postgresql | mysql/mariadb | sqlite/sqlite3
-    dsn: ${DATABASE_URL}        # Postgres: URL; MySQL: user:pass@tcp(host)/db; SQLite: path or :memory:
-    max_open_conns: 25
-    max_idle_conns: 5
-    conn_max_lifetime: 1h
-    default: true               # used when entity has no database: field
-    read_only: false            # disallow writes on this connection
-    schema: public              # PostgreSQL schema name
+    driver: postgres            # postgres/postgresql | mysql | sqlite/sqlite3
+    dsn: ${DATABASE_URL}        # required (empty = validation error)
+    max_open_conns: 25          # default 25
+    max_idle_conns: 25          # default = max_open_conns
+    conn_max_lifetime: 30m      # default 30m
+    conn_max_idle_time: 5m      # default 5m
+    default: true               # used when entity has no database:
 
 auth:
-  provider: jwt
-  secret: ${JWT_SECRET}         # HMAC signing secret — always use env var
-  algorithm: HS256              # HS256 | HS384 | HS512
-  reject_algorithms: [none]     # always include "none"
-  expiry: 24h                   # informational; exp claim is always validated
+  secret: ${JWT_SECRET}         # HS* key, >= 32 bytes (validated when any auth is used)
+  algorithm: HS256              # HS256 (default) | HS384 | HS512 | RS256/384/512 | ES256/384/512
+  private_key_file: ./keys/jwt.pem   # RS*/ES*: signing key (auth endpoints need it)
+  public_key_file: ./keys/jwt.pub    # RS*/ES*: verify key (derived from private key if unset)
+  key_id: k1                    # "kid" header + JWKS key id
+  issuer: my-api                # "iss" on issued tokens (default project.name); verified only when set
+  audience: my-clients          # "aud"; verified when set
+  expiry: 15m                   # access token TTL; default 15m with refresh enabled, else 1h
+  revocation_check: false       # re-read user per request: deletion/role change/logout-all/reset apply instantly
   api_keys:
-    header: X-API-Key           # request header to check (default: X-API-Key)
-    query_param: api_key        # optional: also accept ?api_key= query param
-    keys:                       # static key list (use this OR entity below, not both)
+    header: X-API-Key           # default X-API-Key
+    query_param: api_key        # discouraged (keys leak into logs); warns at boot
+    keys:                       # static keys (use this OR entity)
       - key: ${ADMIN_API_KEY}
         role: admin
-      - key: ${READONLY_API_KEY}
-        role: readonly
-    entity: ApiKey              # DB-backed: entity name containing key records
-    key_field: token            # column holding the key value (default: token)
-    role_field: role            # column holding the role (default: role)
+        name: ci                # subject id (default apikey:<index>)
+    entity: ApiKey              # DB-backed keys
+    key_field: token            # column holding the key DIGEST (default token)
+    role_field: role            # default role
+    subject_field: user_id      # subject id column (default user_id if present, else PK)
+    key_hash: sha256            # sha256 (default; store output of `yaypi apikey generate`) | plain (legacy)
+    # optional columns honoured automatically: expires_at, revoked_at, deleted_at (soft delete)
 
 policy:
-  engine: casbin
-  model: ./policies/model.conf
-  adapter: file                 # file | database
-  adapter_table: casbin_rules   # table name when adapter: database
+  engine: casbin                # any init error fails startup (never fails open)
+  model: ./policies/model.conf  # relative to yaypi.yaml
+  adapter: file                 # only "file" is supported
 
-auto_migrate: false             # apply schema diff at startup (dev only)
+auto_migrate: false             # apply schema diff at boot under a lock, no files written (dev only)
+
+smtp:                           # email triggers, password reset, verification
+  host: smtp.example.com        # empty fields fall back to SMTP_HOST / SMTP_PORT / SMTP_USER /
+  port: 587                     #   SMTP_PASS / SMTP_SENDER_NAME / SMTP_SENDER_EMAIL
+  username: ${SMTP_USER}
+  password: ${SMTP_PASS}
+  from_name: My App
+  from_email: no-reply@example.com
+  retry:                        # default for all emails (emails[].retry overrides)
+    max_attempts: 5
+    initial_delay: 10s
+    max_delay: 1h
+
+outbox:
+  poll_interval: 1s             # how often queued webhooks/emails are picked up
+  retention: 7d                 # delivered rows deleted after this
+
+cron:
+  distributed: true             # one replica per tick via yaypi_job_locks (default with a DB)
+
+audit:
+  retention: 365d               # purge audit rows older than this (default: keep forever)
+
+log:
+  level: info                   # debug | info | warn | error
+  format: json                  # json | console (default: console on a TTY, else json)
+
+metrics:
+  enabled: false                # Prometheus text format, no extra deps
+  path: /metrics                # mounted outside base_url
+  token: ${METRICS_TOKEN}       # optional bearer token to scrape
 
 plugins:
-  - name: string
-    path: ./plugins/myplugin
-    checksum: sha256:abc123     # optional integrity check
-    config: {}                  # arbitrary plugin-specific config
+  - name: string                # matched to PluginInfo.Name; config passed to Init
+    config: {}
 
 include:
   - entities/**/*.yaml
   - endpoints/**/*.yaml
   - policies/**/*.yaml
   - jobs/**/*.yaml
-  - seeds/**/*.yaml             # kind: seed files
-  - emails/**/*.yaml            # kind: email files
-  - webhooks/**/*.yaml          # kind: webhooks files
+  - seeds/**/*.yaml
+  - emails/**/*.yaml
+  - webhooks/**/*.yaml
+  - auth.yaml
 
-spec:                           # named OpenAPI specs
-  - name: api                   # used in URL: /openapi/api.json
+spec:                           # named OpenAPI specs → /openapi/{name}.json
+  - name: api
     title: string
-    description: string
     version: "1.0.0"
     servers:
       - url: https://api.example.com
-        description: Production
 ```
 
 ---
@@ -102,143 +148,81 @@ spec:                           # named OpenAPI specs
 version: "1"
 kind: entity
 entity:
-  name: Post                    # PascalCase; used as entity identifier everywhere
-  table: posts                  # snake_case table name (defaults to pluralized name)
-  database: primary             # which database: entry to use (defaults to default: true)
-  timestamps: true              # auto-adds created_at, updated_at (timestamptz)
-  soft_delete: true             # auto-adds deleted_at; DELETE sets it instead of removing row
+  name: Post                    # PascalCase identifier
+  table: posts                  # default: snake_case(name) + "s"
+  database: primary             # default: the default database
+  timestamps: true              # adds created_at, updated_at (server-managed)
+  soft_delete: true             # adds deleted_at; DELETE sets it; reads exclude deleted rows
+  audit: true                   # yaypi_audit_log row per change (actor, field diff), same transaction
+  tenant_scoped: true           # rows isolated by tenant_field = caller's "tenant" claim
+  tenant_field: tenant_id       # default tenant_id (must be a declared field)
 
   fields:
     - name: id
       type: uuid                # uuid|string|text|integer|bigint|float|decimal|boolean|
                                 # timestamptz|date|jsonb|enum|array|bytea
       primary_key: true
-      default: gen_random_uuid()
+      default: gen_random_uuid()  # portable: translated per dialect (also now())
 
     - name: title
       type: string
-      length: 255               # for string/varchar — maps to VARCHAR(N)
+      length: 255
       nullable: false
       unique: false
-      index: false              # creates a single-column index
-      default: string           # SQL default expression
-      immutable: true           # once set, this field cannot be changed via PATCH
-
-    - name: email
-      type: string
-      validate:
-        required: true          # field must be present and non-empty
-        min_length: 3           # minimum string length
-        max_length: 255         # maximum string length
-        pattern: "^[^@]+@[^@]+$"  # regex the value must match
-        format: email           # built-in format: email | url | uuid | slug
-        message: "must be a valid email address"  # custom error message
-
-    - name: age
-      type: integer
-      validate:
-        min: 18                 # numeric minimum (inclusive)
-        max: 120                # numeric maximum (inclusive)
-        message: "must be between 18 and 120"
-
-    - name: price
-      type: decimal
-      precision: 10             # total digits
-      scale: 2                  # decimal places
-
-    - name: status
-      type: enum
-      values: [draft, published, archived]   # CHECK constraint values
+      index: false
+      immutable: true           # settable on create only (dropped from PATCH/PUT)
 
     - name: author_id
       type: uuid
+      default_from: subject.id  # set from caller on create (client value ignored), frozen after
+                                # subject.id | subject.email | subject.role | subject.tenant
       references:
-        entity: User            # entity name (not table name)
+        entity: User
         field: id
         on_delete: CASCADE      # CASCADE | SET NULL | RESTRICT | NO ACTION
         on_update: NO ACTION
 
+    - name: email
+      type: string
+      validate:
+        required: true
+        min_length: 3           # characters (runes)
+        max_length: 255
+        pattern: "^[^@]+@[^@]+$"  # compiled at boot; invalid regex = startup error
+        format: email           # email | url | uuid | slug (others = startup error)
+        message: "must be a valid email address"
+
+    - name: age
+      type: integer
+      validate: { min: 18, max: 120 }
+
     - name: password_hash
       type: string
       serialization:
-        omit_response: true     # never returned in API responses
-        omit_log: true          # never logged
+        omit_response: true     # never returned
+        omit_log: true          # redacted in audit log
 
     - name: internal_notes
       type: text
-      access:                   # ABAC: field-level access control (opt-in)
-        read_roles: [admin, editor]   # roles that may see this field; omit = unrestricted
-        write_roles: [admin]          # roles that may set this field; omit = unrestricted
+      access:
+        read_roles: [admin]     # others don't see the field
+        write_roles: [admin]    # others' values are silently dropped
 
-  relations:                    # eager-loadable joins (used by include: in endpoints)
-    - name: author
-      type: belongs_to          # belongs_to | has_many | has_one | many_to_many
-      entity: User
-      foreign_key: author_id
-
-    - name: tags
-      type: many_to_many
-      entity: Tag
-      through: PostTag          # junction entity name
-      foreign_key: post_id
-      other_key: tag_id
-
-    - name: comments
-      type: has_many
-      entity: Comment
-      foreign_key: post_id
+  relations:                    # loadable via ?include= when listed in endpoint include:
+    - { name: author, type: belongs_to, entity: User, foreign_key: author_id }
+    - { name: comments, type: has_many, entity: Comment, foreign_key: post_id }
+    - { name: tags, type: many_to_many, entity: Tag, through: PostTag, foreign_key: post_id, other_key: tag_id }
 
   indexes:
-    - name: idx_posts_slug
-      columns: [slug]
-      unique: true
-      type: btree               # btree | brin | hash (Postgres); ignored on SQLite/MySQL
+    - { name: idx_posts_slug, columns: [slug], unique: true, type: btree }
 
   constraints:
-    - name: pk_post_tags
-      type: primary_key         # primary_key | unique | check
-      columns: [post_id, tag_id]
-
-    - name: chk_price_positive
-      type: check
-      check: "price > 0"
-
-  hooks:                        # plugin hook names to call on lifecycle events
-    before_create: [validate-post]
-    after_create: [notify-followers]
-    before_update: []
-    after_update: []
-    before_delete: []
-    after_delete: [invalidate-cache]
+    - { name: chk_price_positive, type: check, check: "price > 0" }
 ```
 
-### Field types
+### Input handling
 
-| Type | Notes |
-|---|---|
-| `uuid` | PostgreSQL `uuid`; MySQL `CHAR(36)`; SQLite `TEXT` |
-| `string` | `VARCHAR(255)` or `VARCHAR(N)` with `length:` |
-| `text` | Unbounded text |
-| `integer` | 32-bit integer |
-| `bigint` | 64-bit integer |
-| `float` | Floating point |
-| `decimal` | Fixed precision with `precision:` and `scale:` |
-| `boolean` | PostgreSQL `boolean`; MySQL `TINYINT(1)`; SQLite `INTEGER` |
-| `timestamptz` | Timestamp with timezone; MySQL `DATETIME`; SQLite `TEXT` |
-| `date` | Date only |
-| `jsonb` | JSON blob; MySQL `JSON`; SQLite `TEXT` |
-| `enum` | String with `values:` list; stored as text with CHECK constraint |
-| `array` | PostgreSQL `text[]`; other drivers: `TEXT` (serialized) |
-| `bytea` | Binary data; MySQL/SQLite `BLOB` |
-
-### Validation formats
-
-| `format` value | What it checks |
-|---|---|
-| `email` | Valid email address |
-| `url` | Valid URL with http/https scheme |
-| `uuid` | UUID v4 format |
-| `slug` | Lowercase alphanumeric and hyphens only |
+Every provided body field is type-checked and coerced to its declared type before it reaches the database (wrong type → 400 `validation_failed` with per-field `errors`). Integers must be integral; `timestamptz` takes RFC 3339; `date` takes `YYYY-MM-DD`; `bytea` takes base64; `jsonb` takes any JSON; `decimal` keeps exact precision. Explicit `null` on a non-nullable field is a 400. Unknown fields are dropped (or 400 with `strict: true`). Server-managed columns (`created_at`, `updated_at`, `deleted_at`, `default_from` fields, PK on update) are never client-writable.
 
 ---
 
@@ -248,225 +232,212 @@ entity:
 version: "1"
 kind: endpoints
 endpoints:
-  - path: /posts                # URL path (chi syntax: {param} for path params)
-    entity: Post                # entity name from entity YAML
-    crud: [list, create]        # list | get | create | update | delete
+  - path: /posts
+    entity: Post
+    crud: [list, get, create, update, replace, delete]
 
-    # Optional per-endpoint rate limit (overrides global server.rate_limit)
-    rate_limit:
+    max_body_size: 64MB         # overrides server.max_request_body_size (upload routes)
+    rate_limit:                 # in addition to the global limiter (both must pass)
       requests_per_minute: 10
       burst: 5
-      key_by: ip
+      key_by: user              # ip | user
 
-    # Top-level auth applies to all ops unless overridden per-op
-    auth:
-      require: false
-      roles: [admin, editor]    # JWT role claim must match one of these (enforced)
-      conditions:               # ABAC: all must pass (AND logic); 403 on failure
+    auth:                       # endpoint default; per-op auth overrides
+      require: true
+      roles: [admin, editor]    # always enforced (with or without Casbin); implies require
+      conditions:               # all must pass; implies require
         - subject.email ends_with "@company.com"
-        - subject.role in ["admin", "editor"]
-
-    # OpenAPI spec control
-    spec: false                 # true (default) | false = exclude from all specs
-    specs:
-      names: [api, sdk]         # restrict to these named specs; omit = all specs
-      description: string       # operation description
-      tags: [posts, content]    # extra tags; entity name is always prepended first
-      summary: string           # defaults to "{op} {EntityName}"
 
     list:
-      allow_filter_by: [status, author_id]   # query params for WHERE clauses
-      allow_sort_by: [created_at, title]      # fields allowed in ?sort=
+      allow_filter_by: [status, author_id, score]
+      allow_sort_by: [created_at, title]
       default_sort: created_at:desc
+      search: [title, body]     # ?q=term → case-insensitive substring across these
       pagination:
-        style: cursor           # cursor (default) | offset
+        style: cursor           # cursor (default, keyset) | offset
         default_limit: 20
         max_limit: 100
-        include_total: true     # offset only: include total row count in meta
-      include: [author, tags]   # relation names to eager-load
-      auth:                     # overrides top-level auth for list only
-        require: false
-      row_access:               # ABAC: row-level filter rules (opt-in; absent = open)
-        - when: "subject.role == \"admin\""
-          filter: ""            # empty = no extra WHERE condition (see all rows)
-        - when: "*"             # catch-all; always include to avoid unexpected 403
-          filter: "status = 'published'"
-
-    get:
-      include: [author, tags, comments]
-      auth:
-        require: false
-      row_access:               # same syntax as list.row_access
-        - when: "*"
-          filter: "status = 'published'"
-
-    create:
-      auth:
-        require: true
-        roles: [editor, admin]
-        conditions:
-          - subject.email ends_with "@company.com"
-      before_hooks: [validate-post]    # plugin hook names
-      after_hooks: [notify-followers]
-      bulk: false               # true = accept an array body; false (default) = single object
-      bulk_max: 100             # max items in a bulk request (default: 100)
-      bulk_error_mode: abort    # abort (default) = fail all on first error
-                                # partial = continue; return 207 with per-item results
-
-    update:
-      allowed_fields: [title, body, status]   # mass-assignment whitelist
-      auth:
-        require: true
-        roles: [editor, admin]
-      row_access:               # callers without a matching rule get 404
-        - when: "subject.role == \"admin\""
-          filter: ""
-        - when: "*"
-          filter: "author_id = :subject.id"   # :subject.id | :subject.role | :subject.email
-
-    delete:
-      soft_delete: true         # sets deleted_at (entity must have soft_delete: true)
-      auth:
-        require: true
-        roles: [admin]
+        include_total: true     # adds meta.total (COUNT query)
+      include: [author, tags]   # relations clients may request with ?include=
       row_access:
         - when: "subject.role == \"admin\""
           filter: ""
         - when: "*"
-          filter: "author_id = :subject.id"
+          filter: "author_id = :subject.id"   # :subject.id | :subject.role | :subject.email | :subject.tenant
+
+    get:
+      include: [author, tags]
+      row_access: [...]
+
+    create:
+      bulk: false               # true = body is an array
+      bulk_max: 500
+      bulk_error_mode: abort    # abort (default): one transaction, nothing inserted on error
+                                # partial: each item commits alone; 207 with per-item results
+      strict: false             # 400 on unknown fields
+
+    update:                     # also used by replace (PUT)
+      allowed_fields: [title, body, status]
+      strict: false
+      row_access: [...]         # no match → 404
+
+    delete:
+      row_access: [...]         # soft delete happens automatically when the entity has soft_delete
 ```
 
 ### CRUD → HTTP mapping
 
-| crud | Method | Path |
+| crud | Method | Path | Notes |
+|---|---|---|---|
+| `list` | GET | `/path` | filters, sort, cursor/offset, `?fields=`, `?include=`, `?q=` |
+| `get` | GET | `/path/{id}` | `ETag`; `If-None-Match` → 304; `?fields=`, `?include=` |
+| `create` | POST | `/path` | `Idempotency-Key` header replays the first response for 24h |
+| `update` | PATCH | `/path/{id}` | partial; `If-Match` → 412 on stale ETag |
+| `replace` | PUT | `/path/{id}` | full replace: omitted nullable writable fields become null |
+| `delete` | DELETE | `/path/{id}` | `If-Match` supported; 204 |
+
+### List query syntax
+
+```
+?status=published                 equality
+?score[gte]=10&score[lt]=50       gt gte lt lte ne
+?status[in]=draft,published       in / nin (max 100 values)
+?title[contains]=go               contains / starts_with (case-insensitive, text fields)
+?published_at[is_null]=true       is_null
+?sort=-created_at                 or created_at:desc
+?limit=50&cursor=<meta.next_cursor>
+?fields=id,title&include=author
+?q=search+term                    when list.search is set
+```
+
+Values are coerced to the field type (bad value → 400). Filtering on a field not in `allow_filter_by` is a 400. Cursor pagination is keyset on (sort column, primary key) — complete and stable for any sort; a cursor is only valid for the sort it was issued with.
+
+### Responses
+
+```json
+{ "data": [...], "meta": { "count": 20, "limit": 20, "has_more": true, "next_cursor": "…", "total": 157 } }
+{ "data": [...], "meta": { "count": 20, "limit": 20, "has_more": true, "offset": 40, "page": 3 } }
+{ "data": { ... } }
+{ "results": [ { "index": 0, "data": {...} }, { "index": 1, "error": "...", "errors": {...} } ] }
+```
+
+### Error envelope (every error, everywhere)
+
+```json
+{ "error": "human message", "code": "validation_failed", "request_id": "…", "errors": { "title": "title is required" } }
+```
+
+| Status | code | When |
 |---|---|---|
-| `list` | GET | `/path` |
-| `get` | GET | `/path/{id}` |
-| `create` | POST | `/path` |
-| `update` | PATCH | `/path/{id}` |
-| `delete` | DELETE | `/path/{id}` |
-
-If the path already contains `{param}` (e.g. `/post/{id}`), no `/{id}` is appended.
-
-### Offset pagination response
-
-When `style: offset`, the `meta` envelope changes:
-
-```json
-{
-  "data": [...],
-  "meta": {
-    "count":  20,
-    "limit":  20,
-    "offset": 40,
-    "page":   3,
-    "total":  157    // only present when include_total: true
-  }
-}
-```
-
-### Bulk create response
-
-When `bulk: true`, POST accepts a JSON array. On `bulk_error_mode: abort`:
-```json
-{ "data": [...] }   // 201 — all succeeded
-{ "error": "..." }  // 400/422 — rolled back on first error
-```
-
-On `bulk_error_mode: partial`:
-```json
-// 207 Multi-Status — mix of successes and failures
-{
-  "results": [
-    { "index": 0, "data": { ... } },
-    { "index": 1, "error": "title is required" }
-  ]
-}
-```
+| 400 | `validation_failed` / `bad_request` | bad input, filters, cursor |
+| 401 | `unauthorized` | missing/invalid/revoked token |
+| 403 | `forbidden` | role/condition/row-access/tenant denial |
+| 404 | `not_found` | missing or hidden by row access |
+| 409 | `conflict` | unique violation; idempotent request in progress |
+| 412 | `precondition_failed` | `If-Match` mismatch |
+| 413 | `payload_too_large` | body over `max_request_body_size` |
+| 422 | `reference_violation` / `required_field_missing` / `constraint_violation` / hook code | FK / NOT NULL / CHECK / `sdk.HookError` |
+| 429 | `rate_limited` | rate limit or login throttle (`Retry-After`) |
+| 504 | `timeout` | `request_timeout` exceeded |
 
 ---
 
 ## Auth YAML (`kind: auth`)
 
-yayPi owns the user account model. A built-in `users` table is always present with:
-`id` (uuid), `email`, `password_hash` (omit_response/omit_log), `role` (default `'member'`), `oauth_provider`, `oauth_id`, `created_at`, `updated_at`, `deleted_at`.
-No `entities/user.yaml` needed. Use `user.fields` to add custom columns.
+Built-in `users` table: `id` (uuid), `email`, `password_hash`, `role` (default `'member'`), `oauth_provider`, `oauth_id`, `email_verified_at`, `token_version`, `created_at`, `updated_at`, `deleted_at`. Add columns with `user.fields`. Declaring auth also creates internal `yaypi_refresh_tokens` and `yaypi_auth_tokens` tables.
 
 ```yaml
 version: "1"
 kind: auth
 auth:
-  base_path: /auth              # all auth routes are mounted under this prefix
-
-  # Optional: extend built-in User with app-specific fields.
-  # Built-in field names cannot be overridden (collision = warning + skip).
+  base_path: /auth
   user:
     fields:
-      - name: display_name
-        type: string
-        length: 128
-        nullable: true
-      - name: bio
-        type: text
-        nullable: true
+      - { name: display_name, type: string, length: 128, nullable: true }
+      - { name: tenant_id, type: string, nullable: true }   # if present, issued as the "tenant" claim
 
   register:
     enabled: true
-    credential_field: email     # default: email
-    password_field: password    # default: password (never stored)
-    hash_field: password_hash   # default: password_hash
-    default_role: member        # default: member
+    default_role: member        # always applied; a client-sent role is ignored
+    min_password_length: 8      # max is always 72 bytes (bcrypt)
 
   login:
     enabled: true
-    credential_field: email     # default: email
-    password_field: password    # default: password
-    hash_field: password_hash   # default: password_hash
+    max_attempts: 5             # per account (4x per IP) per window → 429; -1 disables
+    lockout_window: 15m
 
   me:
-    enabled: true               # GET /auth/me returns current user from JWT sub
+    enabled: true
 
   refresh:
-    enabled: true               # POST /auth/refresh rotates access + refresh tokens
-    expiry: 30d                 # refresh token TTL; supports d/h/m/s and Go duration syntax
-    store: cookie               # cookie (default, HttpOnly) | body (returns JSON)
+    enabled: true               # issued on register/login/OAuth; stored hashed; rotated; reuse revokes the session
+    expiry: 30d
+    store: cookie               # cookie (HttpOnly, path-scoped) | body
+
+  cookie:
+    secure: true                # false only for local http dev
+    same_site: lax              # lax | strict | none
+
+  password_reset:               # needs smtp: (or SMTP_* env)
+    enabled: true
+    expiry: 1h
+    reset_url: https://app.example.com/reset?token={{token}}
+    subject: Reset your password
+    body: '<a href="{{link}}">Reset</a>'
+
+  email_verification:           # needs smtp: (or SMTP_* env)
+    enabled: true
+    required: false             # true = password login refused until verified
+    expiry: 24h
+    verify_url: https://app.example.com/verify?token={{token}}
 
   oauth2:
     providers:
-      - name: google
+      - name: google            # google | github built in; anything else = custom OIDC-style
         client_id: ${GOOGLE_CLIENT_ID}
         client_secret: ${GOOGLE_CLIENT_SECRET}
-        redirect_uri: https://app.example.com/auth/callback/google
-        scopes: [email, profile]
-
-      - name: github
-        client_id: ${GITHUB_CLIENT_ID}
-        client_secret: ${GITHUB_CLIENT_SECRET}
-        redirect_uri: https://app.example.com/auth/callback/github
-        scopes: [user:email]
+        redirect_uri: https://api.example.com/api/v1/auth/callback/google
+        success_redirect: https://app.example.com/auth/done   # token arrives as #token=…
+        error_redirect: https://app.example.com/login
+        pkce: true              # default
+        token_delivery: fragment  # fragment (default) | query (legacy)
+        # custom providers:
+        auth_url: …
+        token_url: …
+        userinfo_url: …
+        id_field: sub           # default id (google/github) | sub
+        email_verified_field: email_verified
+        trust_email: false      # only for IdPs that guarantee verified emails
 ```
 
 ### Auth endpoints
 
-| Method | Path | Description |
-|---|---|---|
-| POST | `/auth/register` | Create account, returns JWT (+ refresh token if enabled) |
-| POST | `/auth/login` | Authenticate, returns JWT (+ refresh token if enabled) |
-| GET | `/auth/me` | Returns current user (requires JWT) |
-| POST | `/auth/refresh` | Exchange refresh token for new access + refresh tokens |
-| GET | `/auth/{provider}` | Redirect to OAuth2 provider |
-| GET | `/auth/callback/{provider}` | OAuth2 callback, returns JWT |
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| POST | `/auth/register` | – | Create account → `{token, expires_in, user[, refresh_token]}` |
+| POST | `/auth/login` | – | Authenticate (throttled) |
+| GET | `/auth/me` | JWT | Current user |
+| POST | `/auth/refresh` | refresh token | Rotate; replaying a used token revokes the whole session family |
+| POST | `/auth/logout` | refresh token | Revoke this session; always 204 |
+| POST | `/auth/logout-all` | JWT | Revoke all sessions + bump token_version |
+| POST | `/auth/password/forgot` | – | `{email}` → always 202 |
+| POST | `/auth/password/reset` | – | `{token, password}`; revokes all sessions |
+| POST | `/auth/verify-email` | – | `{token}` |
+| POST | `/auth/verify-email/resend` | JWT | 1/minute |
+| GET | `/auth/{provider}` | – | OAuth redirect (state cookie + PKCE) |
+| GET | `/auth/callback/{provider}` | – | OAuth callback |
+| GET | `/auth/.well-known/jwks.json` | – | Public keys (RS*/ES* only) |
 
-### Token refresh flow
+OAuth account resolution: (1) existing link by `(oauth_provider, oauth_id)`; (2) existing account with the same email — only if the provider verified it; (3) new account — only with a verified email.
 
-With `store: cookie` (default):
-1. Login response sets `refresh_token` HttpOnly cookie + returns `{"token": "<access>"}` in body
-2. `POST /auth/refresh` reads cookie, validates refresh JWT, issues new access + refresh tokens, rotates cookie
-3. Refresh token is single-use (rotated on every call)
+### JWT claims
 
-With `store: body`:
-1. Login response returns `{"token": "<access>", "refresh_token": "<refresh>"}` in body
-2. `POST /auth/refresh` reads `{"refresh_token": "<token>"}` from request body
+```json
+{ "sub": "<user id>", "role": "member", "email": "a@b.c", "tenant": "acme", "tv": 0,
+  "typ": "access", "iss": "my-api", "aud": "my-clients", "iat": 0, "nbf": 0, "exp": 0 }
+```
+
+`tv` is the user's `token_version`; with `revocation_check: true` a mismatch (after logout-all or a password reset) is rejected. Refresh tokens are opaque random strings, not JWTs.
 
 ---
 
@@ -476,49 +447,35 @@ With `store: body`:
 version: "1"
 kind: seed
 seeds:
-  - entity: Role                # entity name to insert into
-    key_field: name             # field used to check if row already exists (idempotent)
+  - entity: User
+    key_field: email            # existing row with this value → skipped (idempotent)
     data:
-      - name: admin
-        description: "Full access"
-      - name: editor
-        description: "Can create and edit content"
-      - name: member
-        description: "Read-only access"
+      - email: admin@example.com
+        password: ${ADMIN_PASSWORD}   # User only: bcrypt-hashed into password_hash
+        role: admin
 ```
 
-Seeds are idempotent: before each INSERT, yayPi checks whether a row with the `key_field` value already exists. If it does, the row is skipped. Seeds run once at server startup before routes are registered.
+Seeds run via `yaypi seed` (not at server start).
 
 ---
 
 ## Email YAML (`kind: email`)
 
-Requires SMTP environment variables: `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS`, `SENDER_EMAIL`, `SENDER_NAME`.
+SMTP comes from the root `smtp:` block (fields fall back to `SMTP_*` env vars).
 
 ```yaml
 version: "1"
 kind: email
 emails:
-  - entity: User                # entity that triggers this email
-    trigger: after_create       # before_create | after_create | before_update |
-                                # after_update | before_delete | after_delete
-    condition: ""               # optional: "record.field != value" to skip some triggers
-    to: "{{record.email}}"      # recipient; supports {{record.FIELD}} template syntax
-    subject: "Welcome to our platform"
-    body: |
-      Hi {{record.name}},
-
-      Your account has been created. Welcome aboard!
-    html: |
-      <p>Hi {{record.name}},</p>
-      <p>Your account has been created. Welcome aboard!</p>
+  - name: welcome
+    entity: User
+    trigger: after_create       # after_create | after_update | after_delete
+    condition: record.role == "member"   # optional; see condition syntax
+    to: "{{record.email}}"
+    subject: "Welcome, {{record.display_name}}"
+    body: "<p>Hi {{record.display_name}}</p>"   # HTML; values are HTML-escaped
+    retry: { max_attempts: 10 }  # optional; overrides smtp.retry
 ```
-
-Template syntax: `{{record.FIELD}}` where `FIELD` is any column name in the entity.
-
-Condition syntax: `record.FIELD != ""` or `record.FIELD == "value"` (simple equality/inequality only).
-
----
 
 ## Webhooks YAML (`kind: webhooks`)
 
@@ -526,28 +483,26 @@ Condition syntax: `record.FIELD != ""` or `record.FIELD == "value"` (simple equa
 version: "1"
 kind: webhooks
 webhooks:
-  - entity: Order               # entity that triggers this webhook
-    trigger: after_create       # before_create | after_create | before_update |
-                                # after_update | before_delete | after_delete
-    condition: ""               # optional: skip trigger if condition fails
-    url: "https://hooks.example.com/orders"
-    method: POST                # default: POST
-    headers:
-      Authorization: "Bearer ${WEBHOOK_SECRET}"
-      Content-Type: "application/json"
-    payload: |
-      {
-        "event": "order.created",
-        "order_id": "{{record.id}}",
-        "amount": "{{record.total}}"
-      }
-    timeout: 10s                # default: 10s
+  - name: order-created
+    entity: Order
+    trigger: after_create
+    condition: record.total >= 100 and record.status == "paid"
+    url: "https://hooks.example.com/orders/{{record.id}}"   # values path-escaped
+    method: POST
+    headers: { X-Source: yaypi }
+    payload: '{"order_id": "{{record.id}}", "total": {{record.total}}}'  # JSON-safe substitution
+    secret: ${ORDER_WEBHOOK_SECRET}   # signs deliveries
+    timeout: 10s
+    allow_private_network: false      # private/loopback/metadata IPs blocked by default
     retry:
-      max_attempts: 3
-      backoff: 5s
+      max_attempts: 8           # then status=dead
+      initial_delay: 10s        # exponential, ±20% jitter
+      max_delay: 1h
 ```
 
-Webhook requests are sent in a goroutine (non-blocking). The SSRF blocklist rejects RFC-1918, loopback, and link-local addresses.
+Emails and webhooks use a **transactional outbox** (`yaypi_outbox`): the message is rendered and stored in the same transaction as the change, then delivered by a background worker with retries, across replicas, surviving restarts. Default webhook body (no `payload`): `{"event": "Order.created", "entity", "id", "data"}`. Headers on every delivery: `X-Yaypi-Event-Id` (stable across retries — dedupe on it), `X-Yaypi-Timestamp`, and with `secret`, `X-Yaypi-Signature: v1=hex(HMAC-SHA256(secret, timestamp + "." + body))`.
+
+Condition syntax: `record.<field> <op> <value>` with `== != > >= < <=`; value is a quoted string, number, `true`/`false` or `null`; join with `and`/`&&`. Invalid conditions fail at boot.
 
 ---
 
@@ -558,76 +513,27 @@ version: "1"
 kind: jobs
 jobs:
   - name: purge-deleted-posts
-    schedule: "0 3 * * *"       # cron expression (5-field, UTC by default)
-    timezone: America/New_York   # IANA timezone for schedule
-    handler: sql                 # sql | http
-    timeout: 30s
+    schedule: "0 3 * * *"       # 5/6-field cron, @hourly/@daily/…, or "@every 10m"
+    timezone: America/New_York  # IANA zone (default UTC)
+    handler: sql                # sql | http
+    timeout: 5m                 # default 5m
     retry:
       max_attempts: 3
-      backoff: 5s               # delay between retries
-    on_failure: log             # log (only option currently)
+      backoff: exponential      # exponential (default) | fixed
+      initial_delay: 1s
+      max_delay: 1m
     config:
-      sql: >
-        DELETE FROM posts
-        WHERE deleted_at IS NOT NULL
-        AND deleted_at < NOW() - INTERVAL '30 days'
-      database: primary         # which database to run against
+      sql: DELETE FROM posts WHERE deleted_at < NOW() - INTERVAL '30 days'
+      database: primary
 
   - name: ping-uptime
     schedule: "*/5 * * * *"
     handler: http
-    timeout: 10s
     config:
       url: https://uptime.example.com/ping
       method: GET
-      allowed_hosts: [uptime.example.com]   # SSRF allowlist
+      allowed_hosts: [uptime.example.com]
+      allow_private_network: false
 ```
 
----
-
-## Response format
-
-All CRUD endpoints return JSON in a consistent envelope:
-
-```json
-// cursor-paginated list
-{ "data": [...], "meta": { "count": 20, "next_cursor": "abc" } }
-
-// offset-paginated list
-{ "data": [...], "meta": { "count": 20, "limit": 20, "offset": 0, "page": 1, "total": 157 } }
-
-// get / create / update
-{ "data": { ...entity fields... } }
-
-// bulk create (partial mode) — 207 Multi-Status
-{ "results": [ { "index": 0, "data": {...} }, { "index": 1, "error": "..." } ] }
-
-// delete
-// 204 No Content
-
-// validation errors
-{ "errors": { "email": "must be a valid email address", "age": "must be between 18 and 120" } }
-
-// other errors
-{ "error": "message" }
-```
-
----
-
-## JWT claims
-
-Tokens issued by `/auth/register` and `/auth/login` contain:
-
-```json
-{
-  "sub": "<user id>",
-  "role": "<user role>",
-  "email": "<user email>",
-  "iat": 1711234567,
-  "exp": 1711320967
-}
-```
-
-Refresh tokens contain an additional `"type": "refresh"` claim and are validated separately.
-
-The `sub` claim is used to identify the current user in `GET /auth/me` and RBAC enforcement.
+With a database configured (and `cron.distributed` not false), each run is coordinated through `yaypi_job_locks`, so a tick executes on exactly one replica. A job never overlaps itself on one instance.

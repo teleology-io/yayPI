@@ -83,7 +83,16 @@
           "default": "5s",
           "examples": ["5s", "10s", "30s"]
         },
-        "retry": { "$ref": "#/$defs/RetryConfig" }
+        "retry": { "$ref": "#/$defs/RetryConfig" },
+        "secret": {
+          "type": "string",
+          "description": "Signs each delivery: X-Yaypi-Signature: v1=hex(HMAC-SHA256(secret, \"<X-Yaypi-Timestamp>.<body>\")). Use ${ENV_VAR}."
+        },
+        "allow_private_network": {
+          "type": "boolean",
+          "description": "Allow delivery to private/loopback/link-local addresses (blocked by default to prevent SSRF).",
+          "default": false
+        }
       }
     },
     "RetryConfig": {

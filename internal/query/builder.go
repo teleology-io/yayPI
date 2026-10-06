@@ -4,40 +4,95 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/teleology-io/yayPI/internal/dialect"
 	"github.com/teleology-io/yayPI/internal/schema"
 	"github.com/teleology-io/yayPI/pkg/types"
 )
 
-// Builder generates parameterized SQL for a given entity.
+// Sentinel errors returned by Builder methods.
+var (
+	ErrNotFound = errors.New("record not found")
+	ErrNoFields = errors.New("no valid fields")
+)
+
+// Executor is satisfied by *sql.DB, *sql.Tx and *sql.Conn, so the same Builder runs
+// inside or outside a transaction.
+type Executor interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+// Builder generates and runs parameterized SQL for one entity.
 type Builder struct {
 	entity  *schema.Entity
-	db      *sql.DB
+	db      Executor
 	dialect dialect.Dialect
 }
 
-// NewBuilder creates a Builder for the given entity, db connection, and dialect.
-func NewBuilder(entity *schema.Entity, db *sql.DB, d dialect.Dialect) *Builder {
+// NewBuilder creates a Builder for the given entity, executor, and dialect.
+func NewBuilder(entity *schema.Entity, db Executor, d dialect.Dialect) *Builder {
 	return &Builder{entity: entity, db: db, dialect: d}
+}
+
+// RowFilter is an extra WHERE fragment (row-level access) using $1..$n placeholders
+// local to the fragment; the builder renumbers them into the full query.
+type RowFilter struct {
+	SQL  string
+	Args []any
 }
 
 // ListQuery contains parameters for a list query.
 type ListQuery struct {
-	Filters     map[string]interface{}
-	Sort        string // "column:asc" or "column:desc"
-	Limit       int
-	Cursor      *Cursor
-	AllowedCols map[string]struct{} // validated allowed columns for filter/sort
+	Filters []Filter
+	Sort    Sort
+	Limit   int
+	// Exactly one of Cursor (keyset) or Offset applies; Cursor wins when set.
+	Cursor *Cursor
+	Offset int
+	Row    RowFilter
+	Search Search
+}
+
+// Search matches Term as a case-insensitive substring in any of Columns.
+type Search struct {
+	Columns []string
+	Term    string
+}
+
+// Sort is a single ORDER BY column. The primary key is always appended as a tiebreaker
+// so ordering (and keyset pagination) is total.
+type Sort struct {
+	Column string
+	Desc   bool
+}
+
+// args accumulates query arguments and hands out $N placeholders in textual order, which
+// dialect.Rebind relies on when rewriting to ? for MySQL/SQLite.
+type args struct{ vals []any }
+
+func (a *args) add(v any) string {
+	a.vals = append(a.vals, v)
+	return "$" + strconv.Itoa(len(a.vals))
+}
+
+// addFragment appends a fragment that uses its own $1..$n numbering.
+func (a *args) addFragment(sqlFrag string, fragArgs []any) string {
+	out := reindexFilter(sqlFrag, len(a.vals))
+	a.vals = append(a.vals, fragArgs...)
+	return out
 }
 
 // reindexFilter shifts $N placeholders in a filter string by offset.
 // e.g. offset=2, filter="user_id = $1 OR team = $2" → "user_id = $3 OR team = $4"
-// This ensures the extra-filter placeholders don't collide with those already in the query.
 func reindexFilter(filter string, offset int) string {
 	var b strings.Builder
 	i := 0
@@ -48,7 +103,7 @@ func reindexFilter(filter string, offset int) string {
 				j++
 			}
 			n, _ := strconv.Atoi(filter[i+1 : j])
-			b.WriteString(fmt.Sprintf("$%d", n+offset))
+			b.WriteString("$" + strconv.Itoa(n+offset))
 			i = j
 		} else {
 			b.WriteByte(filter[i])
@@ -58,64 +113,64 @@ func reindexFilter(filter string, offset int) string {
 	return b.String()
 }
 
-// List queries the database and returns matching rows.
-func (b *Builder) List(ctx context.Context, q ListQuery, extraFilter string, extraArgs []interface{}) ([]map[string]interface{}, error) {
-	cols := b.selectColumns()
-	table := b.entity.Table
-
-	var args []interface{}
-	var whereClauses []string
-	argIdx := 1
-
-	if q.Cursor != nil {
-		whereClauses = append(whereClauses, fmt.Sprintf("id > %s", b.ph(argIdx)))
-		args = append(args, q.Cursor.ID)
-		argIdx++
-	}
-
-	for col, val := range q.Filters {
-		if !b.isAllowedColumn(col) {
-			continue
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", b.qi(col), b.ph(argIdx)))
-		args = append(args, val)
-		argIdx++
-	}
-
-	if b.entity.SoftDelete {
-		whereClauses = append(whereClauses, "deleted_at IS NULL")
-	}
-
-	if extraFilter != "" {
-		whereClauses = append(whereClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
-		args = append(args, extraArgs...)
-		argIdx += len(extraArgs)
-	}
-
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s", cols, b.qi(table))
-	if len(whereClauses) > 0 {
-		sqlStr += " WHERE " + strings.Join(whereClauses, " AND ")
-	}
-
-	if q.Sort != "" {
-		orderClause, err := b.buildOrderClause(q.Sort)
+// baseWhere renders filters, soft-delete and row-access clauses.
+func (b *Builder) baseWhere(a *args, filters []Filter, row RowFilter) ([]string, error) {
+	var where []string
+	for _, f := range filters {
+		clause, err := b.filterClause(a, f)
 		if err != nil {
 			return nil, err
 		}
-		sqlStr += " ORDER BY " + orderClause
-	} else {
-		sqlStr += " ORDER BY id ASC"
+		where = append(where, clause)
 	}
+	if b.entity.SoftDelete {
+		where = append(where, b.qi("deleted_at")+" IS NULL")
+	}
+	if row.SQL != "" {
+		where = append(where, "("+a.addFragment(row.SQL, row.Args)+")")
+	}
+	return where, nil
+}
+
+// List queries the database and returns matching rows. With a Cursor it uses keyset
+// pagination on (sort column, primary key); otherwise LIMIT/OFFSET.
+func (b *Builder) List(ctx context.Context, q ListQuery) ([]map[string]any, error) {
+	a := &args{}
+	where, err := b.baseWhere(a, q.Filters, q.Row)
+	if err != nil {
+		return nil, err
+	}
+	if clause := b.searchClause(a, q.Search); clause != "" {
+		where = append(where, clause)
+	}
+	sort, err := b.resolveSort(q.Sort)
+	if err != nil {
+		return nil, err
+	}
+	if q.Cursor != nil {
+		clause, err := b.keysetClause(a, sort, q.Cursor)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, clause)
+	}
+
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s", b.selectColumns(), b.qi(b.entity.Table))
+	if len(where) > 0 {
+		sqlStr += " WHERE " + strings.Join(where, " AND ")
+	}
+	sqlStr += " ORDER BY " + b.orderBy(sort)
 
 	limit := q.Limit
 	if limit <= 0 {
 		limit = 20
 	}
-	sqlStr += fmt.Sprintf(" LIMIT %s", b.ph(argIdx))
-	args = append(args, limit)
+	sqlStr += " LIMIT " + a.add(limit)
+	if q.Cursor == nil && q.Offset > 0 {
+		sqlStr += " OFFSET " + a.add(q.Offset)
+	}
 
-	sqlStr = b.dialect.Rebind(sqlStr)
-	rows, err := b.db.QueryContext(ctx, sqlStr, args...)
+	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
 	if err != nil {
 		return nil, fmt.Errorf("list query: %w", err)
 	}
@@ -123,189 +178,106 @@ func (b *Builder) List(ctx context.Context, q ListQuery, extraFilter string, ext
 	return b.scanRows(rows)
 }
 
-// OffsetQuery contains parameters for an offset-based list query.
-type OffsetQuery struct {
-	Filters     map[string]interface{}
-	Sort        string
-	Limit       int
-	Offset      int
+// searchClause renders (LOWER(c1) LIKE $n OR LOWER(c2) LIKE $m …) for a search term.
+func (b *Builder) searchClause(a *args, s Search) string {
+	if s.Term == "" || len(s.Columns) == 0 {
+		return ""
+	}
+	pattern := "%" + escapeLike(strings.ToLower(s.Term)) + "%"
+	parts := make([]string, 0, len(s.Columns))
+	for _, c := range s.Columns {
+		if f, ok := b.field(c); ok {
+			parts = append(parts, "LOWER("+b.qi(f.ColumnName)+") LIKE "+a.add(pattern)+" ESCAPE '!'")
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "(" + strings.Join(parts, " OR ") + ")"
 }
 
-// ListOffset queries the database using LIMIT/OFFSET and returns rows.
-func (b *Builder) ListOffset(ctx context.Context, q OffsetQuery, extraFilter string, extraArgs []interface{}) ([]map[string]interface{}, error) {
-	cols := b.selectColumns()
-	table := b.entity.Table
-
-	var args []interface{}
-	var whereClauses []string
-	argIdx := 1
-
-	for col, val := range q.Filters {
-		if !b.isAllowedColumn(col) {
-			continue
-		}
-		whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", b.qi(col), b.ph(argIdx)))
-		args = append(args, val)
-		argIdx++
-	}
-
-	if b.entity.SoftDelete {
-		whereClauses = append(whereClauses, "deleted_at IS NULL")
-	}
-
-	if extraFilter != "" {
-		whereClauses = append(whereClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
-		args = append(args, extraArgs...)
-		argIdx += len(extraArgs)
-	}
-
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s", cols, b.qi(table))
-	if len(whereClauses) > 0 {
-		sqlStr += " WHERE " + strings.Join(whereClauses, " AND ")
-	}
-
-	if q.Sort != "" {
-		orderClause, err := b.buildOrderClause(q.Sort)
-		if err != nil {
-			return nil, err
-		}
-		sqlStr += " ORDER BY " + orderClause
-	} else {
-		sqlStr += " ORDER BY id ASC"
-	}
-
-	limit := q.Limit
-	if limit <= 0 {
-		limit = 20
-	}
-	sqlStr += fmt.Sprintf(" LIMIT %s OFFSET %s", b.ph(argIdx), b.ph(argIdx+1))
-	args = append(args, limit, q.Offset)
-
-	sqlStr = b.dialect.Rebind(sqlStr)
-	rows, err := b.db.QueryContext(ctx, sqlStr, args...)
+// Count returns the number of rows matching the filters, search and row filter.
+func (b *Builder) Count(ctx context.Context, filters []Filter, row RowFilter, search ...Search) (int64, error) {
+	a := &args{}
+	where, err := b.baseWhere(a, filters, row)
 	if err != nil {
-		return nil, fmt.Errorf("list offset query: %w", err)
+		return 0, err
 	}
-	defer rows.Close()
-	return b.scanRows(rows)
-}
-
-// Count returns the total number of rows matching the given filters and extra filter.
-func (b *Builder) Count(ctx context.Context, filters map[string]interface{}, extraFilter string, extraArgs []interface{}) (int64, error) {
-	table := b.entity.Table
-	var args []interface{}
-	var whereClauses []string
-	argIdx := 1
-
-	for col, val := range filters {
-		if !b.isAllowedColumn(col) {
-			continue
+	if len(search) > 0 {
+		if clause := b.searchClause(a, search[0]); clause != "" {
+			where = append(where, clause)
 		}
-		whereClauses = append(whereClauses, fmt.Sprintf("%s = %s", b.qi(col), b.ph(argIdx)))
-		args = append(args, val)
-		argIdx++
 	}
-
-	if b.entity.SoftDelete {
-		whereClauses = append(whereClauses, "deleted_at IS NULL")
+	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM %s", b.qi(b.entity.Table))
+	if len(where) > 0 {
+		sqlStr += " WHERE " + strings.Join(where, " AND ")
 	}
-
-	if extraFilter != "" {
-		whereClauses = append(whereClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
-		args = append(args, extraArgs...)
-	}
-
-	sqlStr := fmt.Sprintf("SELECT COUNT(*) FROM %s", b.qi(table))
-	if len(whereClauses) > 0 {
-		sqlStr += " WHERE " + strings.Join(whereClauses, " AND ")
-	}
-
-	sqlStr = b.dialect.Rebind(sqlStr)
 	var count int64
-	if err := b.db.QueryRowContext(ctx, sqlStr, args...).Scan(&count); err != nil {
+	if err := b.db.QueryRowContext(ctx, b.dialect.Rebind(sqlStr), a.vals...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count query: %w", err)
 	}
 	return count, nil
 }
 
-// Get retrieves a single record by ID.
-func (b *Builder) Get(ctx context.Context, id string, extraFilter string, extraArgs []interface{}) (map[string]interface{}, error) {
-	cols := b.selectColumns()
-	table := b.entity.Table
-
-	args := []interface{}{id}
-	argIdx := 2 // id is $1
-
-	var extraClauses []string
-	if b.entity.SoftDelete {
-		extraClauses = append(extraClauses, "deleted_at IS NULL")
+// Get retrieves a single record by primary key; (nil, nil) when not found or hidden by
+// the row filter. forUpdate locks the row (Postgres/MySQL) for read-modify-write in a tx.
+func (b *Builder) Get(ctx context.Context, id any, row RowFilter, forUpdate ...bool) (map[string]any, error) {
+	a := &args{}
+	where := []string{b.qi(b.pk()) + " = " + a.add(id)}
+	rest, err := b.baseWhere(a, nil, row)
+	if err != nil {
+		return nil, err
 	}
-	if extraFilter != "" {
-		extraClauses = append(extraClauses, "("+reindexFilter(extraFilter, argIdx-1)+")")
-		args = append(args, extraArgs...)
+	where = append(where, rest...)
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE %s", b.selectColumns(), b.qi(b.entity.Table), strings.Join(where, " AND "))
+	if len(forUpdate) > 0 && forUpdate[0] && b.dialect.Name() != "sqlite" {
+		sqlStr += " FOR UPDATE"
 	}
-
-	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE id = $1", cols, b.qi(table))
-	for _, c := range extraClauses {
-		sqlStr += " AND " + c
-	}
-	sqlStr = b.dialect.Rebind(sqlStr)
-
-	rows, err := b.db.QueryContext(ctx, sqlStr, args...)
+	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
 	if err != nil {
 		return nil, fmt.Errorf("get query: %w", err)
 	}
 	defer rows.Close()
-
 	results, err := b.scanRows(rows)
-	if err != nil {
+	if err != nil || len(results) == 0 {
 		return nil, err
-	}
-	if len(results) == 0 {
-		return nil, nil
 	}
 	return results[0], nil
 }
 
-// Create inserts a new record and returns the inserted row.
-func (b *Builder) Create(ctx context.Context, data map[string]interface{}) (map[string]interface{}, error) {
-	var colNames []string
-	var placeholders []string
-	var args []interface{}
-	argIdx := 1
-
-	for _, field := range b.entity.Fields {
-		if field.PrimaryKey {
-			if _, ok := data[field.ColumnName]; !ok {
-				continue
+// Create inserts a new record and returns the inserted row. A uuid primary key the
+// caller did not supply is generated here, so every dialect can read the row back by id
+// (MySQL has no RETURNING and LastInsertId is meaningless for uuids).
+func (b *Builder) Create(ctx context.Context, data map[string]any) (map[string]any, error) {
+	pk := b.entity.PrimaryKey()
+	if pk != nil && pk.Type == types.FieldTypeUUID {
+		if v, ok := lookup(data, *pk); !ok || v == nil || v == "" {
+			if pk.Name != pk.ColumnName {
+				delete(data, pk.Name)
 			}
+			data[pk.ColumnName] = uuid.NewString()
 		}
-		val, ok := data[field.ColumnName]
+	}
+
+	a := &args{}
+	var colNames, placeholders []string
+	for _, field := range b.entity.Fields {
+		val, ok := lookup(data, field)
 		if !ok {
-			val, ok = data[field.Name]
-			if !ok {
-				continue
-			}
+			continue
 		}
 		colNames = append(colNames, b.qi(field.ColumnName))
-		placeholders = append(placeholders, b.ph(argIdx))
-		args = append(args, val)
-		argIdx++
+		placeholders = append(placeholders, a.add(val))
 	}
-
 	if len(colNames) == 0 {
-		return nil, fmt.Errorf("no valid fields to insert")
+		return nil, ErrNoFields
 	}
-
-	table := b.entity.Table
+	table := b.qi(b.entity.Table)
 
 	if b.dialect.SupportsReturning() {
-		sqlStr := b.dialect.Rebind(fmt.Sprintf(
-			"INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
-			b.qi(table), strings.Join(colNames, ", "),
-			strings.Join(placeholders, ", "), b.selectColumns(),
-		))
-		rows, err := b.db.QueryContext(ctx, sqlStr, args...)
+		sqlStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
+			table, strings.Join(colNames, ", "), strings.Join(placeholders, ", "), b.selectColumns())
+		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
 		if err != nil {
 			return nil, fmt.Errorf("create query: %w", err)
 		}
@@ -315,76 +287,67 @@ func (b *Builder) Create(ctx context.Context, data map[string]interface{}) (map[
 			return nil, err
 		}
 		if len(results) == 0 {
-			return nil, fmt.Errorf("create returned no rows")
+			return nil, errors.New("create returned no rows")
 		}
 		return results[0], nil
 	}
 
-	// MySQL fallback: INSERT then SELECT by last insert id
-	sqlStr := b.dialect.Rebind(fmt.Sprintf(
-		"INSERT INTO %s (%s) VALUES (%s)",
-		b.qi(table), strings.Join(colNames, ", "), strings.Join(placeholders, ", "),
-	))
-	result, err := b.db.ExecContext(ctx, sqlStr, args...)
+	sqlStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+		table, strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
+	result, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
 	if err != nil {
 		return nil, fmt.Errorf("create query: %w", err)
 	}
-	lastID, err := result.LastInsertId()
-	if err != nil {
-		return nil, fmt.Errorf("create: getting last insert id: %w", err)
+	var id any
+	if pk != nil {
+		if v, ok := lookup(data, *pk); ok {
+			id = v
+		}
 	}
-	return b.Get(ctx, fmt.Sprintf("%d", lastID), "", nil)
+	if id == nil {
+		lastID, err := result.LastInsertId()
+		if err != nil {
+			return nil, fmt.Errorf("create: getting last insert id: %w", err)
+		}
+		id = lastID
+	}
+	return b.Get(ctx, id, RowFilter{})
 }
 
-// Update modifies an existing record and returns the updated row.
-func (b *Builder) Update(ctx context.Context, id string, data map[string]interface{}, extraFilter string, extraArgs []interface{}) (map[string]interface{}, error) {
+// Update modifies an existing record and returns the updated row; ErrNotFound when no
+// row matches the id and row filter.
+func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row RowFilter) (map[string]any, error) {
+	a := &args{}
 	var setClauses []string
-	var args []interface{}
-	argIdx := 1
-
 	for _, field := range b.entity.Fields {
-		if field.PrimaryKey {
+		if field.PrimaryKey || field.ColumnName == "updated_at" || field.ColumnName == "created_at" || field.ColumnName == "deleted_at" {
 			continue
 		}
-		val, ok := data[field.ColumnName]
+		val, ok := lookup(data, field)
 		if !ok {
-			val, ok = data[field.Name]
-			if !ok {
-				continue
-			}
+			continue
 		}
-		setClauses = append(setClauses, fmt.Sprintf("%s = %s", b.qi(field.ColumnName), b.ph(argIdx)))
-		args = append(args, val)
-		argIdx++
+		setClauses = append(setClauses, b.qi(field.ColumnName)+" = "+a.add(val))
 	}
-
 	if len(setClauses) == 0 {
-		return nil, fmt.Errorf("no valid fields to update")
+		return nil, ErrNoFields
 	}
-
 	if b.entity.Timestamps {
-		setClauses = append(setClauses, fmt.Sprintf("updated_at = %s", b.ph(argIdx)))
-		args = append(args, time.Now().UTC())
-		argIdx++
+		setClauses = append(setClauses, b.qi("updated_at")+" = "+a.add(time.Now().UTC()))
 	}
 
-	args = append(args, id)
-	table := b.entity.Table
-
-	whereClause := fmt.Sprintf("id = %s", b.ph(argIdx))
-	argIdx++
-	if extraFilter != "" {
-		whereClause += " AND (" + reindexFilter(extraFilter, argIdx-1) + ")"
-		args = append(args, extraArgs...)
-		argIdx += len(extraArgs)
+	where := []string{b.qi(b.pk()) + " = " + a.add(id)}
+	rest, err := b.baseWhere(a, nil, row)
+	if err != nil {
+		return nil, err
 	}
+	where = append(where, rest...)
+	table := b.qi(b.entity.Table)
 
 	if b.dialect.SupportsReturning() {
-		sqlStr := b.dialect.Rebind(fmt.Sprintf(
-			"UPDATE %s SET %s WHERE %s RETURNING %s",
-			b.qi(table), strings.Join(setClauses, ", "), whereClause, b.selectColumns(),
-		))
-		rows, err := b.db.QueryContext(ctx, sqlStr, args...)
+		sqlStr := fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s",
+			table, strings.Join(setClauses, ", "), strings.Join(where, " AND "), b.selectColumns())
+		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
 		if err != nil {
 			return nil, fmt.Errorf("update query: %w", err)
 		}
@@ -394,106 +357,75 @@ func (b *Builder) Update(ctx context.Context, id string, data map[string]interfa
 			return nil, err
 		}
 		if len(results) == 0 {
-			return nil, nil
+			return nil, ErrNotFound
 		}
 		return results[0], nil
 	}
 
-	// MySQL fallback: UPDATE then SELECT
-	sqlStr := b.dialect.Rebind(fmt.Sprintf(
-		"UPDATE %s SET %s WHERE %s",
-		b.qi(table), strings.Join(setClauses, ", "), whereClause,
-	))
-	if _, err := b.db.ExecContext(ctx, sqlStr, args...); err != nil {
+	sqlStr := fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(setClauses, ", "), strings.Join(where, " AND "))
+	if _, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), a.vals...); err != nil {
 		return nil, fmt.Errorf("update query: %w", err)
 	}
-	return b.Get(ctx, id, "", nil)
+	// MySQL reports 0 affected rows when values are unchanged, so confirm with a read
+	// that re-applies the row filter rather than trusting RowsAffected.
+	updated, err := b.Get(ctx, id, row)
+	if err != nil {
+		return nil, err
+	}
+	if updated == nil {
+		return nil, ErrNotFound
+	}
+	return updated, nil
 }
 
-// Delete removes a record by ID (hard or soft delete).
-func (b *Builder) Delete(ctx context.Context, id string, soft bool, extraFilter string, extraArgs []interface{}) error {
-	table := b.entity.Table
+// Delete removes a record by primary key (soft delete when the entity supports it and
+// soft is true). ErrNotFound when no row matches.
+func (b *Builder) Delete(ctx context.Context, id any, soft bool, row RowFilter) error {
+	a := &args{}
 	var sqlStr string
-	var args []interface{}
-
+	table := b.qi(b.entity.Table)
 	if soft && b.entity.SoftDelete {
-		argIdx := 3 // $1=now, $2=id, extra starts at $3
-		whereClause := "id = $2 AND deleted_at IS NULL"
-		if extraFilter != "" {
-			whereClause += " AND (" + reindexFilter(extraFilter, argIdx-1) + ")"
+		set := b.qi("deleted_at") + " = " + a.add(time.Now().UTC())
+		where := []string{b.qi(b.pk()) + " = " + a.add(id)}
+		rest, err := b.baseWhere(a, nil, row) // includes deleted_at IS NULL
+		if err != nil {
+			return err
 		}
-		sqlStr = b.dialect.Rebind(fmt.Sprintf(
-			"UPDATE %s SET deleted_at = $1 WHERE %s", b.qi(table), whereClause,
-		))
-		args = []interface{}{time.Now().UTC(), id}
-		args = append(args, extraArgs...)
+		where = append(where, rest...)
+		sqlStr = fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, set, strings.Join(where, " AND "))
 	} else {
-		argIdx := 2 // $1=id, extra starts at $2
-		whereClause := "id = $1"
-		if extraFilter != "" {
-			whereClause += " AND (" + reindexFilter(extraFilter, argIdx-1) + ")"
+		where := []string{b.qi(b.pk()) + " = " + a.add(id)}
+		if row.SQL != "" {
+			where = append(where, "("+a.addFragment(row.SQL, row.Args)+")")
 		}
-		sqlStr = b.dialect.Rebind(fmt.Sprintf("DELETE FROM %s WHERE %s", b.qi(table), whereClause))
-		args = []interface{}{id}
-		args = append(args, extraArgs...)
+		sqlStr = fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(where, " AND "))
 	}
 
-	result, err := b.db.ExecContext(ctx, sqlStr, args...)
+	result, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
 	if err != nil {
 		return fmt.Errorf("delete query: %w", err)
 	}
-	rows, err := result.RowsAffected()
+	n, err := result.RowsAffected()
 	if err != nil {
 		return fmt.Errorf("delete: rows affected: %w", err)
 	}
-	if rows == 0 {
-		return fmt.Errorf("record not found")
+	if n == 0 {
+		return ErrNotFound
 	}
 	return nil
 }
 
-// LoadRelation loads related records using IN-clause batching.
-func (b *Builder) LoadRelation(ctx context.Context, rel schema.Relation, ids []string) (map[string][]map[string]interface{}, error) {
-	if len(ids) == 0 {
-		return nil, nil
+// lookup finds a field's value in data by column name, then by field name.
+func lookup(data map[string]any, f schema.Field) (any, bool) {
+	if v, ok := data[f.ColumnName]; ok {
+		return v, true
 	}
-
-	placeholders := make([]string, len(ids))
-	args := make([]interface{}, len(ids))
-	for i, id := range ids {
-		placeholders[i] = b.ph(i + 1)
-		args[i] = id
-	}
-
-	fk := rel.ForeignKey
-	if fk == "" {
-		fk = "id"
-	}
-
-	table := rel.Entity
-	sqlStr := b.dialect.Rebind(fmt.Sprintf(
-		"SELECT * FROM %s WHERE %s IN (%s)",
-		b.qi(table), b.qi(fk), strings.Join(placeholders, ", "),
-	))
-
-	rows, err := b.db.QueryContext(ctx, sqlStr, args...)
-	if err != nil {
-		return nil, fmt.Errorf("load relation %q: %w", rel.Name, err)
-	}
-	defer rows.Close()
-
-	all, err := b.scanRows(rows)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make(map[string][]map[string]interface{})
-	for _, row := range all {
-		key := fmt.Sprintf("%v", row[fk])
-		result[key] = append(result[key], row)
-	}
-	return result, nil
+	v, ok := data[f.Name]
+	return v, ok
 }
+
+// pk returns the primary key column.
+func (b *Builder) pk() string { return b.entity.PKColumn() }
 
 // selectColumns returns a comma-separated list of quoted column names.
 func (b *Builder) selectColumns() string {
@@ -504,31 +436,15 @@ func (b *Builder) selectColumns() string {
 	return strings.Join(cols, ", ")
 }
 
-func (b *Builder) isAllowedColumn(col string) bool {
-	for _, f := range b.entity.Fields {
-		if f.ColumnName == col || f.Name == col {
-			return true
+// field resolves a column or field name to the entity field.
+func (b *Builder) field(name string) (*schema.Field, bool) {
+	for i := range b.entity.Fields {
+		f := &b.entity.Fields[i]
+		if f.ColumnName == name || f.Name == name {
+			return f, true
 		}
 	}
-	return false
-}
-
-func (b *Builder) buildOrderClause(sort string) (string, error) {
-	parts := strings.SplitN(sort, ":", 2)
-	col := parts[0]
-	dir := "ASC"
-	if len(parts) == 2 {
-		switch strings.ToUpper(parts[1]) {
-		case "ASC", "DESC":
-			dir = strings.ToUpper(parts[1])
-		default:
-			return "", fmt.Errorf("invalid sort direction %q", parts[1])
-		}
-	}
-	if !b.isAllowedColumn(col) {
-		return "", fmt.Errorf("sort column %q is not a known entity field", col)
-	}
-	return b.qi(col) + " " + dir, nil
+	return nil, false
 }
 
 // qi is a shorthand for dialect.QuoteIdent.
@@ -536,22 +452,10 @@ func (b *Builder) qi(name string) string {
 	return b.dialect.QuoteIdent(name)
 }
 
-// ph returns the Nth positional placeholder in the dialect's format ($N or ?).
-func (b *Builder) ph(n int) string {
-	if b.dialect.Name() == "postgres" {
-		return fmt.Sprintf("$%d", n)
-	}
-	return "?"
-}
-
-// jsonColumns returns the set of this entity's column names whose field type
-// is jsonb. database/sql (via the pq driver) scans jsonb values as []byte —
-// left alone, encoding/json.Marshal treats a bare []byte as binary data and
-// base64-encodes it, corrupting every jsonb column in every API response
-// instead of embedding it as nested JSON. Only columns actually declared
-// jsonb get the json.RawMessage treatment in scanRows, so a text/varchar
-// column that happens to hold a bare-JSON-looking value (e.g. a numeric
-// grade string like "1") is never misinterpreted as JSON.
+// jsonColumns returns the set of this entity's column names whose field type is jsonb.
+// database/sql scans jsonb values as []byte; left alone, encoding/json would
+// base64-encode them. Only declared jsonb columns get the json.RawMessage treatment, so
+// a text column holding JSON-looking text is never misinterpreted.
 func (b *Builder) jsonColumns() map[string]bool {
 	cols := make(map[string]bool)
 	for _, f := range b.entity.Fields {
@@ -562,29 +466,34 @@ func (b *Builder) jsonColumns() map[string]bool {
 	return cols
 }
 
-// scanRows converts database/sql rows to a slice of string-keyed maps.
-func (b *Builder) scanRows(rows *sql.Rows) ([]map[string]interface{}, error) {
+// scanRows converts database/sql rows to a slice of string-keyed maps. Text that MySQL
+// hands back as []byte is converted to string so JSON encoding stays readable.
+func (b *Builder) scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("getting columns: %w", err)
 	}
 	jsonCols := b.jsonColumns()
 
-	var results []map[string]interface{}
+	results := []map[string]any{}
 	for rows.Next() {
-		vals := make([]interface{}, len(cols))
-		ptrs := make([]interface{}, len(cols))
+		vals := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
 		for i := range vals {
 			ptrs[i] = &vals[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
 			return nil, fmt.Errorf("scanning row: %w", err)
 		}
-		row := make(map[string]interface{}, len(cols))
+		row := make(map[string]any, len(cols))
 		for i, col := range cols {
 			v := vals[i]
-			if jsonCols[col] {
-				if raw, ok := v.([]byte); ok && len(raw) > 0 {
+			switch raw := v.(type) {
+			case []byte:
+				v = b.convertBytes(col, raw, jsonCols[col])
+			case string:
+				// SQLite (and some MySQL setups) return JSON columns as text.
+				if jsonCols[col] && json.Valid([]byte(raw)) {
 					v = json.RawMessage(raw)
 				}
 			}
@@ -596,4 +505,25 @@ func (b *Builder) scanRows(rows *sql.Rows) ([]map[string]interface{}, error) {
 		return nil, fmt.Errorf("iterating rows: %w", err)
 	}
 	return results, nil
+}
+
+// convertBytes turns driver []byte values into JSON-friendly types: jsonb → raw JSON,
+// 16-byte uuid → canonical string, bytea stays binary, everything else → string.
+func (b *Builder) convertBytes(col string, raw []byte, isJSON bool) any {
+	if isJSON && len(raw) > 0 {
+		return json.RawMessage(append([]byte(nil), raw...))
+	}
+	if f, ok := b.field(col); ok {
+		switch f.Type {
+		case types.FieldTypeBytea:
+			return append([]byte(nil), raw...)
+		case types.FieldTypeUUID:
+			if len(raw) == 16 {
+				if u, err := uuid.FromBytes(raw); err == nil {
+					return u.String()
+				}
+			}
+		}
+	}
+	return string(raw)
 }

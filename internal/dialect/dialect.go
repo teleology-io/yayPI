@@ -47,6 +47,20 @@ type Dialect interface {
 	// for all indexes in schemaName.
 	ListIndexesQuery(schemaName string) string
 
+	// TranslateDefault rewrites a column DEFAULT expression written in the portable
+	// (Postgres-flavoured) form — e.g. now(), gen_random_uuid() — into this engine's
+	// equivalent. Literals pass through unchanged.
+	TranslateDefault(expr string) string
+
+	// IsForeignKeyViolation reports a foreign-key constraint failure.
+	IsForeignKeyViolation(err error) bool
+
+	// IsNotNullViolation reports a NOT NULL constraint failure.
+	IsNotNullViolation(err error) bool
+
+	// IsCheckViolation reports a CHECK constraint failure.
+	IsCheckViolation(err error) bool
+
 	// MigrationsTableDDL returns the CREATE TABLE … statement for the
 	// yaypi_migrations tracking table, using the dialect's own types.
 	MigrationsTableDDL(tableName string) string

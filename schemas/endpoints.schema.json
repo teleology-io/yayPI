@@ -44,7 +44,7 @@
           "description": "Auto-generate standard CRUD operations. Generates routes under path.",
           "items": {
             "type": "string",
-            "enum": ["list", "get", "create", "update", "delete"]
+            "enum": ["list", "get", "create", "update", "delete", "replace"]
           },
           "examples": [["list", "get", "create", "update", "delete"]]
         },
@@ -65,6 +65,10 @@
         },
         "auth": { "$ref": "#/$defs/AuthRequirement" },
         "rate_limit": { "$ref": "#/$defs/RateLimitConfig" },
+        "max_body_size": {
+          "type": "string",
+          "description": "Overrides server.max_request_body_size for this endpoint, e.g. 64MB for an upload route."
+        },
         "list": { "$ref": "#/$defs/ListConfig" },
         "get": { "$ref": "#/$defs/GetConfig" },
         "create": { "$ref": "#/$defs/CreateConfig" },
@@ -179,6 +183,11 @@
           "type": "array",
           "description": "Row-level access rules. Applied as additional WHERE clauses.",
           "items": { "$ref": "#/$defs/RowAccessRule" }
+        },
+        "search": {
+          "type": "array",
+          "description": "Text fields matched case-insensitively by ?q=.",
+          "items": { "type": "string" }
         }
       }
     },
@@ -265,6 +274,11 @@
           "description": "How to handle per-row errors in bulk create. 'abort' rolls back all; 'partial' skips failed rows.",
           "enum": ["abort", "partial"],
           "default": "abort"
+        },
+        "strict": {
+          "type": "boolean",
+          "description": "Reject unknown body fields with 400 instead of dropping them.",
+          "default": false
         }
       }
     },
@@ -284,6 +298,11 @@
           "type": "array",
           "description": "Row-level access rules. Request is denied (404) if none match.",
           "items": { "$ref": "#/$defs/RowAccessRule" }
+        },
+        "strict": {
+          "type": "boolean",
+          "description": "Reject unknown body fields with 400 instead of dropping them.",
+          "default": false
         }
       }
     },

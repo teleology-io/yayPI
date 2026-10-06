@@ -1,160 +1,305 @@
 package auth
 
 import (
+	"context"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
+	"github.com/rs/zerolog/log"
+
+	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/schema"
 )
 
 const (
-	refreshTokenCookie  = "refresh_token"
-	refreshTokenType    = "refresh"
+	refreshTokenCookie   = "refresh_token"
 	defaultRefreshExpiry = 30 * 24 * time.Hour
 )
 
-// issueRefreshToken creates a long-lived refresh JWT for the given user ID.
-func (h *Handler) issueRefreshToken(userID string, ttl time.Duration) (string, error) {
-	claims := jwt.MapClaims{
-		"sub":  userID,
-		"type": refreshTokenType,
-		"iat":  time.Now().Unix(),
-		"exp":  time.Now().Add(ttl).Unix(),
-	}
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString(h.secret)
+var (
+	errRefreshInvalid = errors.New("invalid or expired refresh token")
+	errRefreshReused  = errors.New("refresh token reuse detected")
+)
+
+func (h *Handler) refreshEnabled() bool {
+	return h.cfg.Refresh != nil && h.cfg.Refresh.Enabled
 }
 
-// refresh handles POST /auth/refresh.
-// Accepts a refresh token from cookie or JSON body, validates it, and returns a new access token.
-func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
-	ref := h.cfg.Refresh
-	if ref == nil || !ref.Enabled {
-		writeError(w, http.StatusNotFound, "refresh not enabled")
-		return
-	}
-
-	// Resolve TTL
-	ttl := defaultRefreshExpiry
-	if ref.Expiry != "" {
-		if d, err := parseDuration(ref.Expiry); err == nil {
-			ttl = d
+func (h *Handler) refreshTTL() time.Duration {
+	if h.cfg.Refresh != nil && h.cfg.Refresh.Expiry != "" {
+		if d, err := parseDuration(h.cfg.Refresh.Expiry); err == nil && d > 0 {
+			return d
 		}
 	}
+	return defaultRefreshExpiry
+}
 
-	store := ref.Store
-	if store == "" {
-		store = "cookie"
+func (h *Handler) refreshInCookie() bool {
+	return h.cfg.Refresh == nil || h.cfg.Refresh.Store == "" || h.cfg.Refresh.Store == "cookie"
+}
+
+// newOpaqueToken returns a random URL-safe token and its SHA-256 hex digest. Only the
+// digest is stored, so a database leak does not yield usable tokens.
+func newOpaqueToken() (plain, hash string, err error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", "", err
 	}
+	plain = base64.RawURLEncoding.EncodeToString(b)
+	return plain, hashToken(plain), nil
+}
 
-	// Extract refresh token
-	var tokenStr string
-	if store == "cookie" {
+func hashToken(plain string) string {
+	sum := sha256.Sum256([]byte(plain))
+	return hex.EncodeToString(sum[:])
+}
+
+// issueRefreshToken stores a new refresh token for userID. familyID groups the rotation
+// chain of one login session; "" starts a new family.
+func (h *Handler) issueRefreshToken(ctx context.Context, dbc *db.DB, userID, familyID string) (string, error) {
+	plain, hash, err := newOpaqueToken()
+	if err != nil {
+		return "", err
+	}
+	if familyID == "" {
+		familyID = uuid.NewString()
+	}
+	now := time.Now()
+	d := dbc.Dialect
+	q := d.Rebind(fmt.Sprintf(
+		`INSERT INTO %s (id, user_id, family_id, token_hash, expires_at, created_at) VALUES ($1, $2, $3, $4, $5, $6)`,
+		d.QuoteIdent(schema.RefreshTokenTable)))
+	_, err = dbc.SQL.ExecContext(ctx, q, uuid.NewString(), userID, familyID, hash, now.Add(h.refreshTTL()).Unix(), now.Unix())
+	if err != nil {
+		return "", fmt.Errorf("storing refresh token: %w", err)
+	}
+	return plain, nil
+}
+
+// deliverRefreshToken sends the token as an HttpOnly cookie (store: cookie) or in the
+// response body (store: body).
+func (h *Handler) deliverRefreshToken(w http.ResponseWriter, resp map[string]any, plain string) {
+	if h.refreshInCookie() {
+		h.setCookie(w, refreshTokenCookie, plain, int(h.refreshTTL().Seconds()))
+		return
+	}
+	resp["refresh_token"] = plain
+}
+
+// readRefreshToken extracts the presented refresh token from cookie or JSON body.
+// ok=false means the response has already been written.
+func (h *Handler) readRefreshToken(w http.ResponseWriter, r *http.Request) (string, bool) {
+	if h.refreshInCookie() {
 		c, err := r.Cookie(refreshTokenCookie)
 		if err != nil || c.Value == "" {
 			writeError(w, http.StatusUnauthorized, "refresh token missing")
-			return
+			return "", false
 		}
-		tokenStr = c.Value
-	} else {
-		// body: {"refresh_token": "..."}
-		var body struct {
-			RefreshToken string `json:"refresh_token"`
-		}
-		if err := decodeJSON(r, &body); err != nil || body.RefreshToken == "" {
-			writeError(w, http.StatusUnauthorized, "refresh token missing")
-			return
-		}
-		tokenStr = body.RefreshToken
+		return c.Value, true
+	}
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	if !decodeBody(w, r, &body) {
+		return "", false
+	}
+	if body.RefreshToken == "" {
+		writeError(w, http.StatusUnauthorized, "refresh token missing")
+		return "", false
+	}
+	return body.RefreshToken, true
+}
+
+// rotateRefreshToken consumes plain and returns (userID, familyID). A token presented a
+// second time means it was stolen (either the attacker or the user already rotated it):
+// the whole family is revoked so neither party keeps a valid session.
+func (h *Handler) rotateRefreshToken(ctx context.Context, dbc *db.DB, plain string) (string, string, error) {
+	d := dbc.Dialect
+	table := d.QuoteIdent(schema.RefreshTokenTable)
+	hash := hashToken(plain)
+
+	rows, err := dbc.SQL.QueryContext(ctx, d.Rebind(fmt.Sprintf(
+		`SELECT id, user_id, family_id, expires_at, used_at, revoked_at FROM %s WHERE token_hash = $1`, table)), hash)
+	if err != nil {
+		return "", "", err
+	}
+	row, err := scanRow(rows)
+	rows.Close()
+	if err != nil {
+		return "", "", err
+	}
+	if row == nil {
+		return "", "", errRefreshInvalid
+	}
+	id, userID, familyID := asString(row["id"]), asString(row["user_id"]), asString(row["family_id"])
+	now := time.Now().Unix()
+
+	if row["revoked_at"] != nil {
+		return "", "", errRefreshInvalid
+	}
+	if row["used_at"] != nil {
+		_ = h.revokeFamily(ctx, dbc, familyID)
+		return "", "", errRefreshReused
+	}
+	if exp, _ := toInt64(row["expires_at"]); exp <= now {
+		return "", "", errRefreshInvalid
 	}
 
-	// Parse and validate
-	alg := h.algorithm
-	if alg == "" {
-		alg = "HS256"
+	// Conditional update: of two concurrent refreshes with the same token only one wins;
+	// the loser is treated as reuse.
+	res, err := dbc.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
+		`UPDATE %s SET used_at = $1 WHERE id = $2 AND used_at IS NULL AND revoked_at IS NULL`, table)), now, id)
+	if err != nil {
+		return "", "", err
 	}
-	parser := jwt.NewParser(
-		jwt.WithValidMethods([]string{alg}),
-		jwt.WithExpirationRequired(),
-	)
-	token, err := parser.ParseWithClaims(tokenStr, &jwt.MapClaims{}, func(_ *jwt.Token) (any, error) {
-		return h.secret, nil
-	})
-	if err != nil || !token.Valid {
-		writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
-		return
+	if n, _ := res.RowsAffected(); n == 0 {
+		_ = h.revokeFamily(ctx, dbc, familyID)
+		return "", "", errRefreshReused
 	}
+	return userID, familyID, nil
+}
 
-	claims, ok := token.Claims.(*jwt.MapClaims)
+func (h *Handler) revokeFamily(ctx context.Context, dbc *db.DB, familyID string) error {
+	d := dbc.Dialect
+	_, err := dbc.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
+		`UPDATE %s SET revoked_at = $1 WHERE family_id = $2 AND revoked_at IS NULL`,
+		d.QuoteIdent(schema.RefreshTokenTable))), time.Now().Unix(), familyID)
+	return err
+}
+
+// revokeAllForUser revokes every refresh token belonging to userID.
+func (h *Handler) revokeAllForUser(ctx context.Context, dbc *db.DB, userID string) error {
+	d := dbc.Dialect
+	_, err := dbc.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
+		`UPDATE %s SET revoked_at = $1 WHERE user_id = $2 AND revoked_at IS NULL`,
+		d.QuoteIdent(schema.RefreshTokenTable))), time.Now().Unix(), userID)
+	return err
+}
+
+// refresh handles POST /auth/refresh: it consumes the presented refresh token, issues a
+// new one in the same family, and returns a fresh access token.
+func (h *Handler) refresh(w http.ResponseWriter, r *http.Request) {
+	plain, ok := h.readRefreshToken(w, r)
 	if !ok {
-		writeError(w, http.StatusUnauthorized, "invalid token claims")
 		return
 	}
-	if typ, _ := (*claims)["type"].(string); typ != refreshTokenType {
-		writeError(w, http.StatusUnauthorized, "not a refresh token")
-		return
-	}
-
-	userID, _ := (*claims)["sub"].(string)
-	if userID == "" {
-		writeError(w, http.StatusUnauthorized, "invalid token subject")
-		return
-	}
-
-	// Look up the user to get current role/email for the new access token
 	entity, dbc, err := h.resolveEntity()
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "configuration error")
 		return
 	}
-	d := dbc.Dialect
-	q := d.Rebind(fmt.Sprintf(`SELECT * FROM %s WHERE id = $1 AND deleted_at IS NULL LIMIT 1`,
-		d.QuoteIdent(entity.Table)))
-	rows, err := dbc.SQL.QueryContext(r.Context(), q, userID)
+
+	userID, familyID, err := h.rotateRefreshToken(r.Context(), dbc, plain)
+	if err != nil {
+		if errors.Is(err, errRefreshReused) {
+			log.Warn().Str("ip", middleware.GetClientIP(r)).Msg("auth: refresh token reuse detected; session family revoked")
+		}
+		if errors.Is(err, errRefreshInvalid) || errors.Is(err, errRefreshReused) {
+			h.clearRefreshCookie(w)
+			writeError(w, http.StatusUnauthorized, "invalid or expired refresh token")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+
+	// Reload the user so the new access token carries the current role / token version.
+	user, err := h.findUserBy(r.Context(), dbc, entity, entity.PKColumn(), userID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	defer rows.Close()
-	user, err := scanRow(rows)
-	if err != nil || user == nil {
+	if user == nil {
+		_ = h.revokeFamily(r.Context(), dbc, familyID)
+		h.clearRefreshCookie(w)
 		writeError(w, http.StatusUnauthorized, "user not found")
 		return
 	}
 
-	// Issue a new access token
-	accessToken, err := h.issueToken(user)
+	access, err := h.issueAccessToken(entity, user)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not issue token")
 		return
 	}
-
-	// Issue a new refresh token and rotate it
-	newRefresh, err := h.issueRefreshToken(userID, ttl)
+	newRefresh, err := h.issueRefreshToken(r.Context(), dbc, userID, familyID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "could not issue refresh token")
 		return
 	}
+	resp := map[string]any{"token": access, "expires_in": int(h.tokens.TTL().Seconds())}
+	h.deliverRefreshToken(w, resp, newRefresh)
+	writeJSON(w, http.StatusOK, resp)
+}
 
-	if store == "cookie" {
-		http.SetCookie(w, &http.Cookie{
-			Name:     refreshTokenCookie,
-			Value:    newRefresh,
-			HttpOnly: true,
-			Secure:   r.TLS != nil,
-			SameSite: http.SameSiteLaxMode,
-			MaxAge:   int(ttl.Seconds()),
-			Path:     "/",
-		})
-		writeJSON(w, http.StatusOK, map[string]any{"token": accessToken})
+// logout handles POST /auth/logout: revokes the presented refresh token's session family
+// and clears the cookie. Always 204 so it is safe to call with a stale token.
+func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
+	var plain string
+	if h.refreshInCookie() {
+		if c, err := r.Cookie(refreshTokenCookie); err == nil {
+			plain = c.Value
+		}
 	} else {
-		writeJSON(w, http.StatusOK, map[string]any{
-			"token":         accessToken,
-			"refresh_token": newRefresh,
-		})
+		var body struct {
+			RefreshToken string `json:"refresh_token"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		plain = body.RefreshToken
+	}
+	if plain != "" {
+		if _, dbc, err := h.resolveEntity(); err == nil {
+			d := dbc.Dialect
+			var familyID string
+			err := dbc.SQL.QueryRowContext(r.Context(), d.Rebind(fmt.Sprintf(
+				`SELECT family_id FROM %s WHERE token_hash = $1`, d.QuoteIdent(schema.RefreshTokenTable))),
+				hashToken(plain)).Scan(&familyID)
+			if err == nil {
+				_ = h.revokeFamily(r.Context(), dbc, familyID)
+			}
+		}
+	}
+	h.clearRefreshCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// logoutAll handles POST /auth/logout-all (authenticated): revokes every refresh token
+// for the caller and bumps their token version so outstanding access tokens die too.
+func (h *Handler) logoutAll(w http.ResponseWriter, r *http.Request) {
+	sub := middleware.GetSubject(r)
+	if sub == nil || sub.ID == "" {
+		writeError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	entity, dbc, err := h.resolveEntity()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "configuration error")
+		return
+	}
+	if err := h.revokeAllForUser(r.Context(), dbc, sub.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	if err := h.bumpTokenVersion(r.Context(), dbc, entity, sub.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
+	h.clearRefreshCookie(w)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) clearRefreshCookie(w http.ResponseWriter) {
+	if h.refreshInCookie() {
+		h.setCookie(w, refreshTokenCookie, "", -1)
 	}
 }
 
@@ -167,9 +312,4 @@ func parseDuration(s string) (time.Duration, error) {
 		}
 	}
 	return time.ParseDuration(s)
-}
-
-// decodeJSON decodes a JSON request body into v.
-func decodeJSON(r *http.Request, v any) error {
-	return json.NewDecoder(r.Body).Decode(v)
 }

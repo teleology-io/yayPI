@@ -23,7 +23,7 @@ var ErrRowAccessDenied = errors.New("row access denied")
 // If rules are defined but none match → ErrRowAccessDenied (caller should return 403).
 //
 // Bind variables in the filter string use the syntax :subject.id, :subject.role,
-// :subject.email and are replaced with positional $N placeholders.
+// :subject.email, :subject.tenant and are replaced with positional $N placeholders.
 func ResolveRowFilter(rules []schema.RowAccessRule, sub *middleware.Subject) (string, []any, error) {
 	if len(rules) == 0 {
 		return "", nil, nil
@@ -70,6 +70,12 @@ func bindSubjectParams(filter string, sub *middleware.Subject) (string, []any) {
 				return ""
 			}
 			return sub.Role
+		}},
+		{":subject.tenant", func() string {
+			if sub == nil {
+				return ""
+			}
+			return sub.Tenant
 		}},
 		{":subject.email", func() string {
 			if sub == nil {
