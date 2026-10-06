@@ -275,7 +275,7 @@ Lower priority; pick per roadmap.
 - `[x]` **P8.3** Sparse fieldsets (`?fields=id,title`).
 - `[x]` **P8.4** Full-text search option per entity.
 - `[x]` **P8.5** PUT (full replace) alongside PATCH.
-- `[-]` **P8.6** File upload support — deferred: object storage needs a cloud SDK dependency and product decisions (limits, scanning, URLs). `RouteHandlerPlugin` covers uploads today.
+- `[~]` **P8.6** File upload/download (S3, multi-bucket, `type: file` / `type: files`, optional) — designed in [file_management.md](file_management.md); not yet implemented.
 - `[x]` **P8.7** Multi-tenancy primitive (tenant column auto-scoped from token claim).
 - `[-]` **P8.8** Config hot reload — not doing: restart-only is documented in docs/production.md. Draining + graceful shutdown make rolling restarts zero-downtime.
 
