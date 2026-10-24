@@ -46,9 +46,9 @@ entity:
 | `bigint` | `bigint` | 64-bit signed |
 | `float` | `double precision` | |
 | `decimal` | `numeric` | Use `precision:` and `scale:` |
-| `boolean` | `boolean` | |
-| `timestamptz` | `timestamptz` | Always store timestamps with timezone |
-| `date` | `date` | Date only, no time |
+| `boolean` | `boolean` | Always a JSON `true`/`false` in responses, on every database |
+| `timestamptz` | `timestamptz` | Always store timestamps with timezone. Responses use [`serialization`](project-config.md#serialization) (RFC 3339 UTC by default) |
+| `date` | `date` | Date only, no time. Responses use `serialization.date_format` (`YYYY-MM-DD` by default) |
 | `jsonb` | `jsonb` | Arbitrary JSON; use for flexible metadata |
 | `enum` | `text` + CHECK | Values listed in `values:`; stored as text |
 | `array` | `text[]` | Array of text values |
@@ -146,7 +146,7 @@ fields:
 
 ### Validation response
 
-Every provided field is also type-checked against its declared `type` — even fields without a `validate:` block — before anything reaches the database: integers must be whole numbers, `timestamptz` takes RFC 3339, `date` takes `YYYY-MM-DD`, `uuid` must parse, `enum` must be one of `values`, `bytea` is base64, and an explicit `null` for a non-nullable field is rejected. `pattern` is compiled at startup, so an invalid regex stops the server. Failures return 400:
+Every provided field is also type-checked against its declared `type` — even fields without a `validate:` block — before anything reaches the database: integers must be whole numbers, `timestamptz` takes RFC 3339 and `date` takes `YYYY-MM-DD` (both also accept the field's configured [`serialization`](project-config.md#serialization) format), `uuid` must parse, `enum` must be one of `values`, `bytea` is base64, and an explicit `null` for a non-nullable field is rejected. `pattern` is compiled at startup, so an invalid regex stops the server. Failures return 400:
 
 ```json
 {
@@ -253,6 +253,7 @@ The migration engine generates the FK constraint as `fk_{table}_{column}`.
 |---|---|
 | `omit_response` | Field is stripped from all API responses (GET, LIST, CREATE, UPDATE) |
 | `omit_log` | Field is stripped from structured log entries |
+| `format` | `timestamptz`/`date` only: output format for this field, overriding the project's [`serialization`](project-config.md#serialization) setting (`unix_ms`, `"DD/MM/YYYY"`, …) |
 
 Use `omit_response: true` for password hashes, internal flags, or any field that should never be exposed to API consumers.
 

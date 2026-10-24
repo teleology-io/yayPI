@@ -74,7 +74,7 @@ auth:
 
 ## Endpoints
 
-All routes are mounted under `{base_url}{base_path}` (e.g. `/api/v1/auth`). Responses carry `Cache-Control: no-store`.
+All routes are mounted under `{base_url}{base_path}` (e.g. `/api/v1/auth`). Responses carry `Cache-Control: no-store`. The enabled routes are documented in the generated OpenAPI specs under the `Auth` tag (see [OpenAPI](openapi.md)).
 
 | Method | Path | Auth | Description |
 |---|---|---|---|

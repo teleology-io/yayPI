@@ -46,9 +46,35 @@
     "smtp": { "$ref": "#/$defs/SMTPConfig" },
     "outbox": { "$ref": "#/$defs/OutboxConfig" },
     "cron": { "$ref": "#/$defs/CronConfig" },
-    "audit": { "$ref": "#/$defs/AuditConfig" }
+    "audit": { "$ref": "#/$defs/AuditConfig" },
+    "serialization": { "$ref": "#/$defs/SerializationConfig" }
   },
   "$defs": {
+    "SerializationConfig": {
+      "type": "object",
+      "description": "How timestamptz and date values appear in responses. Writes and filters accept RFC 3339 (or YYYY-MM-DD) and the configured format.",
+      "additionalProperties": false,
+      "properties": {
+        "timestamp_format": {
+          "type": "string",
+          "description": "Output format for timestamptz fields. A preset (rfc3339, rfc3339_ms, rfc3339_nano, unix, unix_ms, date) or a pattern of tokens: YYYY YY MMMM MMM MM M DD D dddd ddd HH H hh h mm m ss s SSS A a Z ZZ, with literal text in [brackets].",
+          "default": "rfc3339",
+          "examples": ["rfc3339", "rfc3339_ms", "unix", "YYYY-MM-DD HH:mm:ss", "D MMM YYYY, h:mm A"]
+        },
+        "date_format": {
+          "type": "string",
+          "description": "Output format for date fields. A preset (rfc3339, rfc3339_ms, rfc3339_nano, unix, unix_ms, date) or a pattern of tokens: YYYY YY MMMM MMM MM M DD D dddd ddd HH H hh h mm m ss s SSS A a Z ZZ, with literal text in [brackets].",
+          "default": "date",
+          "examples": ["date", "DD/MM/YYYY", "MMMM D, YYYY"]
+        },
+        "timezone": {
+          "type": "string",
+          "description": "IANA time zone timestamps are rendered in (dates are never shifted).",
+          "default": "UTC",
+          "examples": ["UTC", "America/New_York", "Europe/Berlin"]
+        }
+      }
+    },
     "ProjectConfig": {
       "type": "object",
       "description": "Project-level metadata.",

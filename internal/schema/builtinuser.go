@@ -105,6 +105,17 @@ func builtinUserFields() []Field {
 // NewBuiltinUser constructs the built-in User entity, extended with any developer-supplied
 // fields from auth.yaml under auth.user.fields. Built-in field names take precedence;
 // extension fields whose column names collide with built-in fields are dropped with a warning.
+// IsBuiltinUserField reports whether column belongs to the built-in User (as
+// opposed to an auth.user.fields extension).
+func IsBuiltinUserField(column string) bool {
+	for _, f := range builtinUserFields() {
+		if f.ColumnName == column {
+			return true
+		}
+	}
+	return false
+}
+
 func NewBuiltinUser(extensions []config.FieldDef) (*Entity, error) {
 	base := builtinUserFields()
 

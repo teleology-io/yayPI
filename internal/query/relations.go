@@ -129,7 +129,7 @@ func (b *Builder) fetchIn(ctx context.Context, col string, keys []any, joinTable
 				sqlStr += " AND o." + b.qi("deleted_at") + " IS NULL"
 			}
 		}
-		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 		if err != nil {
 			return nil, fmt.Errorf("include query: %w", err)
 		}

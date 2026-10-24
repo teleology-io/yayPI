@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -207,24 +206,17 @@ func coerceValue(f *schema.Field, v any, dialectName string) (any, string) {
 		}
 		return u.String(), ""
 	case types.FieldTypeTimestamptz:
-		s, ok := v.(string)
+		t, ok := f.ParseTime(v)
 		if !ok {
-			return bad("an RFC 3339 timestamp")
-		}
-		t, err := time.Parse(time.RFC3339Nano, s)
-		if err != nil {
-			return bad("an RFC 3339 timestamp")
+			return bad(f.TimeExpectation())
 		}
 		return t.UTC(), ""
 	case types.FieldTypeDate:
-		s, ok := v.(string)
+		t, ok := f.ParseTime(v)
 		if !ok {
-			return bad("a YYYY-MM-DD date")
+			return bad(f.TimeExpectation())
 		}
-		if _, err := time.Parse("2006-01-02", s); err != nil {
-			return bad("a YYYY-MM-DD date")
-		}
-		return s, ""
+		return t.Format("2006-01-02"), ""
 	case types.FieldTypeJSONB:
 		b, err := json.Marshal(v)
 		if err != nil {

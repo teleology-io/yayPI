@@ -19,8 +19,10 @@ import (
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/dialect"
 	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/query"
 	"github.com/teleology-io/yayPI/internal/schema"
 	"github.com/teleology-io/yayPI/internal/token"
+	"github.com/teleology-io/yayPI/pkg/types"
 )
 
 // bcryptCost is the password hashing work factor (a var so tests can lower it).
@@ -549,12 +551,19 @@ func stripServerControlled(entity *schema.Entity, body map[string]any, hashField
 	}
 }
 
-// stripSensitive removes omit_response fields from a user record before sending it.
+// stripSensitive removes omit_response fields from a user record before sending it,
+// and turns boolean columns into JSON booleans and time columns into the configured
+// format (scanRow returns raw driver values).
 func stripSensitive(entity *schema.Entity, user map[string]any) {
+	entity.RenderTimes(user)
 	for _, f := range entity.Fields {
 		if f.OmitResponse {
 			delete(user, f.ColumnName)
 			delete(user, f.Name)
+			continue
+		}
+		if v, ok := user[f.ColumnName]; ok && f.Type == types.FieldTypeBoolean {
+			user[f.ColumnName] = query.AsBool(v)
 		}
 	}
 }

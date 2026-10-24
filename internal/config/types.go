@@ -24,6 +24,8 @@ type RootConfig struct {
 	Cron        CronConfig     `yaml:"cron"`
 	Audit       AuditConfig    `yaml:"audit"`
 	Metrics     *MetricsConfig `yaml:"metrics"`
+	// Serialization sets how timestamptz and date values appear in responses.
+	Serialization RootSerializationConfig `yaml:"serialization"`
 	// Loaded from included files:
 	Entities     []*EntityConfig         `yaml:"-"`
 	Endpoints    []*EndpointFileConfig   `yaml:"-"`
@@ -316,6 +318,19 @@ type ReferenceDef struct {
 type SerializationDef struct {
 	OmitResponse bool `yaml:"omit_response"`
 	OmitLog      bool `yaml:"omit_log"`
+	// Format overrides the project's timestamp_format / date_format for this
+	// timestamptz or date field (see RootSerializationConfig).
+	Format string `yaml:"format"`
+}
+
+// RootSerializationConfig is the project-wide output format for time values.
+// A format is a preset (rfc3339, rfc3339_ms, rfc3339_nano, unix, unix_ms, date)
+// or a pattern such as "YYYY-MM-DD HH:mm:ss" (see internal/timefmt). Writes
+// accept RFC 3339 and the configured format.
+type RootSerializationConfig struct {
+	TimestampFormat string `yaml:"timestamp_format"` // default rfc3339
+	DateFormat      string `yaml:"date_format"`      // default date (YYYY-MM-DD)
+	Timezone        string `yaml:"timezone"`         // IANA name timestamps are rendered in; default UTC
 }
 
 // RelationDef describes a relationship between entities.

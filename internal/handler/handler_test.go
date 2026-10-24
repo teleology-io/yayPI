@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -18,6 +19,7 @@ import (
 	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/schema"
 	"github.com/teleology-io/yayPI/internal/testutil"
+	"github.com/teleology-io/yayPI/internal/timefmt"
 	"github.com/teleology-io/yayPI/pkg/sdk"
 	"github.com/teleology-io/yayPI/pkg/types"
 )
@@ -94,6 +96,7 @@ func (h *hookPlugin) BeforeCreate(_ sdk.HookContext, _ string, d map[string]any)
 
 type env struct {
 	t     *testing.T
+	reg   *schema.Registry
 	srv   http.Handler
 	dbm   *db.Manager
 	hooks *hookPlugin
@@ -119,7 +122,7 @@ func newEnv(t *testing.T, bulkMode string) *env {
 		})
 	})
 	list := &schema.ListOpts{
-		AllowFilterBy: []string{"score", "title", "author_id"},
+		AllowFilterBy: []string{"score", "title", "author_id", "created_at"},
 		AllowSortBy:   []string{"title", "score", "created_at", "id"},
 		Include:       []string{"author", "tags"},
 		Pagination:    schema.Pagination{DefaultLimit: 20, MaxLimit: 100},
@@ -130,7 +133,7 @@ func newEnv(t *testing.T, bulkMode string) *env {
 	r.Post("/posts/bulk", f.Create(post, &schema.CreateOpts{Bulk: true, BulkMax: 10, BulkErrorMode: bulkMode}))
 	r.Patch("/posts/{id}", f.Update(post, &schema.UpdateOpts{}))
 	r.Delete("/posts/{id}", f.Delete(post, &schema.DeleteOpts{}))
-	return &env{t: t, srv: r, dbm: dbm, hooks: hooks}
+	return &env{t: t, reg: reg, srv: r, dbm: dbm, hooks: hooks}
 }
 
 func (e *env) req(method, path string, body any, headers ...string) (*httptest.ResponseRecorder, map[string]any) {
@@ -429,5 +432,66 @@ func TestHooksSeeNonColumnKeys(t *testing.T) {
 	}
 	if rec["slug"] != "from-hook" {
 		t.Fatalf("hook output not persisted: %v", rec)
+	}
+}
+
+// SQLite stores booleans as INTEGER; responses must still carry JSON booleans.
+func TestBooleansAreJSONBooleans(t *testing.T) {
+	e := newEnv(t, "")
+	admin := []string{"X-Test-Role", "admin"}
+	rr, out := e.req("POST", "/posts", map[string]any{"title": "Flag", "featured": true}, admin...)
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", rr.Code, rr.Body)
+	}
+	rec := out["data"].(map[string]any)
+	if rec["featured"] != true {
+		t.Errorf("create: featured = %#v, want true", rec["featured"])
+	}
+	id := rec["id"].(string)
+	if _, out = e.req("GET", "/posts/"+id, nil); out["data"].(map[string]any)["featured"] != true {
+		t.Errorf("get: featured = %#v, want true", out["data"].(map[string]any)["featured"])
+	}
+	if _, out = e.req("GET", "/posts", nil); out["data"].([]any)[0].(map[string]any)["featured"] != true {
+		t.Errorf("list: featured = %#v, want true", out["data"].([]any)[0].(map[string]any)["featured"])
+	}
+	if _, out = e.req("PATCH", "/posts/"+id, map[string]any{"featured": false}, admin...); out["data"].(map[string]any)["featured"] != false {
+		t.Errorf("update: featured = %#v, want false", out["data"].(map[string]any)["featured"])
+	}
+}
+
+// SQLite returns CURRENT_TIMESTAMP as "2006-01-02 15:04:05"; responses use the
+// configured format (RFC 3339 UTC by default).
+func TestTimestampsUseConfiguredFormat(t *testing.T) {
+	e := newEnv(t, "")
+	rec := e.create(map[string]any{"title": "Clock"})
+	rfc := regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$`)
+	if s, _ := rec["created_at"].(string); !rfc.MatchString(s) {
+		t.Fatalf("default: created_at = %#v, want RFC 3339 UTC", rec["created_at"])
+	}
+
+	post, _ := e.reg.GetEntity("Post")
+	for i := range post.Fields {
+		if post.Fields[i].Name == "created_at" {
+			post.Fields[i].Time, _ = timefmt.New("YYYY-MM-DD HH:mm:ss", nil)
+		}
+		if post.Fields[i].Name == "updated_at" {
+			post.Fields[i].Time, _ = timefmt.New("unix", nil)
+		}
+	}
+	id := rec["id"].(string)
+	_, out := e.req("GET", "/posts/"+id, nil)
+	got := out["data"].(map[string]any)
+	if s, _ := got["created_at"].(string); !regexp.MustCompile(`^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$`).MatchString(s) {
+		t.Errorf("pattern: created_at = %#v", got["created_at"])
+	}
+	if _, ok := got["updated_at"].(float64); !ok {
+		t.Errorf("unix: updated_at = %#v, want a number", got["updated_at"])
+	}
+
+	// The configured format round-trips through filters.
+	since := url.QueryEscape(got["created_at"].(string))
+	rr, out := e.req("GET", "/posts?created_at[gte]="+since, nil)
+	if rr.Code != http.StatusOK || len(out["data"].([]any)) != 1 {
+		t.Errorf("filter with configured format: %d %s", rr.Code, rr.Body)
 	}
 }

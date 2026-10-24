@@ -141,6 +141,14 @@ For each CRUD operation on each included endpoint:
 | `replace` | PUT | `/path/{id}` | Same as `update` |
 | `delete` | DELETE | `/path/{id}` | `If-Match` header; 204, 404, 412 |
 
+With a `kind: auth` file, the enabled auth routes are documented too, under
+the `Auth` tag and the configured `base_path`: `register`, `login`, `me`,
+`refresh`/`logout`/`logout-all`, `password/*`, `verify-email*` and the OAuth2
+redirects, each only when its switch is on. Sessions use the `AuthSession`
+schema (`token`, `expires_in`, `user`, plus `refresh_token` with
+`refresh.store: body`); `user` is the built-in `User` schema including
+`auth.user.fields`.
+
 Every operation also documents 400 and 429, and 401/403 when auth is required. All errors reference the shared `Error` schema (`error`, `code`, `request_id`, `errors`). Internal tables (refresh tokens, outbox, audit log, …) never appear in specs.
 
 **Entity schemas** in `components/schemas`:
@@ -173,7 +181,7 @@ Every operation also documents 400 and 429, and 401/403 when auth is required. A
 | `float` | `number` | `float` |
 | `decimal` | `number` | `double` |
 | `boolean` | `boolean` | — |
-| `timestamptz` | `string` | `date-time` |
+| `timestamptz` | `string` | `date-time` (follows [`serialization`](project-config.md#serialization): `unix` formats are `integer`, patterns are `string` with the pattern in the description) |
 | `date` | `string` | `date` |
 | `jsonb` | `object` | — |
 | `enum` | `string` | — (+ `enum: [values]`) |

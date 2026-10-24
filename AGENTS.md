@@ -30,7 +30,9 @@ Full structured context for AI assistants lives in [`.ai/`](.ai/):
 | Change rate limiting / client IP | `internal/middleware/ratelimit.go`, `internal/middleware/clientip.go`, `internal/router/builder.go` |
 | Change error responses | `internal/apierr/apierr.go`, `internal/handler/respond.go` |
 | Change migration behavior | `internal/migration/engine.go`, `internal/migration/runner.go`, `internal/migration/lock.go` |
-| Change OpenAPI generation | `internal/openapi/builder.go` |
+| Change OpenAPI generation | `internal/openapi/builder.go`, `internal/openapi/auth.go` (auth routes) |
+| Change time formats in responses / input | `internal/timefmt/` (presets, patterns), `internal/schema/timefmt.go` (resolution, `RenderTimes`) |
+| Change how row values reach JSON | `internal/query/builder.go` (`scanRows`, `AsBool`, SQLite time binding) |
 | Change email / webhook delivery | `internal/outbox/` (observer renders in-tx, worker delivers), `internal/mailer/mailer.go` (SMTP) |
 | Change audit logging | `internal/audit/audit.go` |
 | Change outbound HTTP safety | `internal/netsafe/netsafe.go` |

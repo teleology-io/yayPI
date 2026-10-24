@@ -12,6 +12,9 @@ type Registry struct {
 	entities  map[string]*Entity
 	endpoints []*Endpoint
 	Specs     []SpecMeta
+	// AuthEndpoint is the `kind: auth` configuration when the built-in auth routes
+	// are mounted (nil otherwise); the OpenAPI builder documents those routes.
+	AuthEndpoint *config.AuthEndpointDef
 }
 
 // SpecMeta holds the resolved metadata for a named OpenAPI spec.
@@ -193,6 +196,7 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 		for _, e := range NewAuthTokenEntities() {
 			reg.RegisterEntity(e)
 		}
+		reg.AuthEndpoint = &cfg.AuthEndpoint.Auth
 	}
 
 	// Register entities; skip any YAML-defined "User" — the built-in takes precedence.
@@ -238,6 +242,9 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 		reg.Specs = append(reg.Specs, sm)
 	}
 
+	if err := resolveTimeFormats(reg, cfg.Serialization); err != nil {
+		return nil, err
+	}
 	return reg, nil
 }
 

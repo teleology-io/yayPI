@@ -281,6 +281,50 @@ Durations accept Go syntax (`90s`, `1h30m`) and days (`7d`).
 
 See [Production](production.md) for what is logged and the exported metrics.
 
+### `serialization`
+
+How `timestamptz` and `date` values appear in responses. A field can
+override these with its own `serialization.format`
+([Entities](entities.md#serialization)).
+
+```yaml
+serialization:
+  timestamp_format: rfc3339        # default
+  date_format: date                # default (YYYY-MM-DD)
+  timezone: UTC                    # default; IANA name, e.g. America/New_York
+```
+
+| Preset | Example |
+|---|---|
+| `rfc3339` | `2026-10-03T21:08:07Z` |
+| `rfc3339_ms` | `2026-10-03T21:08:07.123Z` |
+| `rfc3339_nano` | `2026-10-03T21:08:07.123456789Z` |
+| `unix` | `1791061687` (JSON number) |
+| `unix_ms` | `1791061687123` (JSON number) |
+| `date` | `2026-10-03` |
+
+Anything else is a pattern:
+
+| Token | Meaning | Token | Meaning |
+|---|---|---|---|
+| `YYYY` `YY` | 2026, 26 | `HH` `H` | hour 00–23 |
+| `MMMM` `MMM` | October, Oct | `hh` `h` | hour 01–12 |
+| `MM` `M` | 10, 10 | `mm` `m` | minute |
+| `DD` `D` | 03, 3 | `ss` `s` | second |
+| `dddd` `ddd` | Saturday, Sat | `SSS` | milliseconds |
+| `A` `a` | PM, pm | `Z` `ZZ` | `+02:00` (`Z` at UTC), `+0200` |
+
+Put literal text in brackets: `"[Week of] YYYY-MM-DD"`,
+`"YYYY-MM-DD[T]HH:mm:ssZ"`. `"D MMM YYYY, h:mm A"` gives `3 Oct 2026, 9:08 PM`.
+
+- Timestamps are rendered in `timezone`; dates are never shifted.
+- Writes and list filters accept RFC 3339 (`YYYY-MM-DD` for dates) **and**
+  the configured format, so values the API returns can be sent back.
+- The OpenAPI spec follows the format: RFC 3339 is `date-time`, `unix`
+  formats are `integer`, patterns are `string` with the pattern in the
+  description.
+- An unknown preset or a pattern with no date/time token stops startup.
+
 ## Startup checks
 
 `yaypi validate` and `yaypi run` reject:

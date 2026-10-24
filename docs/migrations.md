@@ -111,6 +111,13 @@ yayPi maps YAML field types to the appropriate SQL type for the target database.
 | `array` | `text[]` | `TEXT` (serialized) | `TEXT` |
 | `bytea` | `bytea` | `BLOB` | `BLOB` |
 
+Storage types don't change the API: booleans are always JSON booleans, and
+times are rendered by [`serialization`](project-config.md#serialization)
+whatever the column type. On SQLite, yayPI writes timestamps as UTC text in
+the shape of `CURRENT_TIMESTAMP` (`2006-01-02 15:04:05`, plus a fraction when
+there is one), so values compare and sort correctly as text. Rows written by
+older versions (Go's `… +0000 UTC` form) are still read correctly.
+
 `length:`, `precision:`, and `scale:` are respected where the target type supports them.
 
 ### Switching databases

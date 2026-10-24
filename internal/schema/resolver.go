@@ -143,6 +143,7 @@ func buildField(fd config.FieldDef) (Field, error) {
 		Index:        fd.Index,
 		Immutable:    fd.Immutable,
 		DefaultFrom:  fd.DefaultFrom,
+		FormatSpec:   fd.Serialization.Format,
 	}
 	switch fd.DefaultFrom {
 	case "", "subject.id", "subject.email", "subject.role", "subject.tenant":

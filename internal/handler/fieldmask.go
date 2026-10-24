@@ -90,8 +90,10 @@ func stripServerManaged(entity *schema.Entity, data map[string]interface{}, isUp
 	}
 }
 
-// presentRecord applies omit_response and read-role stripping before a row is returned.
+// presentRecord applies omit_response and read-role stripping and the configured time
+// formats before a row is returned.
 func presentRecord(entity *schema.Entity, row map[string]interface{}, sub *middleware.Subject) {
+	entity.RenderTimes(row)
 	stripOmitFields(entity, row)
 	applyFieldAccess(entity, row, sub)
 }

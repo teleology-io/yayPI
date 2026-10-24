@@ -3,6 +3,7 @@ package schema
 import (
 	"regexp"
 
+	"github.com/teleology-io/yayPI/internal/timefmt"
 	"github.com/teleology-io/yayPI/pkg/types"
 )
 
@@ -73,6 +74,9 @@ type Field struct {
 	WriteRoles   []string // ABAC: nil = no restriction; set = only these roles can write this field
 	Validate     *FieldValidation
 	DefaultFrom  string // subject.id | subject.email | subject.role — server-set on create, immutable after
+	FormatSpec   string // serialization.format as configured ("" = project default)
+	// Time is the resolved output format of a timestamptz or date field; nil otherwise.
+	Time *timefmt.Format
 }
 
 // FieldValidation holds validation rules for a field.

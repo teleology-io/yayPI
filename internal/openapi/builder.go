@@ -123,6 +123,14 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 		}
 	}
 
+	// Built-in auth routes (kind: auth), which aren't registry endpoints.
+	if reg.AuthEndpoint != nil {
+		for name, s := range specs {
+			addAuthPaths(s, reg, reg.AuthEndpoint)
+			tagSeen[name]["Auth"] = struct{}{}
+		}
+	}
+
 	// Populate Tags block in each spec.
 	for name, s := range specs {
 		for tag := range tagSeen[name] {
@@ -145,7 +153,7 @@ func entityToSchema(entity *schema.Entity) *Schema {
 		if f.OmitResponse {
 			continue
 		}
-		prop := fieldSchema(f.Type, f.EnumValues)
+		prop := fieldSchemaFor(&f)
 		if f.Nullable {
 			prop.Nullable = true
 		}
@@ -402,7 +410,7 @@ func buildCreateSchema(entity *schema.Entity) *Schema {
 		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" || f.DefaultFrom != "" {
 			continue
 		}
-		prop := fieldSchema(f.Type, f.EnumValues)
+		prop := fieldSchemaFor(&f)
 		if f.Nullable {
 			prop.Nullable = true
 		}
@@ -444,7 +452,7 @@ func buildUpdateSchema(entity *schema.Entity, ep *schema.Endpoint) *Schema {
 				continue
 			}
 		}
-		prop := fieldSchema(f.Type, f.EnumValues)
+		prop := fieldSchemaFor(&f)
 		if f.Nullable {
 			prop.Nullable = true
 		}

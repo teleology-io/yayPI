@@ -1,6 +1,28 @@
 package openapi
 
-import "github.com/teleology-io/yayPI/pkg/types"
+import (
+	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/pkg/types"
+)
+
+// fieldSchemaFor is fieldSchema plus the field's configured time format: RFC 3339
+// stays date-time, unix formats are integers, patterns are strings described by
+// their pattern.
+func fieldSchemaFor(f *schema.Field) *Schema {
+	s := fieldSchema(f.Type, f.EnumValues)
+	if f.Time == nil {
+		return s
+	}
+	switch {
+	case f.Time.Numeric():
+		return &Schema{Type: "integer", Format: "int64", Description: f.Time.Describe()}
+	case f.Type == types.FieldTypeTimestamptz && f.Time.IsRFC3339():
+	case f.Type == types.FieldTypeDate && f.Time.Spec == "date":
+	default:
+		return &Schema{Type: "string", Description: "Format: " + f.Time.Spec}
+	}
+	return s
+}
 
 // fieldSchema returns an OpenAPI Schema for the given field type and metadata.
 func fieldSchema(ft types.FieldType, enumValues []string) *Schema {

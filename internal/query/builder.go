@@ -14,6 +14,7 @@ import (
 
 	"github.com/teleology-io/yayPI/internal/dialect"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/internal/timefmt"
 	"github.com/teleology-io/yayPI/pkg/types"
 )
 
@@ -78,6 +79,30 @@ type Sort struct {
 // args accumulates query arguments and hands out $N placeholders in textual order, which
 // dialect.Rebind relies on when rewriting to ? for MySQL/SQLite.
 type args struct{ vals []any }
+
+// bind prepares argument values for the driver. SQLite has no time type: its
+// driver would store a time.Time as Go's String() form ("… +0000 UTC"), which
+// neither sorts nor compares against CURRENT_TIMESTAMP text. Times are bound as
+// UTC timefmt.SQLiteLayout instead, so comparisons and ordering are textual and
+// correct.
+func (b *Builder) bind(vals []any) []any {
+	if b.dialect.Name() != "sqlite" {
+		return vals
+	}
+	var out []any // copied on the first time value; callers keep their slice
+	for i, v := range vals {
+		if t, ok := v.(time.Time); ok {
+			if out == nil {
+				out = append([]any(nil), vals...)
+			}
+			out[i] = t.UTC().Format(timefmt.SQLiteLayout)
+		}
+	}
+	if out == nil {
+		return vals
+	}
+	return out
+}
 
 func (a *args) add(v any) string {
 	a.vals = append(a.vals, v)
@@ -170,7 +195,7 @@ func (b *Builder) List(ctx context.Context, q ListQuery) ([]map[string]any, erro
 		sqlStr += " OFFSET " + a.add(q.Offset)
 	}
 
-	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 	if err != nil {
 		return nil, fmt.Errorf("list query: %w", err)
 	}
@@ -213,7 +238,7 @@ func (b *Builder) Count(ctx context.Context, filters []Filter, row RowFilter, se
 		sqlStr += " WHERE " + strings.Join(where, " AND ")
 	}
 	var count int64
-	if err := b.db.QueryRowContext(ctx, b.dialect.Rebind(sqlStr), a.vals...).Scan(&count); err != nil {
+	if err := b.db.QueryRowContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...).Scan(&count); err != nil {
 		return 0, fmt.Errorf("count query: %w", err)
 	}
 	return count, nil
@@ -233,7 +258,7 @@ func (b *Builder) Get(ctx context.Context, id any, row RowFilter, forUpdate ...b
 	if len(forUpdate) > 0 && forUpdate[0] && b.dialect.Name() != "sqlite" {
 		sqlStr += " FOR UPDATE"
 	}
-	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 	if err != nil {
 		return nil, fmt.Errorf("get query: %w", err)
 	}
@@ -277,7 +302,7 @@ func (b *Builder) Create(ctx context.Context, data map[string]any) (map[string]a
 	if b.dialect.SupportsReturning() {
 		sqlStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s) RETURNING %s",
 			table, strings.Join(colNames, ", "), strings.Join(placeholders, ", "), b.selectColumns())
-		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 		if err != nil {
 			return nil, fmt.Errorf("create query: %w", err)
 		}
@@ -294,7 +319,7 @@ func (b *Builder) Create(ctx context.Context, data map[string]any) (map[string]a
 
 	sqlStr := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		table, strings.Join(colNames, ", "), strings.Join(placeholders, ", "))
-	result, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+	result, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 	if err != nil {
 		return nil, fmt.Errorf("create query: %w", err)
 	}
@@ -347,7 +372,7 @@ func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row R
 	if b.dialect.SupportsReturning() {
 		sqlStr := fmt.Sprintf("UPDATE %s SET %s WHERE %s RETURNING %s",
 			table, strings.Join(setClauses, ", "), strings.Join(where, " AND "), b.selectColumns())
-		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+		rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 		if err != nil {
 			return nil, fmt.Errorf("update query: %w", err)
 		}
@@ -363,7 +388,7 @@ func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row R
 	}
 
 	sqlStr := fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(setClauses, ", "), strings.Join(where, " AND "))
-	if _, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), a.vals...); err != nil {
+	if _, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...); err != nil {
 		return nil, fmt.Errorf("update query: %w", err)
 	}
 	// MySQL reports 0 affected rows when values are unchanged, so confirm with a read
@@ -401,7 +426,7 @@ func (b *Builder) Delete(ctx context.Context, id any, soft bool, row RowFilter) 
 		sqlStr = fmt.Sprintf("DELETE FROM %s WHERE %s", table, strings.Join(where, " AND "))
 	}
 
-	result, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), a.vals...)
+	result, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
 	if err != nil {
 		return fmt.Errorf("delete query: %w", err)
 	}
@@ -466,14 +491,47 @@ func (b *Builder) jsonColumns() map[string]bool {
 	return cols
 }
 
+// boolColumns returns the set of this entity's column names whose field type is boolean.
+func (b *Builder) boolColumns() map[string]bool {
+	cols := make(map[string]bool)
+	for _, f := range b.entity.Fields {
+		if f.Type == types.FieldTypeBoolean {
+			cols[f.ColumnName] = true
+		}
+	}
+	return cols
+}
+
+// AsBool turns a driver value from a boolean column into a bool. SQLite stores booleans
+// as INTEGER and MySQL as TINYINT(1), so their drivers return int64 (or "1" as text);
+// left alone, responses would carry 0/1 for a field the API declares boolean. NULL and
+// unrecognized values pass through unchanged.
+func AsBool(v any) any {
+	switch x := v.(type) {
+	case int64:
+		return x != 0
+	case int:
+		return x != 0
+	case []byte:
+		return AsBool(string(x))
+	case string:
+		if b, err := strconv.ParseBool(x); err == nil {
+			return b
+		}
+	}
+	return v
+}
+
 // scanRows converts database/sql rows to a slice of string-keyed maps. Text that MySQL
-// hands back as []byte is converted to string so JSON encoding stays readable.
+// hands back as []byte is converted to string so JSON encoding stays readable, and
+// boolean columns become JSON booleans on every dialect.
 func (b *Builder) scanRows(rows *sql.Rows) ([]map[string]any, error) {
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, fmt.Errorf("getting columns: %w", err)
 	}
 	jsonCols := b.jsonColumns()
+	boolCols := b.boolColumns()
 
 	results := []map[string]any{}
 	for rows.Next() {
@@ -496,6 +554,9 @@ func (b *Builder) scanRows(rows *sql.Rows) ([]map[string]any, error) {
 				if jsonCols[col] && json.Valid([]byte(raw)) {
 					v = json.RawMessage(raw)
 				}
+			}
+			if boolCols[col] {
+				v = AsBool(v)
 			}
 			row[col] = v
 		}

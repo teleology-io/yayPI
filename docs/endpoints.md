@@ -191,7 +191,7 @@ GET /posts?fields=id,title&include=author       # sparse fields + embedded relat
 GET /posts?limit=20&offset=40                   # offset pagination
 ```
 
-Filter values are converted to the field's type (`score[gte]=abc` → 400). Filtering on a field not in `allow_filter_by`, or sorting on one not in `allow_sort_by`, returns 400 rather than silently ignoring the parameter. Unrelated query parameters (e.g. cache busters) are ignored.
+Filter values are converted to the field's type (`score[gte]=abc` → 400). Timestamp and date filters accept RFC 3339 / `YYYY-MM-DD` and the field's configured [`serialization`](project-config.md#serialization) format, so a value from a response can be used as a filter. Filtering on a field not in `allow_filter_by`, or sorting on one not in `allow_sort_by`, returns 400 rather than silently ignoring the parameter. Unrelated query parameters (e.g. cache busters) are ignored.
 
 `?include=` embeds relations listed in `include:` — `belongs_to`/`has_one` as an object, `has_many`/`many_to_many` as an array — loaded with one batched query per relation. Included rows have the related entity's `omit_response` and `read_roles` applied. They are **not** filtered by the related entity's endpoint `row_access`, so only list relations every caller of this endpoint may see.
 

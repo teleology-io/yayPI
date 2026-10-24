@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
@@ -106,16 +105,17 @@ func CoerceString(f *schema.Field, raw string) (any, error) {
 		}
 		return u.String(), nil
 	case types.FieldTypeTimestamptz:
-		t, err := time.Parse(time.RFC3339Nano, raw)
-		if err != nil {
-			return nil, bad("an RFC 3339 timestamp")
+		t, ok := f.ParseTime(raw)
+		if !ok {
+			return nil, bad(f.TimeExpectation())
 		}
 		return t.UTC(), nil
 	case types.FieldTypeDate:
-		if _, err := time.Parse("2006-01-02", raw); err != nil {
-			return nil, bad("a YYYY-MM-DD date")
+		t, ok := f.ParseTime(raw)
+		if !ok {
+			return nil, bad(f.TimeExpectation())
 		}
-		return raw, nil
+		return t.Format("2006-01-02"), nil
 	case types.FieldTypeEnum:
 		if len(f.EnumValues) > 0 {
 			for _, v := range f.EnumValues {

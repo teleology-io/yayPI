@@ -259,6 +259,11 @@
           "type": "boolean",
           "description": "Exclude this field from access logs and audit trails.",
           "default": false
+        },
+        "format": {
+          "type": "string",
+          "description": "timestamptz/date only: output format for this field, overriding serialization.timestamp_format / date_format in yaypi.yaml. A preset (rfc3339, rfc3339_ms, rfc3339_nano, unix, unix_ms, date) or a pattern of tokens: YYYY YY MMMM MMM MM M DD D dddd ddd HH H hh h mm m ss s SSS A a Z ZZ, with literal text in [brackets].",
+          "examples": ["rfc3339_ms", "unix", "YYYY-MM-DD HH:mm:ss", "DD/MM/YYYY"]
         }
       }
     },
