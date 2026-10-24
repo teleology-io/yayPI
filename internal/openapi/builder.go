@@ -123,6 +123,15 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 		}
 	}
 
+	// Inbound webhook receivers (kind: webhooks, mode: inbound).
+	if len(reg.InboundWebhooks) > 0 {
+		for name, s := range specs {
+			if addInboundPaths(s, reg.InboundWebhooks, authConfigured) {
+				tagSeen[name]["Webhooks"] = struct{}{}
+			}
+		}
+	}
+
 	// Built-in auth routes (kind: auth), which aren't registry endpoints.
 	if reg.AuthEndpoint != nil {
 		for name, s := range specs {
@@ -310,6 +319,31 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 			Description: "Unprocessable Entity",
 			Content:     map[string]MediaType{"application/json": {Schema: errorRef}},
 		}
+		if ep.Create != nil && (ep.Create.OnConflict == "update" || ep.Create.OnConflict == "ignore") {
+			operation.Responses["200"] = Response{
+				Description: "A record with the same " + strings.Join(entity.NaturalKey, ", ") + " existed (on_conflict: " + ep.Create.OnConflict + "); X-Write-Action says what happened",
+				Content:     operation.Responses["201"].Content,
+			}
+		}
+
+	case "upsert":
+		operation.Summary = fmt.Sprintf("Create or update %s by natural key", entity.Name)
+		if ep.Specs != nil && ep.Specs.Summary != "" {
+			operation.Summary = ep.Specs.Summary
+		}
+		if operation.Description == "" {
+			operation.Description = "Matches on " + strings.Join(entity.NaturalKey, ", ") + ": creates the record (201) or updates the existing one (200). " +
+				"X-Write-Action reports created, updated or unchanged (stale_guard)."
+		}
+		operation.RequestBody = &RequestBody{
+			Required: true,
+			Content:  map[string]MediaType{"application/json": {Schema: buildCreateSchema(entity)}},
+		}
+		dataBody := map[string]MediaType{"application/json": {Schema: &Schema{
+			Type: "object", Properties: map[string]*Schema{"data": {Ref: entityRef}},
+		}}}
+		operation.Responses["201"] = Response{Description: "Created", Content: dataBody}
+		operation.Responses["200"] = Response{Description: "Updated or unchanged", Content: dataBody}
 
 	case "update", "replace":
 		operation.Parameters = []Parameter{idParam, ifMatchParam}
@@ -380,7 +414,7 @@ func addErrorResponses(op *Operation, kind string, authed bool) {
 		add("403", "Forbidden")
 	}
 	switch kind {
-	case "create":
+	case "create", "upsert":
 		add("409", "Conflict (duplicate unique value)")
 		add("422", "Unprocessable (reference or constraint violation, or hook rejection)")
 	case "update", "replace":
@@ -501,6 +535,8 @@ func attachOperation(item *PathItem, op string, operation *Operation) {
 		item.Get = operation
 	case "create":
 		item.Post = operation
+	case "upsert":
+		item.Put = operation
 	case "update":
 		item.Patch = operation
 	case "replace":
@@ -523,7 +559,7 @@ func requiresAuth(op string, ep *schema.Endpoint) bool {
 		if ep.Get != nil {
 			opAuth = ep.Get.Auth
 		}
-	case "create":
+	case "create", "upsert":
 		if ep.Create != nil {
 			opAuth = ep.Create.Auth
 		}

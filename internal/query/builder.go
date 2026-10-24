@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -22,6 +23,9 @@ import (
 var (
 	ErrNotFound = errors.New("record not found")
 	ErrNoFields = errors.New("no valid fields")
+	// ErrStale is returned by UpdateGuarded when the stored row is not older than the
+	// incoming one (stale_guard), so nothing was written.
+	ErrStale = errors.New("stale write skipped")
 )
 
 // Executor is satisfied by *sql.DB, *sql.Tx and *sql.Conn, so the same Builder runs
@@ -342,6 +346,27 @@ func (b *Builder) Create(ctx context.Context, data map[string]any) (map[string]a
 // Update modifies an existing record and returns the updated row; ErrNotFound when no
 // row matches the id and row filter.
 func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row RowFilter) (map[string]any, error) {
+	return b.update(ctx, id, data, row, Guard{})
+}
+
+// Guard tunes UpdateGuarded.
+type Guard struct {
+	// Column/Value: only write when the stored Column is NULL or older than Value
+	// (stale_guard). Ignored when Column is "" or Value is nil.
+	Column string
+	Value  any
+	// Revive matches a soft-deleted row and clears its deleted_at (an upsert of a row
+	// that was deleted brings it back).
+	Revive bool
+}
+
+// UpdateGuarded is Update with a stale guard and/or soft-delete revival. It returns
+// ErrStale when the guard rejected the write.
+func (b *Builder) UpdateGuarded(ctx context.Context, id any, data map[string]any, row RowFilter, g Guard) (map[string]any, error) {
+	return b.update(ctx, id, data, row, g)
+}
+
+func (b *Builder) update(ctx context.Context, id any, data map[string]any, row RowFilter, g Guard) (map[string]any, error) {
 	a := &args{}
 	var setClauses []string
 	for _, field := range b.entity.Fields {
@@ -354,19 +379,36 @@ func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row R
 		}
 		setClauses = append(setClauses, b.qi(field.ColumnName)+" = "+a.add(val))
 	}
-	if len(setClauses) == 0 {
+	if len(setClauses) == 0 && !g.Revive {
 		return nil, ErrNoFields
 	}
 	if b.entity.Timestamps {
 		setClauses = append(setClauses, b.qi("updated_at")+" = "+a.add(time.Now().UTC()))
 	}
+	if g.Revive && b.entity.SoftDelete {
+		setClauses = append(setClauses, b.qi("deleted_at")+" = NULL")
+	}
+	if len(setClauses) == 0 {
+		return nil, ErrNoFields
+	}
 
 	where := []string{b.qi(b.pk()) + " = " + a.add(id)}
-	rest, err := b.baseWhere(a, nil, row)
-	if err != nil {
-		return nil, err
+	if g.Revive {
+		if row.SQL != "" {
+			where = append(where, "("+a.addFragment(row.SQL, row.Args)+")")
+		}
+	} else {
+		rest, err := b.baseWhere(a, nil, row)
+		if err != nil {
+			return nil, err
+		}
+		where = append(where, rest...)
 	}
-	where = append(where, rest...)
+	guarded := g.Column != "" && g.Value != nil
+	if guarded {
+		col := b.qi(g.Column)
+		where = append(where, "("+col+" IS NULL OR "+col+" < "+a.add(g.Value)+")")
+	}
 	table := b.qi(b.entity.Table)
 
 	if b.dialect.SupportsReturning() {
@@ -382,17 +424,27 @@ func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row R
 			return nil, err
 		}
 		if len(results) == 0 {
+			if guarded {
+				return nil, ErrStale
+			}
 			return nil, ErrNotFound
 		}
 		return results[0], nil
 	}
 
 	sqlStr := fmt.Sprintf("UPDATE %s SET %s WHERE %s", table, strings.Join(setClauses, ", "), strings.Join(where, " AND "))
-	if _, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...); err != nil {
+	res, err := b.db.ExecContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
+	if err != nil {
 		return nil, fmt.Errorf("update query: %w", err)
 	}
 	// MySQL reports 0 affected rows when values are unchanged, so confirm with a read
-	// that re-applies the row filter rather than trusting RowsAffected.
+	// that re-applies the row filter rather than trusting RowsAffected. A guarded write
+	// always changes the guard column, so 0 there does mean the guard refused it.
+	if guarded {
+		if n, err := res.RowsAffected(); err == nil && n == 0 {
+			return nil, ErrStale
+		}
+	}
 	updated, err := b.Get(ctx, id, row)
 	if err != nil {
 		return nil, err
@@ -401,6 +453,48 @@ func (b *Builder) Update(ctx context.Context, id any, data map[string]any, row R
 		return nil, ErrNotFound
 	}
 	return updated, nil
+}
+
+// FindByKey returns the row whose columns equal key (nil, nil when none). With
+// includeDeleted, soft-deleted rows match too; forUpdate locks the row (Postgres/MySQL).
+func (b *Builder) FindByKey(ctx context.Context, key map[string]any, row RowFilter, includeDeleted, forUpdate bool) (map[string]any, error) {
+	if len(key) == 0 {
+		return nil, ErrNoFields
+	}
+	cols := make([]string, 0, len(key))
+	for c := range key {
+		cols = append(cols, c)
+	}
+	sort.Strings(cols)
+	a := &args{}
+	var where []string
+	for _, c := range cols {
+		f, ok := b.field(c)
+		if !ok {
+			return nil, fmt.Errorf("find by key: unknown field %q", c)
+		}
+		where = append(where, b.qi(f.ColumnName)+" = "+a.add(key[c]))
+	}
+	if b.entity.SoftDelete && !includeDeleted {
+		where = append(where, b.qi("deleted_at")+" IS NULL")
+	}
+	if row.SQL != "" {
+		where = append(where, "("+a.addFragment(row.SQL, row.Args)+")")
+	}
+	sqlStr := fmt.Sprintf("SELECT %s FROM %s WHERE %s LIMIT 1", b.selectColumns(), b.qi(b.entity.Table), strings.Join(where, " AND "))
+	if forUpdate && b.dialect.Name() != "sqlite" {
+		sqlStr += " FOR UPDATE"
+	}
+	rows, err := b.db.QueryContext(ctx, b.dialect.Rebind(sqlStr), b.bind(a.vals)...)
+	if err != nil {
+		return nil, fmt.Errorf("find query: %w", err)
+	}
+	defer rows.Close()
+	results, err := b.scanRows(rows)
+	if err != nil || len(results) == 0 {
+		return nil, err
+	}
+	return results[0], nil
 }
 
 // Delete removes a record by primary key (soft delete when the entity supports it and
@@ -520,6 +614,17 @@ func AsBool(v any) any {
 		}
 	}
 	return v
+}
+
+// ScanOne reads the first row of rows as entity's columns, with the same conversions as
+// every builder read (MySQL []byte text → string, jsonb → raw JSON, uuid, booleans);
+// nil when there is no row. For hand-written queries over an entity's table.
+func ScanOne(entity *schema.Entity, rows *sql.Rows) (map[string]any, error) {
+	results, err := (&Builder{entity: entity}).scanRows(rows)
+	if err != nil || len(results) == 0 {
+		return nil, err
+	}
+	return results[0], nil
 }
 
 // scanRows converts database/sql rows to a slice of string-keyed maps. Text that MySQL

@@ -21,6 +21,7 @@ yaypi run
 - **Migrations** — per-database, transactional, locked, drift-checked
 - **Background jobs** — cron-scheduled SQL or HTTP jobs with retry, executed once across replicas
 - **Email & webhooks** — transactional outbox with retries, HMAC-signed webhooks, SSRF protection
+- **Inbound webhooks & upserts** — signed receivers (GitHub/Stripe/Slack/HMAC presets) that dedupe, store and apply events to entities by natural key; plugin jobs with a `Store` for API syncs
 - **Audit log** — `audit: true` records who changed what
 - **Operations** — JSON logs, Prometheus metrics, trace-context, health/readiness with graceful draining
 - **Seed data** — idempotent rows via `yaypi seed`

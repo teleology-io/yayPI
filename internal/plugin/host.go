@@ -6,6 +6,7 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"net/http"
 
 	"github.com/rs/zerolog/log"
 
@@ -18,7 +19,16 @@ import (
 type Dispatcher struct {
 	hooks         map[string][]sdk.EntityHookPlugin // keyed by entity name
 	routeHandlers map[string]sdk.RouteHandlerFunc   // keyed by "<PluginInfo.Name>.<handlerKey>"
+	jobs          map[string]sdk.JobFunc            // keyed by "<PluginInfo.Name>.<jobKey>"
+	webhooks      map[string]sdk.WebhookHandlerFunc // keyed by "<PluginInfo.Name>.<handlerKey>"
+	verifiers     map[string]sdk.WebhookVerifyFunc  // keyed by "<PluginInfo.Name>.<verifierKey>"
 	plugins       []sdk.Plugin                      // distinct plugins, registration order
+}
+
+// Services are what plugins get at Init (and in job/webhook contexts).
+type Services struct {
+	Store sdk.Store // nil without a database
+	HTTP  func(sdk.HTTPOptions) *http.Client
 }
 
 func (d *Dispatcher) track(p sdk.Plugin) {
@@ -34,11 +44,12 @@ func (d *Dispatcher) track(p sdk.Plugin) {
 func (d *Dispatcher) Plugins() []sdk.Plugin { return d.plugins }
 
 // InitAll calls Init on every plugin with its `plugins:` config block (matched by
-// PluginInfo.Name). The first error aborts startup.
-func (d *Dispatcher) InitAll(configs map[string]map[string]any) error {
+// PluginInfo.Name) and the shared services. The first error aborts startup.
+func (d *Dispatcher) InitAll(configs map[string]map[string]any, svc Services) error {
 	for _, p := range d.plugins {
 		name := p.Info().Name
-		if err := p.Init(sdk.InitContext{Config: configs[name], Logger: pluginLogger{name: name}}); err != nil {
+		ic := sdk.InitContext{Config: configs[name], Logger: Logger(name), Store: svc.Store, HTTP: svc.HTTP}
+		if err := p.Init(ic); err != nil {
 			return fmt.Errorf("plugin %q init: %w", name, err)
 		}
 	}
@@ -54,6 +65,9 @@ func (d *Dispatcher) ShutdownAll(ctx context.Context) {
 		}
 	}
 }
+
+// Logger returns the sdk.Logger for a plugin (or job/webhook) name.
+func Logger(name string) sdk.Logger { return pluginLogger{name: name} }
 
 // pluginLogger adapts zerolog to sdk.Logger.
 type pluginLogger struct{ name string }
@@ -71,6 +85,9 @@ func NewDispatcher() *Dispatcher {
 	return &Dispatcher{
 		hooks:         make(map[string][]sdk.EntityHookPlugin),
 		routeHandlers: make(map[string]sdk.RouteHandlerFunc),
+		jobs:          make(map[string]sdk.JobFunc),
+		webhooks:      make(map[string]sdk.WebhookHandlerFunc),
+		verifiers:     make(map[string]sdk.WebhookVerifyFunc),
 	}
 }
 
@@ -94,6 +111,56 @@ func (d *Dispatcher) RegisterRoutePlugin(p sdk.RouteHandlerPlugin) {
 // RouteHandler looks up a registered custom-route handler by its full "plugin.key" name.
 func (d *Dispatcher) RouteHandler(name string) (sdk.RouteHandlerFunc, bool) {
 	fn, ok := d.routeHandlers[name]
+	return fn, ok
+}
+
+// RegisterJobPlugin registers p's jobs as "<name>.<key>" (jobs YAML `plugin:` and
+// `on_failure:`).
+func (d *Dispatcher) RegisterJobPlugin(p sdk.JobHandlerPlugin) {
+	d.track(p)
+	prefix := p.Info().Name
+	for name, fn := range p.Jobs() {
+		d.jobs[prefix+"."+name] = fn
+	}
+}
+
+// Job looks up a plugin job by its full "plugin.key" name.
+func (d *Dispatcher) Job(name string) (sdk.JobFunc, bool) {
+	fn, ok := d.jobs[name]
+	return fn, ok
+}
+
+// RegisterWebhookPlugin registers p's inbound webhook handlers, plus its signature
+// verifiers when it also implements sdk.WebhookVerifierPlugin.
+func (d *Dispatcher) RegisterWebhookPlugin(p sdk.WebhookPlugin) {
+	d.track(p)
+	prefix := p.Info().Name
+	for name, fn := range p.WebhookHandlers() {
+		d.webhooks[prefix+"."+name] = fn
+	}
+	if vp, ok := p.(sdk.WebhookVerifierPlugin); ok {
+		d.RegisterVerifierPlugin(vp)
+	}
+}
+
+// RegisterVerifierPlugin registers p's signature verifiers.
+func (d *Dispatcher) RegisterVerifierPlugin(p sdk.WebhookVerifierPlugin) {
+	d.track(p)
+	prefix := p.Info().Name
+	for name, fn := range p.WebhookVerifiers() {
+		d.verifiers[prefix+"."+name] = fn
+	}
+}
+
+// WebhookHandler looks up an inbound webhook handler by "plugin.key".
+func (d *Dispatcher) WebhookHandler(name string) (sdk.WebhookHandlerFunc, bool) {
+	fn, ok := d.webhooks[name]
+	return fn, ok
+}
+
+// WebhookVerifier looks up a signature verifier by "plugin.key".
+func (d *Dispatcher) WebhookVerifier(name string) (sdk.WebhookVerifyFunc, bool) {
+	fn, ok := d.verifiers[name]
 	return fn, ok
 }
 

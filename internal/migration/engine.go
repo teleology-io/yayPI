@@ -136,10 +136,16 @@ func (e *Engine) Diff(ctx context.Context) ([]DDLStatement, error) {
 						Concurrent:  true,
 					})
 				} else {
+					// MySQL has no CREATE INDEX IF NOT EXISTS; the existence check above
+					// already skips indexes that are present.
+					ifNotExists := "IF NOT EXISTS "
+					if e.dialect.Name() == "mysql" {
+						ifNotExists = ""
+					}
 					stmts = append(stmts, DDLStatement{
 						SQL: fmt.Sprintf(
-							"CREATE %sINDEX IF NOT EXISTS %s ON %s (%s);",
-							unique, e.dialect.QuoteIdent(idx.Name),
+							"CREATE %sINDEX %s%s ON %s (%s);",
+							unique, ifNotExists, e.dialect.QuoteIdent(idx.Name),
 							e.dialect.QuoteIdent(table), strings.Join(cols, ", "),
 						),
 						Description: fmt.Sprintf("create index %s", idx.Name),

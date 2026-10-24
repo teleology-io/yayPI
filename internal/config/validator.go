@@ -51,10 +51,10 @@ func Validate(cfg *RootConfig) []ValidationError {
 		for _, ep := range ef.Endpoints {
 			for _, op := range ep.CRUD {
 				switch op {
-				case "list", "get", "create", "update", "replace", "delete":
+				case "list", "get", "create", "update", "replace", "delete", "upsert":
 				default:
 					errs = append(errs, ValidationError{File: ef.FilePath,
-						Message: fmt.Sprintf("endpoint %q: unknown crud operation %q (list, get, create, update, replace, delete)", ep.Path, op)})
+						Message: fmt.Sprintf("endpoint %q: unknown crud operation %q (list, get, create, update, replace, delete, upsert)", ep.Path, op)})
 				}
 			}
 			if _, err := ParseByteSize(ep.MaxBodySize); err != nil {
@@ -77,6 +77,14 @@ func Validate(cfg *RootConfig) []ValidationError {
 			_ = roleNames
 		}
 	}
+
+	entityDefs := make(map[string]*EntityDef, len(cfg.Entities))
+	for _, ec := range cfg.Entities {
+		entityDefs[ec.Entity.Name] = &ec.Entity
+	}
+	errs = append(errs, validateUpserts(cfg, entityDefs)...)
+	errs = append(errs, validateWebhooks(cfg, entityDefs)...)
+	errs = append(errs, validateJobs(cfg)...)
 
 	// Detect circular entity references
 	errs = append(errs, detectCircularRefs(cfg.Entities)...)
@@ -127,6 +135,11 @@ func AuthInUse(cfg *RootConfig) bool {
 					return true
 				}
 			}
+		}
+	}
+	for _, w := range cfg.AllWebhookDefs() {
+		if w.IsInbound() && authDeclared(w.Auth) {
+			return true
 		}
 	}
 	return false

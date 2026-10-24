@@ -113,3 +113,8 @@ func isJSONContentType(r *http.Request) bool {
 	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
 	return ct == "application/json" || strings.HasPrefix(ct, "application/json;") || strings.HasSuffix(strings.SplitN(ct, ";", 2)[0], "+json")
 }
+
+// logHookErrorCtx is logHookError for writes made outside an HTTP request.
+func logHookErrorCtx(_ context.Context, requestID, stage string, err error) {
+	log.Error().Err(err).Str("request_id", requestID).Str("stage", stage).Msg("hook failed")
+}

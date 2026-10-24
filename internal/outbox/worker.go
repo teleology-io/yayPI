@@ -3,13 +3,9 @@ package outbox
 import (
 	"bytes"
 	"context"
-	"crypto/hmac"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"math/rand/v2"
 	"net/http"
 	"strconv"
 	"sync"
@@ -20,7 +16,9 @@ import (
 	"github.com/teleology-io/yayPI/internal/config"
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/netsafe"
+	"github.com/teleology-io/yayPI/internal/queue"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/internal/signature"
 )
 
 // Sender delivers one email (satisfied by *mailer.Mailer).
@@ -31,7 +29,6 @@ type Sender interface {
 const (
 	defaultWebhookAttempts = 8
 	defaultEmailAttempts   = 5
-	claimLease             = 2 * time.Minute
 	batchSize              = 25
 	defaultRetention       = 7 * 24 * time.Hour
 	defaultPollInterval    = time.Second
@@ -46,8 +43,9 @@ type WorkerOptions struct {
 
 // Worker polls the outbox and delivers due messages.
 type Worker struct {
-	db         *db.DB
+	q          *queue.Queue
 	webhooks   map[string]config.WebhookDef
+	schemes    map[string]signedBy
 	emails     map[string]config.EmailDef
 	mailer     Sender
 	public     *http.Client
@@ -56,8 +54,9 @@ type Worker struct {
 	retention  time.Duration
 	emailRetry *config.RetryConfig
 
-	// OnDelivery, when set, observes every attempt (metrics).
-	OnDelivery func(kind string, ok bool)
+	// OnDelivery, when set, observes every attempt (metrics). name is the webhook or
+	// email name.
+	OnDelivery func(kind, name string, ok bool)
 
 	stop     chan struct{}
 	wg       sync.WaitGroup
@@ -74,8 +73,9 @@ func NewWorker(d *db.DB, webhooks []config.WebhookDef, emails []config.EmailDef,
 		opts.Retention = defaultRetention
 	}
 	w := &Worker{
-		db:         d,
+		q:          &queue.Queue{DB: d, Table: schema.OutboxTable, Columns: []string{"kind", "name", "payload"}},
 		webhooks:   map[string]config.WebhookDef{},
+		schemes:    map[string]signedBy{},
 		emails:     map[string]config.EmailDef{},
 		mailer:     mailer,
 		public:     netsafe.NewClient(netsafe.Options{Timeout: 30 * time.Second}),
@@ -87,6 +87,8 @@ func NewWorker(d *db.DB, webhooks []config.WebhookDef, emails []config.EmailDef,
 	}
 	for _, wd := range webhooks {
 		w.webhooks[wd.Name] = wd
+		scheme, err := signature.Resolve(wd.Signature, wd.Secret)
+		w.schemes[wd.Name] = signedBy{scheme, err}
 	}
 	for _, ed := range emails {
 		w.emails[ed.Name] = ed
@@ -125,53 +127,39 @@ func (w *Worker) Stop(ctx context.Context) {
 	}
 }
 
+// signedBy is a webhook's resolved signing scheme (nil = unsigned). A resolution error
+// (already reported at boot by NewObserver) fails each delivery rather than sending it
+// unsigned.
+type signedBy struct {
+	scheme *signature.Scheme
+	err    error
+}
+
 type row struct {
-	id, kind, name, payload string
-	attempts                int
+	queue.Item
+	kind, name, payload string
 }
 
 // RunOnce claims and delivers one batch of due messages.
 func (w *Worker) RunOnce(ctx context.Context) {
-	d := w.db.Dialect
-	table := d.QuoteIdent(schema.OutboxTable)
-	now := time.Now().Unix()
-
-	rows, err := w.db.SQL.QueryContext(ctx, d.Rebind(fmt.Sprintf(
-		`SELECT id, kind, name, payload, attempts FROM %s WHERE status = 'pending' AND next_attempt_at <= $1 AND locked_until <= $2 ORDER BY next_attempt_at LIMIT %d`,
-		table, batchSize)), now, now)
+	due, err := w.q.Due(ctx, batchSize)
 	if err != nil {
 		log.Error().Err(err).Msg("outbox: polling failed")
 		return
 	}
-	var due []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.id, &r.kind, &r.name, &r.payload, &r.attempts); err == nil {
-			due = append(due, r)
-		}
-	}
-	rows.Close()
-
-	for _, r := range due {
+	for _, it := range due {
 		// Claim with a lease; another replica may have taken it since the SELECT.
-		res, err := w.db.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
-			`UPDATE %s SET locked_until = $1 WHERE id = $2 AND status = 'pending' AND locked_until <= $3`, table)),
-			time.Now().Add(claimLease).Unix(), r.id, now)
-		if err != nil {
-			continue
-		}
-		if n, _ := res.RowsAffected(); n != 1 {
+		if !w.q.Claim(ctx, it.ID) {
 			continue
 		}
 		w.inflight.Add(1)
-		w.deliverAndRecord(r)
+		w.deliverAndRecord(row{Item: it, kind: it.Fields[0], name: it.Fields[1], payload: it.Fields[2]})
 		w.inflight.Done()
 	}
 
 	if time.Since(w.lastGC) > time.Hour {
 		w.lastGC = time.Now()
-		_, _ = w.db.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
-			`DELETE FROM %s WHERE status = 'done' AND created_at < $1`, table)), time.Now().Add(-w.retention).Unix())
+		w.q.Purge(ctx, time.Now().Add(-w.retention))
 	}
 }
 
@@ -180,61 +168,31 @@ func (w *Worker) deliverAndRecord(r row) {
 	defer cancel()
 	err := w.deliver(ctx, r)
 	if w.OnDelivery != nil {
-		w.OnDelivery(r.kind, err == nil)
+		w.OnDelivery(r.kind, r.name, err == nil)
 	}
-
-	d := w.db.Dialect
-	table := d.QuoteIdent(schema.OutboxTable)
 	if err == nil {
-		_, _ = w.db.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
-			`UPDATE %s SET status = 'done', attempts = attempts + 1, locked_until = 0, last_error = NULL WHERE id = $1`, table)), r.id)
+		w.q.Done(ctx, r.ID)
 		return
 	}
-
-	attempts := r.attempts + 1
-	maxAttempts, initial, maxDelay := w.retryPolicy(r)
-	errText := err.Error()
-	if len(errText) > 1000 {
-		errText = errText[:1000]
-	}
-	if attempts >= maxAttempts {
-		log.Error().Str("kind", r.kind).Str("name", r.name).Str("id", r.id).Err(err).Msg("outbox: giving up after max attempts (status=dead)")
-		_, _ = w.db.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
-			`UPDATE %s SET status = 'dead', attempts = $1, locked_until = 0, last_error = $2 WHERE id = $3`, table)), attempts, errText, r.id)
+	dead, retryIn := w.q.Fail(ctx, r.Item, err, w.retryPolicy(r), false)
+	if dead {
+		log.Error().Str("kind", r.kind).Str("name", r.name).Str("id", r.ID).Err(err).Msg("outbox: giving up after max attempts (status=dead)")
 		return
 	}
-	backoff := min(initial*time.Duration(1<<min(attempts-1, 20)), maxDelay)
-	backoff = time.Duration(float64(backoff) * (0.8 + 0.4*rand.Float64())) // ±20% jitter
-	log.Warn().Str("kind", r.kind).Str("name", r.name).Int("attempt", attempts).Dur("retry_in", backoff).Err(err).Msg("outbox: delivery failed")
-	_, _ = w.db.SQL.ExecContext(ctx, d.Rebind(fmt.Sprintf(
-		`UPDATE %s SET attempts = $1, next_attempt_at = $2, locked_until = 0, last_error = $3 WHERE id = $4`, table)),
-		attempts, time.Now().Add(backoff).Unix(), errText, r.id)
+	log.Warn().Str("kind", r.kind).Str("name", r.name).Int("attempt", r.Attempts+1).Dur("retry_in", retryIn).Err(err).Msg("outbox: delivery failed")
 }
 
-func (w *Worker) retryPolicy(r row) (int, time.Duration, time.Duration) {
-	attempts, initial, maxDelay := defaultEmailAttempts, 10*time.Second, time.Hour
-	var retry *config.RetryConfig
+func (w *Worker) retryPolicy(r row) queue.Policy {
+	def := queue.Policy{MaxAttempts: defaultEmailAttempts, Initial: 10 * time.Second, Max: time.Hour}
 	if r.kind == KindWebhook {
-		attempts = defaultWebhookAttempts
-		retry = w.webhooks[r.name].Retry
-	} else {
-		retry = w.emails[r.name].Retry
-		if retry == nil {
-			retry = w.emailRetry
-		}
+		def.MaxAttempts = defaultWebhookAttempts
+		return queue.PolicyFrom(w.webhooks[r.name].Retry, def)
 	}
-	if retry != nil {
-		if retry.MaxAttempts > 0 {
-			attempts = retry.MaxAttempts
-		}
-		if d, err := time.ParseDuration(retry.InitialDelay); err == nil && d > 0 {
-			initial = d
-		}
-		if d, err := time.ParseDuration(retry.MaxDelay); err == nil && d > 0 {
-			maxDelay = d
-		}
+	retry := w.emails[r.name].Retry
+	if retry == nil {
+		retry = w.emailRetry
 	}
-	return attempts, initial, maxDelay
+	return queue.PolicyFrom(retry, def)
 }
 
 func (w *Worker) deliver(ctx context.Context, r row) error {
@@ -253,7 +211,7 @@ func (w *Worker) deliver(ctx context.Context, r row) error {
 		if err := json.Unmarshal([]byte(r.payload), &p); err != nil {
 			return err
 		}
-		return w.sendWebhook(ctx, r.id, r.name, p)
+		return w.sendWebhook(ctx, r.ID, r.name, p)
 	}
 	return fmt.Errorf("unknown outbox kind %q", r.kind)
 }
@@ -274,11 +232,17 @@ func (w *Worker) sendWebhook(ctx context.Context, id, name string, p WebhookPayl
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", "yayPi-webhook/1")
-	ts := strconv.FormatInt(time.Now().Unix(), 10)
+	now := time.Now()
 	req.Header.Set("X-Yaypi-Event-Id", id) // stable across retries: receivers dedupe on it
-	req.Header.Set("X-Yaypi-Timestamp", ts)
-	if def.Secret != "" {
-		req.Header.Set("X-Yaypi-Signature", "v1="+Sign(def.Secret, ts, p.Body))
+	req.Header.Set("X-Yaypi-Timestamp", strconv.FormatInt(now.Unix(), 10))
+	sig := w.schemes[name]
+	if sig.err != nil {
+		return sig.err
+	}
+	if sig.scheme != nil {
+		for k, v := range sig.scheme.Sign(def.Secret, []byte(p.Body), now) {
+			req.Header.Set(k, v)
+		}
 	}
 
 	client := w.public
@@ -298,9 +262,10 @@ func (w *Worker) sendWebhook(ctx context.Context, id, name string, p WebhookPayl
 }
 
 // Sign returns the hex HMAC-SHA256 of "<timestamp>.<body>" — what receivers recompute to
-// verify X-Yaypi-Signature (and reject stale timestamps to block replays).
+// verify X-Yaypi-Signature (and reject stale timestamps to block replays). It is the
+// yaypi_v1 scheme; see internal/signature for the others.
 func Sign(secret, timestamp, body string) string {
-	mac := hmac.New(sha256.New, []byte(secret))
-	mac.Write([]byte(timestamp + "." + body))
-	return hex.EncodeToString(mac.Sum(nil))
+	ts, _ := strconv.ParseInt(timestamp, 10, 64)
+	s, _ := signature.Resolve(nil, secret)
+	return s.Sign(secret, []byte(body), time.Unix(ts, 0))["X-Yaypi-Signature"][len("v1="):]
 }

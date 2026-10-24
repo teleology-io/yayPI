@@ -45,6 +45,7 @@ One file can contain multiple endpoint blocks. It is conventional to split colle
 | `update` | `PATCH` | `/path/{id}` |
 | `replace` | `PUT` | `/path/{id}` |
 | `delete` | `DELETE` | `/path/{id}` |
+| `upsert` | `PUT` | `/path` (create or update by natural key — see [Upsert](#upsert)) |
 
 The `{id}` path parameter is validated against the primary key type (UUID or integer) before reaching the handler. `replace` (PUT) is a full update: writable nullable fields you omit are set to null. It uses the `update:` options and auth.
 
@@ -241,6 +242,7 @@ create:
   bulk_max: 500             # max items per bulk request (default: 500)
   bulk_error_mode: abort    # abort (default) | partial
   strict: false             # true = unknown body fields are a 400 instead of being dropped
+  on_conflict: error        # error (default, 409) | update | ignore — see Upsert below
 ```
 
 ### Single create
@@ -272,6 +274,38 @@ When `bulk: true`, `POST` accepts a JSON array:
 ```
 
 Each item commits on its own; failed items report a client-safe message.
+
+### Upsert
+
+For an entity with a [`natural_key`](entities.md#natural-keys-and-upserts), a write can create *or* update by that key instead of failing with 409:
+
+```yaml
+endpoints:
+  - path: /contacts
+    entity: Contact
+    crud: [list, get, upsert]       # upsert = PUT /contacts
+
+  - path: /contacts/import
+    entity: Contact
+    crud: [create]
+    create:
+      bulk: true
+      on_conflict: update           # or ignore: keep the stored row
+```
+
+```http
+PUT /api/contacts
+{"external_id": "crm_123", "email": "ann@example.com"}
+```
+
+| Outcome | Status (`upsert`, single create) | `X-Write-Action` / bulk `results[].action` |
+|---|---|---|
+| New key | 201 | `created` |
+| Existing row updated | 200 | `updated` |
+| Skipped by `stale_guard` | 200 | `unchanged` |
+| Kept (`on_conflict: ignore`) | 200 | `ignored` |
+
+The body must include every natural key field (400 otherwise). Upserts can both create and update, so with Casbin the role needs **both** `create` and `update` on the entity; `create.auth` applies. The endpoint's `update.row_access` and tenant scope decide which existing rows may be overwritten — matching a row the caller can't see is a 409, never a silent overwrite or a duplicate.
 
 ## `update` options
 

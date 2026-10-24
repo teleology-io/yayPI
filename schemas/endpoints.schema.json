@@ -41,10 +41,10 @@
         },
         "crud": {
           "type": "array",
-          "description": "Auto-generate standard CRUD operations. Generates routes under path.",
+          "description": "Auto-generate standard CRUD operations. Generates routes under path. upsert = PUT on the collection path: create or update by the entity's natural_key (needs create and update permission).",
           "items": {
             "type": "string",
-            "enum": ["list", "get", "create", "update", "delete", "replace"]
+            "enum": ["list", "get", "create", "update", "delete", "replace", "upsert"]
           },
           "examples": [["list", "get", "create", "update", "delete"]]
         },
@@ -279,6 +279,12 @@
           "type": "boolean",
           "description": "Reject unknown body fields with 400 instead of dropping them.",
           "default": false
+        },
+        "on_conflict": {
+          "type": "string",
+          "description": "When a row with the same natural_key exists: error (409), update (upsert; needs create and update permission) or ignore (keep the stored row). update/ignore require the entity's natural_key; the response's X-Write-Action (bulk: results[].action) says what happened.",
+          "enum": ["error", "update", "ignore"],
+          "default": "error"
         }
       }
     },

@@ -268,6 +268,15 @@ type EntityDef struct {
 	// create. Requests without a tenant claim are refused.
 	TenantScoped bool   `yaml:"tenant_scoped"`
 	TenantField  string `yaml:"tenant_field"` // default: tenant_id
+	// NaturalKey names the field(s) that identify a row from an outside system (e.g. an
+	// external id). It enables upserts — the `upsert` crud op, create.on_conflict, inbound
+	// webhook routes and plugin Store.Write — and must be backed by a unique field or a
+	// unique index over exactly these fields.
+	NaturalKey []string `yaml:"natural_key"`
+	// StaleGuard names an ordered field (timestamp or number) compared on upsert: an
+	// incoming row whose value is not newer than the stored one is skipped, so
+	// out-of-order deliveries never overwrite newer data.
+	StaleGuard string `yaml:"stale_guard"`
 }
 
 // FieldDef describes a single field on an entity.
@@ -465,6 +474,9 @@ type CreateConfig struct {
 	BulkMax       int              `yaml:"bulk_max"`        // default: 500
 	BulkErrorMode string           `yaml:"bulk_error_mode"` // abort | partial (default: abort)
 	Strict        bool             `yaml:"strict"`          // reject unknown body fields with 400 (default: drop them)
+	// OnConflict decides what happens when a row with the same natural_key exists:
+	// error (default: 409), update (upsert) or ignore (keep the stored row).
+	OnConflict string `yaml:"on_conflict"`
 }
 
 // UpdateConfig describes update endpoint configuration.
@@ -491,16 +503,19 @@ type JobConfig struct {
 
 // JobDef describes a single background job.
 type JobDef struct {
-	Name        string                 `yaml:"name"`
-	Description string                 `yaml:"description"`
-	Schedule    string                 `yaml:"schedule"`
-	Timezone    string                 `yaml:"timezone"`
-	Handler     string                 `yaml:"handler"`
-	Plugin      string                 `yaml:"plugin"`
-	Config      map[string]interface{} `yaml:"config"`
-	Retry       *RetryConfig           `yaml:"retry"`
-	Timeout     string                 `yaml:"timeout"`
-	OnFailure   string                 `yaml:"on_failure"`
+	Name        string `yaml:"name"`
+	Description string `yaml:"description"`
+	Schedule    string `yaml:"schedule"`
+	Timezone    string `yaml:"timezone"`
+	Handler     string `yaml:"handler"` // sql | http | plugin
+	// Plugin is the "<plugin>.<job>" a `handler: plugin` job runs (a JobHandlerPlugin entry).
+	Plugin  string                 `yaml:"plugin"`
+	Config  map[string]interface{} `yaml:"config"`
+	Retry   *RetryConfig           `yaml:"retry"`
+	Timeout string                 `yaml:"timeout"`
+	// OnFailure is log (default; failures are always logged) or a "<plugin>.<job>" run
+	// once after the last attempt fails, with the failure in its JobContext.
+	OnFailure string `yaml:"on_failure"`
 }
 
 // RetryConfig describes retry settings for a job.
@@ -656,24 +671,109 @@ type WebhookFileConfig struct {
 	FilePath string       `yaml:"-"`
 }
 
-// WebhookDef defines a single outbound webhook trigger.
+// Webhook modes.
+const (
+	WebhookOutbound = "outbound"
+	WebhookInbound  = "inbound"
+)
+
+// WebhookDef defines a single webhook. Outbound (the default mode) fires an HTTP request
+// when an entity changes; inbound receives signed HTTP requests from another system and
+// applies them to entities or a plugin handler.
 type WebhookDef struct {
-	Name      string            `yaml:"name"`
-	Entity    string            `yaml:"entity"`
-	Trigger   string            `yaml:"trigger"` // after_create | after_update | after_delete
-	Condition string            `yaml:"condition"`
-	URL       string            `yaml:"url"`
-	Method    string            `yaml:"method"` // default: POST
-	Headers   map[string]string `yaml:"headers"`
-	Payload   string            `yaml:"payload"` // JSON template with {{record.field}}
-	Timeout   string            `yaml:"timeout"` // default: 5s
-	Retry     *RetryConfig      `yaml:"retry"`
-	// Secret signs every delivery: X-Yaypi-Signature: v1=<hex HMAC-SHA256(secret,
-	// "<X-Yaypi-Timestamp>.<body>")>. Use ${ENV_VAR}.
+	Name string `yaml:"name"`
+	Mode string `yaml:"mode"` // outbound (default) | inbound
+
+	// ── shared ──
+	Headers map[string]string `yaml:"headers"` // outbound: sent with each delivery
+	Timeout string            `yaml:"timeout"` // outbound: request timeout; inbound: processing timeout
+	Retry   *RetryConfig      `yaml:"retry"`
+	// Secret signs outbound deliveries and verifies inbound requests. Use ${ENV_VAR}.
 	Secret string `yaml:"secret"`
+	// Signature selects the signing scheme. Omitted with a secret = yaypi_v1:
+	// X-Yaypi-Signature: v1=<hex HMAC-SHA256(secret, "<X-Yaypi-Timestamp>.<body>")>.
+	Signature *WebhookSignatureDef `yaml:"signature"`
+
+	// ── outbound ──
+	Entity    string `yaml:"entity"`
+	Trigger   string `yaml:"trigger"` // after_create | after_update | after_delete
+	Condition string `yaml:"condition"`
+	URL       string `yaml:"url"`
+	Method    string `yaml:"method"`  // default: POST
+	Payload   string `yaml:"payload"` // JSON template with {{record.field}}
 	// AllowPrivateNetwork permits delivery to private/loopback/link-local addresses.
 	// Off by default: webhook URLs can be templated from record data (SSRF risk).
 	AllowPrivateNetwork bool `yaml:"allow_private_network"`
+
+	// ── inbound ──
+	Path      string               `yaml:"path"`       // mounted under project.base_url
+	Challenge *WebhookChallengeDef `yaml:"challenge"`  // endpoint-verification handshake
+	DedupeKey string               `yaml:"dedupe_key"` // e.g. body.id or headers.X-Event-Id
+	Event     string               `yaml:"event"`      // value that selects a route, e.g. body.type
+	// Routes maps an event value to an action; "*" matches any event without its own route.
+	Routes map[string]WebhookRouteDef `yaml:"routes"`
+	// Handler is shorthand for routes: {"*": {handler: …}}.
+	Handler string `yaml:"handler"`
+	// Guards for receivers without a signature (at least one is required then).
+	Auth       *AuthRequirement `yaml:"auth"`
+	Token      *WebhookTokenDef `yaml:"token"`
+	AllowedIPs []string         `yaml:"allowed_ips"`
+	RateLimit  *RateLimitConfig `yaml:"rate_limit"` // default 300/min per IP
+	// AsRole is the role route actions run as: Casbin policies and field write_roles are
+	// checked against it. Empty = trusted system write (no role checks).
+	AsRole      string `yaml:"as_role"`
+	MaxBodySize string `yaml:"max_body_size"` // default: server.max_request_body_size
+	Spec        *bool  `yaml:"spec"`          // false = leave out of OpenAPI specs
+}
+
+// IsInbound reports whether the webhook receives requests.
+func (w WebhookDef) IsInbound() bool { return w.Mode == WebhookInbound }
+
+// WebhookSignatureDef describes how a webhook body is signed (outbound) or verified
+// (inbound).
+type WebhookSignatureDef struct {
+	// Scheme: yaypi_v1 | hmac_sha256 | hmac_sha1 | github | stripe | slack | plugin | none.
+	Scheme   string `yaml:"scheme"`
+	Header   string `yaml:"header"`   // signature header (hmac_*: required)
+	Encoding string `yaml:"encoding"` // hex (default) | base64
+	Prefix   string `yaml:"prefix"`   // stripped/added around the digest, e.g. "sha256="
+	// TimestampHeader enables replay protection: the timestamp is signed with the body
+	// and must be within Tolerance of now.
+	TimestampHeader string `yaml:"timestamp_header"`
+	Tolerance       string `yaml:"tolerance"` // default 5m
+	// SignedPayload is what gets signed: {timestamp} and {body} are replaced. Default:
+	// "{timestamp}.{body}" with a timestamp header, else "{body}".
+	SignedPayload string `yaml:"signed_payload"`
+	// Handler is the "<plugin>.<verifier>" used by scheme: plugin (inbound only).
+	Handler string `yaml:"handler"`
+}
+
+// WebhookChallengeDef answers a provider's endpoint-verification request by echoing a
+// value back as text/plain.
+type WebhookChallengeDef struct {
+	Method     string `yaml:"method"`      // GET (default) | POST
+	QueryParam string `yaml:"query_param"` // GET: echo this query parameter
+	BodyPath   string `yaml:"body_path"`   // POST: echo this body value, e.g. body.challenge
+	When       string `yaml:"when"`        // POST: only when the event value equals this, e.g. url_verification
+}
+
+// WebhookRouteDef is what an inbound event does: write to an entity, or call a plugin.
+type WebhookRouteDef struct {
+	Entity string `yaml:"entity"`
+	Op     string `yaml:"op"` // create | update | upsert | delete
+	// Map sets fields from the request: "{{body.data.id}}" keeps the JSON type when it is
+	// the whole value; mixed text renders as a string. Non-string YAML values are literals.
+	Map map[string]any `yaml:"map"`
+	// Key identifies the row for update/delete: the primary key or the natural_key fields.
+	Key     map[string]any `yaml:"key"`
+	Handler string         `yaml:"handler"` // "<plugin>.<handler>" instead of entity/op
+}
+
+// WebhookTokenDef checks a shared secret token sent in a header or query parameter.
+type WebhookTokenDef struct {
+	Header     string `yaml:"header"`
+	QueryParam string `yaml:"query_param"`
+	Value      string `yaml:"value"` // use ${ENV_VAR}
 }
 
 // SeedFileConfig represents a "kind: seed" YAML file.

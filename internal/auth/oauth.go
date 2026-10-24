@@ -382,7 +382,7 @@ func (h *Handler) oauthResolveUser(ctx context.Context, dbc *db.DB, entity *sche
 		if err != nil {
 			return nil, err
 		}
-		user, err := scanRow(rows)
+		user, err := scanRow(entity, rows)
 		rows.Close()
 		if err != nil || user != nil {
 			return user, err

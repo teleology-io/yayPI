@@ -9,8 +9,10 @@ import (
 	"github.com/rs/zerolog/log"
 	"github.com/teleology-io/yayPI/internal/apierr"
 	"github.com/teleology-io/yayPI/internal/auth"
+	"github.com/teleology-io/yayPI/internal/config"
 	"github.com/teleology-io/yayPI/internal/handler"
 	"github.com/teleology-io/yayPI/internal/health"
+	"github.com/teleology-io/yayPI/internal/inbox"
 	"github.com/teleology-io/yayPI/internal/middleware"
 	"github.com/teleology-io/yayPI/internal/openapi"
 	"github.com/teleology-io/yayPI/internal/plugin"
@@ -43,8 +45,13 @@ type Config struct {
 	HSTSMaxAge      int                        // > 0 adds Strict-Transport-Security
 	MetricsHandler  http.Handler               // optional; mounted at MetricsPath outside base_url
 	MetricsPath     string
-	MetricsToken    string // bearer token required to scrape metrics ("" = open)
+	MetricsToken    string            // bearer token required to scrape metrics ("" = open)
+	Inbound         []*inbox.Receiver // `mode: inbound` webhook receivers
 }
+
+// DefaultInboundRateLimit is the per-IP limit on an inbound webhook receiver unless its
+// rate_limit raises it (it cannot be turned off).
+const DefaultInboundRateLimit = 300
 
 // Build constructs a chi.Router from the schema registry and config.
 func Build(
@@ -124,6 +131,7 @@ func Build(
 			cfg.OpenAPIHandler.Mount(r)
 		}
 		registerEndpoints(r, reg, factory, cfg)
+		registerInbound(r, cfg)
 	})
 
 	return r
@@ -188,11 +196,11 @@ func registerCRUDOp(
 		r.With(mws...).Get(itemPath, factory.Get(entity, opts))
 
 	case "create":
-		opts := ep.Create
-		if opts == nil {
-			opts = &schema.CreateOpts{}
-		}
-		r.With(mws...).Post(path, factory.Create(entity, opts))
+		r.With(mws...).Post(path, factory.Create(entity, createOpts(ep, "")))
+
+	case "upsert":
+		// PUT on the collection: create or update by natural key.
+		r.With(mws...).Put(path, factory.Create(entity, createOpts(ep, handler.ConflictUpdate)))
 
 	case "update":
 		opts := ep.Update
@@ -215,6 +223,34 @@ func registerCRUDOp(
 		}
 		r.With(mws...).Delete(itemPath, factory.Delete(entity, opts))
 	}
+}
+
+// createOpts returns the endpoint's create options, with the conflict mode forced (the
+// upsert op) and the update row_access attached for upserts.
+func createOpts(ep *schema.Endpoint, force string) *schema.CreateOpts {
+	opts := schema.CreateOpts{BulkMax: 500, BulkErrorMode: "abort", OnConflict: handler.ConflictError}
+	if ep.Create != nil {
+		opts = *ep.Create
+	}
+	if force != "" {
+		opts.OnConflict = force
+	}
+	if ep.Update != nil {
+		opts.ConflictRowAccess = ep.Update.RowAccess
+	}
+	return &opts
+}
+
+// casbinActions is the set of Casbin actions an operation needs: a write that can both
+// create and update (upsert, on_conflict: update) needs both. nil = derive from method.
+func casbinActions(ep *schema.Endpoint, op string) []string {
+	switch {
+	case op == "upsert":
+		return []string{"create", "update"}
+	case op == "create" && ep.Create != nil && ep.Create.OnConflict == handler.ConflictUpdate:
+		return []string{"create", "update"}
+	}
+	return nil
 }
 
 // registerCustomHandler registers an endpoint's `method`/`handler` pair (a RouteHandlerPlugin
@@ -250,6 +286,54 @@ func wrapRouteHandler(fn sdk.RouteHandlerFunc) http.HandlerFunc {
 	}
 }
 
+// registerInbound mounts inbound webhook receivers. Each gets a body limit and an
+// always-on rate limiter; the auth chain is mounted only when the receiver declares
+// auth, so a provider's own Authorization header is never mistaken for a yayPi token.
+func registerInbound(r chi.Router, cfg Config) {
+	for _, rc := range cfg.Inbound {
+		def := rc.Def()
+		var mws []func(http.Handler) http.Handler
+		limit := cfg.MaxBodyBytes
+		if n, _ := config.ParseByteSize(def.MaxBodySize); n > 0 { // validated at load
+			limit = n
+		}
+		if limit > 0 {
+			mws = append(mws, middleware.BodyLimit(limit))
+		}
+		rpm, burst, keyBy := DefaultInboundRateLimit, 0, "ip"
+		if rl := def.RateLimit; rl != nil && rl.RequestsPerMinute > 0 {
+			rpm, burst, keyBy = rl.RequestsPerMinute, rl.Burst, rl.KeyBy
+		}
+		if burst <= 0 {
+			burst = rpm
+		}
+		limiter := middleware.NewRateLimiter(burst, float64(rpm)/60.0, keyBy)
+		if !limiter.KeyByUser() {
+			mws = append(mws, limiter.Handler)
+		}
+		if a := def.Auth; a != nil && (a.Require || len(a.Roles) > 0 || len(a.Conditions) > 0) {
+			if cfg.APIKeyLookup != nil {
+				mws = append(mws, middleware.APIKeyAuth(cfg.APIKeyHeader, cfg.APIKeyParam, cfg.APIKeyLookup))
+			}
+			if cfg.Tokens != nil {
+				mws = append(mws, middleware.RequireAuth(cfg.Tokens, true, cfg.ValidateSubject))
+			}
+			if limiter.KeyByUser() {
+				mws = append(mws, limiter.Handler)
+			}
+			// No Casbin resource for a receiver: roles/conditions are enforced (and with no
+			// credential source at all, RBAC fails closed with 401).
+			mws = append(mws, middleware.RBAC(nil, "", middleware.AuthOpts{Require: true, Roles: a.Roles, Conditions: a.Conditions}, policy.EvalConditions))
+		} else if limiter.KeyByUser() {
+			mws = append(mws, limiter.Handler) // anonymous: falls back to the client IP
+		}
+		r.With(mws...).Post(def.Path, rc.ServeHTTP)
+		if rc.HasGetChallenge() {
+			r.With(mws...).Get(def.Path, rc.ServeHTTP)
+		}
+	}
+}
+
 // resolveOpAuth returns the effective Auth for the given CRUD operation.
 // Per-operation auth overrides the endpoint-level auth.
 func resolveOpAuth(ep *schema.Endpoint, op string) *schema.Auth {
@@ -263,7 +347,7 @@ func resolveOpAuth(ep *schema.Endpoint, op string) *schema.Auth {
 		if ep.Get != nil {
 			opAuth = ep.Get.Auth
 		}
-	case "create":
+	case "create", "upsert":
 		if ep.Create != nil {
 			opAuth = ep.Create.Auth
 		}
@@ -342,7 +426,7 @@ func buildMiddlewareChain(
 	// Casbin check runs only when a policy engine is configured, but roles/conditions are
 	// always enforced — they must never silently disappear because Casbin is absent.
 	if requireAuth {
-		opts := middleware.AuthOpts{Require: true, Roles: auth.Roles, Conditions: auth.Conditions}
+		opts := middleware.AuthOpts{Require: true, Roles: auth.Roles, Conditions: auth.Conditions, Actions: casbinActions(ep, op)}
 		var enforcer middleware.RBACEnforcer
 		if cfg.Enforcer != nil {
 			enforcer = cfg.Enforcer

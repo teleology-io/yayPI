@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -59,6 +58,11 @@ func (f *Factory) prepareCreate(r *http.Request, entity *schema.Entity, opts *sc
 	if missing := applySubjectDefaults(entity, data, sub); missing != "" {
 		return nil, &itemError{status: http.StatusUnauthorized, msg: "authentication required to set " + missing}
 	}
+	if isUpsert(conflictMode(opts)) {
+		if field := missingNaturalKey(entity, data); field != "" {
+			return nil, &itemError{status: http.StatusBadRequest, msg: "validation failed", fields: naturalKeyError(entity, field)}
+		}
+	}
 	if f.plugins != nil {
 		var err error
 		data, err = f.plugins.BeforeCreate(r.Context(), entity.Name, data)
@@ -69,25 +73,14 @@ func (f *Factory) prepareCreate(r *http.Request, entity *schema.Entity, opts *sc
 	return data, nil
 }
 
-// insert writes one record inside tx and notifies observers.
-func (f *Factory) insert(ctx context.Context, r *http.Request, tx *sql.Tx, dbc *db.DB, entity *schema.Entity, data map[string]any) (map[string]any, error) {
-	record, err := query.NewBuilder(entity, tx, dbc.Dialect).Create(ctx, data)
-	if err != nil {
-		return nil, err
-	}
-	err = f.observe(ctx, tx, dbc.Dialect, WriteEvent{
-		Entity: entity, Action: "create", ID: idString(record[entity.PKColumn()]), After: record,
-		Subject: middleware.GetSubject(r), RequestID: middleware.GetRequestID(r),
-	})
-	return record, err
-}
-
 func (f *Factory) writeItemError(w http.ResponseWriter, r *http.Request, dbc *db.DB, e *itemError) {
 	switch {
 	case e.fields != nil:
 		writeValidation(w, r, e.fields)
 	case e.stage != "":
 		writeHookError(w, r, e.stage, e.err)
+	case errors.Is(e.err, errKeyHidden):
+		writeError(w, r, http.StatusConflict, errKeyHidden.Error())
 	case e.err != nil:
 		writeDBError(w, r, dbc.Dialect, e.err, "create")
 	default:
@@ -110,31 +103,60 @@ func (f *Factory) createSingle(w http.ResponseWriter, r *http.Request, entity *s
 		f.writeItemError(w, r, dbc, ierr)
 		return
 	}
-
-	var record map[string]any
-	err = withTx(r.Context(), dbc.SQL, func(tx *sql.Tx) error {
-		var err error
-		record, err = f.insert(r.Context(), r, tx, dbc, entity, data)
-		return err
-	})
-	if err != nil {
-		writeDBError(w, r, dbc.Dialect, err, "create")
+	row, ok := f.conflictFilter(w, r, entity, opts, dbc)
+	if !ok {
 		return
 	}
 
-	f.afterCreate(r, entity, record)
+	sub, mode := middleware.GetSubject(r), conflictMode(opts)
+	var out writeOutcome
+	err = withTx(r.Context(), dbc.SQL, func(tx *sql.Tx) error {
+		var err error
+		out, err = f.createOrUpsert(r.Context(), tx, dbc, entity, data, mode, row, sub, middleware.GetRequestID(r))
+		return err
+	})
+	if err != nil {
+		f.writeItemError(w, r, dbc, &itemError{err: err})
+		return
+	}
+
+	f.afterCreate(r, entity, out)
+	status := http.StatusCreated
+	if out.Action != ActionCreated {
+		status = http.StatusOK
+	}
+	if isUpsert(mode) {
+		w.Header().Set("X-Write-Action", out.Action)
+	}
+	record := out.Record
 	w.Header().Set("ETag", computeETag(record))
-	presentRecord(entity, record, middleware.GetSubject(r))
-	writeJSON(w, http.StatusCreated, map[string]any{"data": record})
+	presentRecord(entity, record, sub)
+	writeJSON(w, status, map[string]any{"data": record})
 }
 
-// afterCreate runs AfterCreate hooks once the row is committed. Hook errors are logged;
-// the record exists, so the request still succeeds.
-func (f *Factory) afterCreate(r *http.Request, entity *schema.Entity, record map[string]any) {
-	if f.plugins != nil {
-		if err := f.plugins.AfterCreate(r.Context(), entity.Name, copyMap(record)); err != nil {
-			logHookError(r, "after-create", err)
+// conflictFilter resolves which existing rows an upsert may overwrite: the endpoint's
+// update.row_access plus tenant scope. Plain creates need none.
+func (f *Factory) conflictFilter(w http.ResponseWriter, r *http.Request, entity *schema.Entity, opts *schema.CreateOpts, dbc *db.DB) (query.RowFilter, bool) {
+	if !isUpsert(conflictMode(opts)) {
+		return query.RowFilter{}, true
+	}
+	sub := middleware.GetSubject(r)
+	row, ok := resolveRowFilter(w, r, opts.ConflictRowAccess, sub, http.StatusForbidden)
+	if !ok {
+		return row, false
+	}
+	return scopeTenant(w, r, entity, row, sub, dbc.Dialect, http.StatusForbidden)
+}
+
+// afterCreate runs the After* hook for what was written once it is committed. Hook
+// errors are logged; the record exists, so the request still succeeds.
+func (f *Factory) afterCreate(r *http.Request, entity *schema.Entity, out writeOutcome) {
+	if err := f.afterWrite(r.Context(), entity, out); err != nil {
+		stage := "after-create"
+		if out.Action == ActionUpdated {
+			stage = "after-update"
 		}
+		logHookError(r, stage, err)
 	}
 }
 
@@ -160,14 +182,25 @@ func (f *Factory) createBulk(w http.ResponseWriter, r *http.Request, entity *sch
 		return
 	}
 	partial := opts != nil && opts.BulkErrorMode == "partial"
-	sub := middleware.GetSubject(r)
+	sub, mode, reqID := middleware.GetSubject(r), conflictMode(opts), middleware.GetRequestID(r)
 	d := dbc.Dialect
+	row, ok := f.conflictFilter(w, r, entity, opts, dbc)
+	if !ok {
+		return
+	}
 
 	type bulkResult struct {
 		Index  int              `json:"index"`
+		Action string           `json:"action,omitempty"`
 		Data   map[string]any   `json:"data,omitempty"`
 		Error  string           `json:"error,omitempty"`
 		Errors ValidationErrors `json:"errors,omitempty"`
+	}
+	action := func(out writeOutcome) string {
+		if isUpsert(mode) {
+			return out.Action
+		}
+		return ""
 	}
 
 	if !partial {
@@ -187,16 +220,16 @@ func (f *Factory) createBulk(w http.ResponseWriter, r *http.Request, entity *sch
 			}
 			prepared[i] = data
 		}
-		records := make([]map[string]any, len(prepared))
+		outs := make([]writeOutcome, len(prepared))
 		failedAt := -1
 		err := withTx(r.Context(), dbc.SQL, func(tx *sql.Tx) error {
 			for i, data := range prepared {
-				rec, err := f.insert(r.Context(), r, tx, dbc, entity, data)
+				out, err := f.createOrUpsert(r.Context(), tx, dbc, entity, data, mode, row, sub, reqID)
 				if err != nil {
 					failedAt = i
 					return err
 				}
-				records[i] = rec
+				outs[i] = out
 			}
 			return nil
 		})
@@ -204,14 +237,18 @@ func (f *Factory) createBulk(w http.ResponseWriter, r *http.Request, entity *sch
 			if failedAt >= 0 {
 				w.Header().Set("X-Failed-Index", strconv.Itoa(failedAt))
 			}
+			if errors.Is(err, errKeyHidden) {
+				writeError(w, r, http.StatusConflict, errKeyHidden.Error()+" (nothing was written)")
+				return
+			}
 			writeDBError(w, r, d, err, "bulk create (nothing was inserted)")
 			return
 		}
-		results := make([]bulkResult, len(records))
-		for i, rec := range records {
-			f.afterCreate(r, entity, rec)
-			presentRecord(entity, rec, sub)
-			results[i] = bulkResult{Index: i, Data: rec}
+		results := make([]bulkResult, len(outs))
+		for i, out := range outs {
+			f.afterCreate(r, entity, out)
+			presentRecord(entity, out.Record, sub)
+			results[i] = bulkResult{Index: i, Action: action(out), Data: out.Record}
 		}
 		writeJSON(w, http.StatusCreated, map[string]any{"results": results})
 		return
@@ -230,10 +267,10 @@ func (f *Factory) createBulk(w http.ResponseWriter, r *http.Request, entity *sch
 			results = append(results, res)
 			continue
 		}
-		var rec map[string]any
+		var out writeOutcome
 		err := withTx(r.Context(), dbc.SQL, func(tx *sql.Tx) error {
 			var err error
-			rec, err = f.insert(r.Context(), r, tx, dbc, entity, data)
+			out, err = f.createOrUpsert(r.Context(), tx, dbc, entity, data, mode, row, sub, reqID)
 			return err
 		})
 		if err != nil {
@@ -241,9 +278,9 @@ func (f *Factory) createBulk(w http.ResponseWriter, r *http.Request, entity *sch
 			results = append(results, bulkResult{Index: i, Error: dbErrorMessage(d, err)})
 			continue
 		}
-		f.afterCreate(r, entity, rec)
-		presentRecord(entity, rec, sub)
-		results = append(results, bulkResult{Index: i, Data: rec})
+		f.afterCreate(r, entity, out)
+		presentRecord(entity, out.Record, sub)
+		results = append(results, bulkResult{Index: i, Action: action(out), Data: out.Record})
 	}
 	status := http.StatusCreated
 	if hasError {
@@ -255,6 +292,8 @@ func (f *Factory) createBulk(w http.ResponseWriter, r *http.Request, entity *sch
 // dbErrorMessage is the client-safe message for a per-item DB failure.
 func dbErrorMessage(d dialect.Dialect, err error) string {
 	switch {
+	case errors.Is(err, errKeyHidden):
+		return errKeyHidden.Error()
 	case errors.Is(err, query.ErrNoFields):
 		return "no valid fields provided"
 	case d.IsUniqueViolation(err):

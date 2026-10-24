@@ -167,6 +167,10 @@ func TestFullStack(t *testing.T) {
 			if reg["user"].(map[string]any)["role"] != "member" {
 				t.Fatal("register accepted a client-chosen role")
 			}
+			// Text columns come back as JSON strings on every dialect (MySQL returns []byte).
+			if reg["user"].(map[string]any)["email"] != "alice@example.com" {
+				t.Fatalf("register response email = %#v", reg["user"].(map[string]any)["email"])
+			}
 			login := alice.must(200, "POST", "/api/auth/login", map[string]any{"email": "alice@example.com", "password": "password1"})
 			alice.token = login["token"].(string)
 			bob.token = bob.must(201, "POST", "/api/auth/register", map[string]any{"email": "bob@example.com", "password": "password1"})["token"].(string)

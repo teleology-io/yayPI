@@ -15,6 +15,8 @@ type Registry struct {
 	// AuthEndpoint is the `kind: auth` configuration when the built-in auth routes
 	// are mounted (nil otherwise); the OpenAPI builder documents those routes.
 	AuthEndpoint *config.AuthEndpointDef
+	// InboundWebhooks are the `mode: inbound` webhook receivers (documented in OpenAPI).
+	InboundWebhooks []config.WebhookDef
 }
 
 // SpecMeta holds the resolved metadata for a named OpenAPI spec.
@@ -117,6 +119,10 @@ type CreateOpts struct {
 	BulkMax       int
 	BulkErrorMode string // abort | partial
 	Strict        bool   // reject unknown body fields
+	OnConflict    string // error (default) | update | ignore — on an existing natural_key
+	// ConflictRowAccess limits which existing rows an upsert may overwrite (the endpoint's
+	// update.row_access); set by the router.
+	ConflictRowAccess []RowAccessRule
 }
 
 // UpdateOpts holds update endpoint options.
@@ -189,8 +195,26 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 	if len(cfg.Jobs) > 0 && (cfg.Cron.Distributed == nil || *cfg.Cron.Distributed) {
 		reg.RegisterEntity(NewJobLockEntity())
 	}
-	if len(cfg.EmailFiles) > 0 || len(cfg.WebhookFiles) > 0 || authSendsEmail(cfg) {
+	outbound, inbound := 0, 0
+	for _, w := range cfg.AllWebhookDefs() {
+		if w.IsInbound() {
+			inbound++
+			reg.InboundWebhooks = append(reg.InboundWebhooks, w)
+		} else {
+			outbound++
+		}
+	}
+	if len(cfg.EmailFiles) > 0 || outbound > 0 || authSendsEmail(cfg) {
 		reg.RegisterEntity(NewOutboxEntity())
+	}
+	if inbound > 0 {
+		reg.RegisterEntity(NewInboxEntity())
+	}
+	// Plugins listed in yaypi.yaml may keep incremental-sync cursors (sdk.Store.Cursor).
+	// Registering on the config (not on code-registered plugins) keeps `yaypi migrate
+	// generate` and the running server in agreement.
+	if len(cfg.Plugins) > 0 {
+		reg.RegisterEntity(NewSyncCursorEntity())
 	}
 	if cfg.AuthEndpoint != nil {
 		for _, e := range NewAuthTokenEntities() {
@@ -359,6 +383,10 @@ func buildCreateOpts(c *config.CreateConfig) *CreateOpts {
 	if mode == "" {
 		mode = "abort"
 	}
+	onConflict := c.OnConflict
+	if onConflict == "" {
+		onConflict = "error"
+	}
 	return &CreateOpts{
 		Auth:          buildAuth(c.Auth),
 		BeforeHooks:   c.BeforeHooks,
@@ -367,6 +395,7 @@ func buildCreateOpts(c *config.CreateConfig) *CreateOpts {
 		BulkMax:       bulkMax,
 		BulkErrorMode: mode,
 		Strict:        c.Strict,
+		OnConflict:    onConflict,
 	}
 }
 

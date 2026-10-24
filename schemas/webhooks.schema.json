@@ -2,15 +2,20 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://yaypi.dev/schemas/webhooks.schema.json",
   "title": "yayPi Webhooks",
-  "description": "Defines outbound webhook triggers that fire HTTP requests to external systems when entity events occur.",
+  "description": "Webhooks in both directions. mode: outbound (default) fires an HTTP request when an entity changes; mode: inbound receives signed requests from another system and applies them to entities or a plugin handler.",
   "type": "object",
-  "required": ["kind", "webhooks"],
+  "required": [
+    "kind",
+    "webhooks"
+  ],
   "additionalProperties": false,
   "properties": {
     "version": {
       "type": "string",
       "description": "Schema version.",
-      "examples": ["1"]
+      "examples": [
+        "1"
+      ]
     },
     "kind": {
       "const": "webhooks",
@@ -19,51 +24,45 @@
     "webhooks": {
       "type": "array",
       "description": "List of webhook trigger definitions.",
-      "items": { "$ref": "#/$defs/WebhookDef" }
+      "items": {
+        "$ref": "#/$defs/WebhookDef"
+      }
     }
   },
   "$defs": {
     "WebhookDef": {
       "type": "object",
-      "description": "A single outbound webhook trigger.",
-      "required": ["name", "entity", "trigger", "url"],
+      "description": "A single webhook (outbound or inbound).",
+      "required": [
+        "name"
+      ],
       "additionalProperties": false,
       "properties": {
         "name": {
           "type": "string",
-          "description": "Unique name for this webhook, used in logs.",
-          "examples": ["crm-sync", "slack-notification", "stripe-sync"]
+          "description": "Unique webhook name (logs, metrics, inbox rows). At most 100 characters.",
+          "examples": [
+            "crm-sync",
+            "slack-notification",
+            "stripe-sync"
+          ],
+          "maxLength": 100
         },
-        "entity": {
+        "mode": {
           "type": "string",
-          "description": "Entity whose events trigger this webhook.",
-          "examples": ["User", "Order", "Payment"]
-        },
-        "trigger": {
-          "type": "string",
-          "description": "Lifecycle event that fires this webhook.",
-          "enum": ["after_create", "after_update", "after_delete"]
-        },
-        "condition": {
-          "type": "string",
-          "description": "Optional CEL-lite expression. Webhook only fires if this evaluates to true. Supports record.<field> bindings.",
-          "examples": ["record.status == 'active'", "record.amount > 1000"]
-        },
-        "url": {
-          "type": "string",
-          "description": "Destination URL. Supports ${ENV_VAR} substitution. SSRF protection blocks private IP ranges.",
-          "examples": ["${CRM_WEBHOOK_URL}", "https://hooks.slack.com/services/${SLACK_TOKEN}"]
-        },
-        "method": {
-          "type": "string",
-          "description": "HTTP method to use.",
-          "enum": ["POST", "PUT", "PATCH"],
-          "default": "POST"
+          "enum": [
+            "outbound",
+            "inbound"
+          ],
+          "default": "outbound",
+          "description": "outbound: send on entity changes. inbound: receive at path."
         },
         "headers": {
           "type": "object",
-          "description": "HTTP headers to include. Values support ${ENV_VAR} substitution.",
-          "additionalProperties": { "type": "string" },
+          "description": "Outbound: HTTP headers sent with each delivery. Values support {{record.field}} and ${ENV_VAR}.",
+          "additionalProperties": {
+            "type": "string"
+          },
           "examples": [
             {
               "Authorization": "Bearer ${CRM_TOKEN}",
@@ -71,27 +70,260 @@
             }
           ]
         },
+        "timeout": {
+          "type": "string",
+          "description": "Outbound: request timeout (default 5s). Inbound: processing timeout per event (default 30s).",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
+          "default": "5s",
+          "examples": [
+            "5s",
+            "10s",
+            "30s"
+          ]
+        },
+        "retry": {
+          "$ref": "#/$defs/RetryConfig"
+        },
+        "secret": {
+          "type": "string",
+          "description": "Signs outbound deliveries / verifies inbound requests with the signature scheme (default yaypi_v1). Use ${ENV_VAR}."
+        },
+        "signature": {
+          "$ref": "#/$defs/Signature"
+        },
+        "entity": {
+          "type": "string",
+          "description": "Entity whose events trigger this webhook.",
+          "examples": [
+            "User",
+            "Order",
+            "Payment"
+          ]
+        },
+        "trigger": {
+          "type": "string",
+          "description": "Lifecycle event that fires this webhook.",
+          "enum": [
+            "after_create",
+            "after_update",
+            "after_delete"
+          ]
+        },
+        "condition": {
+          "type": "string",
+          "description": "Optional CEL-lite expression. Webhook only fires if this evaluates to true. Supports record.<field> bindings.",
+          "examples": [
+            "record.status == 'active'",
+            "record.amount > 1000"
+          ]
+        },
+        "url": {
+          "type": "string",
+          "description": "Destination URL. Supports ${ENV_VAR} substitution. SSRF protection blocks private IP ranges.",
+          "examples": [
+            "${CRM_WEBHOOK_URL}",
+            "https://hooks.slack.com/services/${SLACK_TOKEN}"
+          ]
+        },
+        "method": {
+          "type": "string",
+          "description": "HTTP method to use.",
+          "enum": [
+            "POST",
+            "PUT",
+            "PATCH"
+          ],
+          "default": "POST"
+        },
         "payload": {
           "type": "string",
           "description": "JSON payload template. Supports {{record.field}} and ${ENV_VAR} substitution. Defaults to the full record JSON.",
-          "examples": ["{\"email\": \"{{record.email}}\", \"name\": \"{{record.name}}\"}"]
-        },
-        "timeout": {
-          "type": "string",
-          "description": "HTTP request timeout. Webhook is cancelled if exceeded.",
-          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
-          "default": "5s",
-          "examples": ["5s", "10s", "30s"]
-        },
-        "retry": { "$ref": "#/$defs/RetryConfig" },
-        "secret": {
-          "type": "string",
-          "description": "Signs each delivery: X-Yaypi-Signature: v1=hex(HMAC-SHA256(secret, \"<X-Yaypi-Timestamp>.<body>\")). Use ${ENV_VAR}."
+          "examples": [
+            "{\"email\": \"{{record.email}}\", \"name\": \"{{record.name}}\"}"
+          ]
         },
         "allow_private_network": {
           "type": "boolean",
           "description": "Allow delivery to private/loopback/link-local addresses (blocked by default to prevent SSRF).",
           "default": false
+        },
+        "path": {
+          "type": "string",
+          "pattern": "^/",
+          "description": "Inbound: route path under project.base_url.",
+          "examples": [
+            "/webhooks/crm"
+          ]
+        },
+        "challenge": {
+          "$ref": "#/$defs/Challenge"
+        },
+        "dedupe_key": {
+          "type": "string",
+          "pattern": "^(body|headers|query)(\\.[A-Za-z0-9_\\-]+)*$",
+          "description": "Inbound: request value identifying a delivery; repeats are acknowledged and dropped. Required when unsigned.",
+          "examples": [
+            "body.id",
+            "headers.X-Event-Id"
+          ]
+        },
+        "event": {
+          "type": "string",
+          "pattern": "^(body|headers|query)(\\.[A-Za-z0-9_\\-]+)*$",
+          "description": "Inbound: request value that selects a route.",
+          "examples": [
+            "body.type"
+          ]
+        },
+        "routes": {
+          "type": "object",
+          "description": "Inbound: event value → action. \"*\" matches events without their own route; unmatched events are acknowledged and ignored.",
+          "additionalProperties": {
+            "$ref": "#/$defs/Route"
+          }
+        },
+        "handler": {
+          "type": "string",
+          "pattern": "^[^.]+\\..+$",
+          "description": "Inbound: shorthand for routes: {\"*\": {handler: …}} — a WebhookPlugin handler <plugin>.<handler>."
+        },
+        "auth": {
+          "type": "object",
+          "description": "Inbound guard: require an API key or JWT (roles/conditions as on endpoints).",
+          "additionalProperties": false,
+          "properties": {
+            "require": {
+              "type": "boolean"
+            },
+            "roles": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "conditions": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          }
+        },
+        "token": {
+          "type": "object",
+          "description": "Inbound guard: a shared secret sent in a header or query parameter (constant-time compare).",
+          "additionalProperties": false,
+          "required": [
+            "value"
+          ],
+          "properties": {
+            "header": {
+              "type": "string"
+            },
+            "query_param": {
+              "type": "string"
+            },
+            "value": {
+              "type": "string",
+              "description": "Use ${ENV_VAR}."
+            }
+          }
+        },
+        "allowed_ips": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Inbound guard: client IPs/CIDRs allowed to call (behind a proxy, set server.trusted_proxies).",
+          "examples": [
+            [
+              "203.0.113.0/24"
+            ]
+          ]
+        },
+        "rate_limit": {
+          "type": "object",
+          "description": "Inbound: per-receiver limit (default 300/min per IP; cannot be turned off).",
+          "additionalProperties": false,
+          "properties": {
+            "requests_per_minute": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "burst": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "key_by": {
+              "type": "string",
+              "enum": [
+                "ip",
+                "user"
+              ]
+            }
+          }
+        },
+        "as_role": {
+          "type": "string",
+          "description": "Inbound: role route actions run as (Casbin policies and field write_roles). Empty = trusted system write."
+        },
+        "max_body_size": {
+          "type": "string",
+          "description": "Inbound: request body cap (default server.max_request_body_size).",
+          "examples": [
+            "1MB"
+          ]
+        },
+        "spec": {
+          "type": "boolean",
+          "description": "Inbound: false leaves the receiver out of OpenAPI specs."
+        }
+      },
+      "if": {
+        "properties": {
+          "mode": {
+            "const": "inbound"
+          }
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "then": {
+        "required": [
+          "path"
+        ],
+        "properties": {
+          "entity": false,
+          "trigger": false,
+          "condition": false,
+          "url": false,
+          "method": false,
+          "payload": false,
+          "allow_private_network": false,
+          "headers": false
+        }
+      },
+      "else": {
+        "required": [
+          "entity",
+          "trigger",
+          "url"
+        ],
+        "properties": {
+          "path": false,
+          "challenge": false,
+          "dedupe_key": false,
+          "event": false,
+          "routes": false,
+          "handler": false,
+          "auth": false,
+          "token": false,
+          "allowed_ips": false,
+          "rate_limit": false,
+          "as_role": false,
+          "max_body_size": false,
+          "spec": false
         }
       }
     },
@@ -105,12 +337,18 @@
           "description": "Maximum delivery attempts (including the first).",
           "minimum": 1,
           "default": 3,
-          "examples": [3, 5]
+          "examples": [
+            3,
+            5
+          ]
         },
         "backoff": {
           "type": "string",
           "description": "Backoff strategy between retries.",
-          "enum": ["fixed", "exponential"],
+          "enum": [
+            "fixed",
+            "exponential"
+          ],
           "default": "exponential"
         },
         "initial_delay": {
@@ -118,14 +356,140 @@
           "description": "Wait time before the first retry.",
           "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
           "default": "1s",
-          "examples": ["1s", "5s"]
+          "examples": [
+            "1s",
+            "5s"
+          ]
         },
         "max_delay": {
           "type": "string",
           "description": "Maximum wait time between retries.",
           "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h)$",
           "default": "1m",
-          "examples": ["30s", "1m"]
+          "examples": [
+            "30s",
+            "1m"
+          ]
+        }
+      }
+    },
+    "Signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scheme"
+      ],
+      "description": "How the body is signed (outbound) or verified (inbound). Omitted with a secret = yaypi_v1. none requires an inbound guard (auth, token or allowed_ips) and no secret.",
+      "properties": {
+        "scheme": {
+          "type": "string",
+          "enum": [
+            "yaypi_v1",
+            "hmac_sha256",
+            "hmac_sha1",
+            "github",
+            "stripe",
+            "slack",
+            "plugin",
+            "none"
+          ]
+        },
+        "header": {
+          "type": "string",
+          "description": "Signature header (required for hmac_*; presets set it)."
+        },
+        "encoding": {
+          "type": "string",
+          "enum": [
+            "hex",
+            "base64"
+          ],
+          "default": "hex"
+        },
+        "prefix": {
+          "type": "string",
+          "description": "Text before the digest, e.g. sha256=."
+        },
+        "timestamp_header": {
+          "type": "string",
+          "description": "Signed timestamp (unix seconds) for replay protection."
+        },
+        "tolerance": {
+          "type": "string",
+          "pattern": "^[0-9]+(ns|us|µs|ms|s|m|h|d)$",
+          "default": "5m",
+          "description": "Maximum timestamp age."
+        },
+        "signed_payload": {
+          "type": "string",
+          "description": "What is signed; {timestamp} and {body} are replaced. Default {timestamp}.{body} with a timestamp header, else {body}."
+        },
+        "handler": {
+          "type": "string",
+          "pattern": "^[^.]+\\..+$",
+          "description": "scheme: plugin (inbound only) — a WebhookVerifierPlugin verifier <plugin>.<verifier>."
+        }
+      }
+    },
+    "Challenge": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Inbound: answer a provider's endpoint-verification handshake by echoing a value as text/plain.",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "GET",
+            "POST"
+          ],
+          "default": "GET"
+        },
+        "query_param": {
+          "type": "string",
+          "description": "GET: query parameter to echo."
+        },
+        "body_path": {
+          "type": "string",
+          "description": "POST: body value to echo, e.g. body.challenge."
+        },
+        "when": {
+          "type": "string",
+          "description": "POST: event value marking the handshake, e.g. url_verification."
+        }
+      }
+    },
+    "Route": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What an inbound event does: an entity write, or a plugin handler.",
+      "properties": {
+        "entity": {
+          "type": "string"
+        },
+        "op": {
+          "type": "string",
+          "enum": [
+            "create",
+            "update",
+            "upsert",
+            "delete"
+          ],
+          "description": "upsert matches the entity's natural_key; update/delete need key."
+        },
+        "map": {
+          "type": "object",
+          "description": "field → value. \"{{body.x}}\" keeps the JSON type when it is the whole value; mixed text renders as a string; non-strings are literals.",
+          "additionalProperties": true
+        },
+        "key": {
+          "type": "object",
+          "description": "update/delete: the primary key or the natural_key fields, as templates.",
+          "additionalProperties": true
+        },
+        "handler": {
+          "type": "string",
+          "pattern": "^[^.]+\\..+$",
+          "description": "WebhookPlugin handler <plugin>.<handler> instead of entity/op."
         }
       }
     }

@@ -144,6 +144,10 @@ func newValidateCmd(configFile *string) *cobra.Command {
 			}
 
 			if len(errs) == 0 {
+				// Schema-level checks (natural_key uniqueness, field types, …).
+				if _, err := schema.Build(cfg); err != nil {
+					return err
+				}
 				log.Info().Msg("configuration is valid")
 				return nil
 			}

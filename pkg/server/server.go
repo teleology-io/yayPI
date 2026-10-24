@@ -25,15 +25,18 @@ import (
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/handler"
 	"github.com/teleology-io/yayPI/internal/health"
+	"github.com/teleology-io/yayPI/internal/inbox"
 	"github.com/teleology-io/yayPI/internal/logging"
 	"github.com/teleology-io/yayPI/internal/mailer"
 	"github.com/teleology-io/yayPI/internal/metrics"
 	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/netsafe"
 	"github.com/teleology-io/yayPI/internal/openapi"
 	"github.com/teleology-io/yayPI/internal/outbox"
 	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/router"
 	"github.com/teleology-io/yayPI/internal/schema"
+	"github.com/teleology-io/yayPI/internal/store"
 	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
@@ -62,6 +65,50 @@ func (s *Server) RegisterHook(entity string, p sdk.EntityHookPlugin) {
 // YAML as `handler: <p.Info().Name>.<key>`. Must be called before Run.
 func (s *Server) RegisterRoutes(p sdk.RouteHandlerPlugin) {
 	s.dispatcher.RegisterRoutePlugin(p)
+}
+
+// RegisterJobs registers a plugin's jobs, referenceable from jobs YAML as
+// `handler: plugin` + `plugin: <p.Info().Name>.<key>` (and as on_failure handlers).
+// Must be called before Run.
+func (s *Server) RegisterJobs(p sdk.JobHandlerPlugin) {
+	s.dispatcher.RegisterJobPlugin(p)
+}
+
+// RegisterWebhooks registers a plugin's inbound webhook handlers (`handler:
+// <name>.<key>` in an inbound webhook route) and, if it implements
+// sdk.WebhookVerifierPlugin, its signature verifiers. Must be called before Run.
+func (s *Server) RegisterWebhooks(p sdk.WebhookPlugin) {
+	s.dispatcher.RegisterWebhookPlugin(p)
+}
+
+// RegisterVerifiers registers a plugin's signature verifiers (`signature: {scheme:
+// plugin, handler: <name>.<key>}`). Must be called before Run.
+func (s *Server) RegisterVerifiers(p sdk.WebhookVerifierPlugin) {
+	s.dispatcher.RegisterVerifierPlugin(p)
+}
+
+// Register registers every capability p implements — routes, jobs, webhook handlers and
+// verifiers. Entity hooks are per entity: use RegisterHook. Must be called before Run.
+func (s *Server) Register(p sdk.Plugin) {
+	registered := false
+	if rp, ok := p.(sdk.RouteHandlerPlugin); ok {
+		s.RegisterRoutes(rp)
+		registered = true
+	}
+	if jp, ok := p.(sdk.JobHandlerPlugin); ok {
+		s.RegisterJobs(jp)
+		registered = true
+	}
+	if wp, ok := p.(sdk.WebhookPlugin); ok {
+		s.RegisterWebhooks(wp)
+		registered = true
+	} else if vp, ok := p.(sdk.WebhookVerifierPlugin); ok {
+		s.RegisterVerifiers(vp)
+		registered = true
+	}
+	if !registered {
+		log.Warn().Str("plugin", p.Info().Name).Msg("Register: plugin implements no routes, jobs or webhooks (use RegisterHook for entity hooks)")
+	}
 }
 
 // Run loads configuration, starts the HTTP server, and blocks until SIGINT/SIGTERM, then
@@ -137,7 +184,7 @@ func (s *Server) Run() error {
 	// ── metrics ──────────────────────────────────────────────────────────────
 	var reqObserver middleware.RequestObserver
 	var metricsReg *metrics.Registry
-	var cronRuns, outboxDeliveries *metrics.Counter
+	var cronRuns, outboxDeliveries, webhookEvents, inboxProcessed *metrics.Counter
 	if cfg.Metrics != nil && cfg.Metrics.Enabled {
 		metricsReg = metrics.NewRegistry()
 		reqTotal := metricsReg.NewCounter("yaypi_http_requests_total", "HTTP requests by method, route and status.", "method", "route", "status")
@@ -148,6 +195,10 @@ func (s *Server) Run() error {
 		}
 		cronRuns = metricsReg.NewCounter("yaypi_cron_runs_total", "Cron job runs by job and result.", "job", "result")
 		outboxDeliveries = metricsReg.NewCounter("yaypi_outbox_deliveries_total", "Webhook/email delivery attempts by kind and result.", "kind", "result")
+		webhookEvents = metricsReg.NewCounter("yaypi_webhook_events_total",
+			"Webhook traffic by mode and webhook: outbound delivery attempts (success/error), inbound requests (accepted/duplicate/rejected/challenge/error).",
+			"mode", "webhook", "result")
+		inboxProcessed = metricsReg.NewCounter("yaypi_inbox_processed_total", "Inbound webhook processing attempts by webhook and result.", "webhook", "result")
 		if dbManager != nil {
 			metricsReg.NewGaugeFunc("yaypi_db_connections", "Database pool connections by state.", func() map[string]float64 {
 				out := map[string]float64{}
@@ -195,7 +246,15 @@ func (s *Server) Run() error {
 	// Webhooks and emails go through the transactional outbox: rendered and stored in
 	// the same transaction as the change, then delivered with retries by the worker.
 	var outboxWorker *outbox.Worker
-	webhookDefs, emailDefs := cfg.AllWebhookDefs(), cfg.AllEmailDefs()
+	var webhookDefs, inboundDefs []config.WebhookDef
+	for _, w := range cfg.AllWebhookDefs() {
+		if w.IsInbound() {
+			inboundDefs = append(inboundDefs, w)
+		} else {
+			webhookDefs = append(webhookDefs, w)
+		}
+	}
+	emailDefs := cfg.AllEmailDefs()
 	authMail := schema.AuthSendsEmail(cfg)
 	if len(webhookDefs) > 0 || len(emailDefs) > 0 || authMail {
 		if dbManager == nil {
@@ -217,7 +276,12 @@ func (s *Server) Run() error {
 		outboxWorker = outbox.NewWorker(dbManager.Default(), webhookDefs, emailDefs, smtpSender,
 			outbox.WorkerOptions{PollInterval: poll, Retention: retention, EmailRetry: smtpRetry(cfg.SMTP)})
 		if outboxDeliveries != nil {
-			outboxWorker.OnDelivery = func(kind string, ok bool) { outboxDeliveries.Inc(kind, result(ok)) }
+			outboxWorker.OnDelivery = func(kind, name string, ok bool) {
+				outboxDeliveries.Inc(kind, result(ok))
+				if kind == outbox.KindWebhook {
+					webhookEvents.Inc(config.WebhookOutbound, name, result(ok))
+				}
+			}
 		}
 	}
 	var stopAuditRetention func()
@@ -327,8 +391,52 @@ func (s *Server) Run() error {
 	for _, pc := range cfg.Plugins {
 		pluginConfigs[pc.Name] = pc.Config
 	}
-	if err := s.dispatcher.InitAll(pluginConfigs); err != nil {
+	svc := plugin.Services{HTTP: pluginHTTP}
+	if dbManager != nil {
+		svc.Store = store.New(dbManager, factory, reg)
+	}
+	if err := s.dispatcher.InitAll(pluginConfigs, svc); err != nil {
 		return err
+	}
+
+	// ── inbound webhooks ─────────────────────────────────────────────────────
+	var receivers []*inbox.Receiver
+	var inboxWorker *inbox.Worker
+	if len(inboundDefs) > 0 {
+		if dbManager == nil {
+			return fmt.Errorf("inbound webhooks require a database (requests are stored in an inbox table)")
+		}
+		for _, def := range inboundDefs {
+			rc, err := inbox.NewReceiver(def, dbManager.Default(), s.dispatcher.WebhookVerifier, apiKeyHeader)
+			if err != nil {
+				return err
+			}
+			if webhookEvents != nil {
+				rc.OnReceive = func(name, res string) { webhookEvents.Inc(config.WebhookInbound, name, res) }
+			}
+			if config.EffectiveSignatureScheme(def) == "none" {
+				log.Warn().Str("webhook", def.Name).Msg("inbound webhook is unsigned: protected only by its auth/token/allowed_ips guard")
+			}
+			if len(def.AllowedIPs) > 0 && len(trustedProxies) == 0 {
+				log.Info().Str("webhook", def.Name).Msg("allowed_ips is matched against the TCP peer; behind a reverse proxy, set server.trusted_proxies")
+			}
+			receivers = append(receivers, rc)
+		}
+		opts := inbox.Options{
+			Writer: factory, Registry: reg, Handlers: s.dispatcher.WebhookHandler,
+			Store: svc.Store, HTTP: pluginHTTP, Logger: plugin.Logger,
+		}
+		if policyEngine != nil {
+			opts.Enforcer = policyEngine
+		}
+		opts.Poll, _ = config.ParseDuration(cfg.Outbox.PollInterval) // validated above
+		opts.Retention, _ = config.ParseDuration(cfg.Outbox.Retention)
+		if inboxWorker, err = inbox.NewWorker(dbManager.Default(), inboundDefs, opts); err != nil {
+			return err
+		}
+		if inboxProcessed != nil {
+			inboxWorker.OnProcess = func(name string, ok bool) { inboxProcessed.Inc(name, result(ok)) }
+		}
 	}
 
 	routerCfg := router.Config{
@@ -351,6 +459,7 @@ func (s *Server) Run() error {
 		RequestObserver: reqObserver,
 		SecurityHeaders: cfg.Server.SecurityHeaders == nil || *cfg.Server.SecurityHeaders,
 		HSTSMaxAge:      cfg.Server.HSTSMaxAge,
+		Inbound:         receivers,
 	}
 	if metricsReg != nil {
 		routerCfg.MetricsHandler = metricsReg.Handler()
@@ -363,7 +472,9 @@ func (s *Server) Run() error {
 	var sched *cron.Scheduler
 	if jobDefs := cfg.AllJobDefs(); len(jobDefs) > 0 {
 		distributed := cfg.Cron.Distributed == nil || *cfg.Cron.Distributed
-		sched, err = cron.New(jobDefs, dbManager, distributed)
+		sched, err = cron.New(jobDefs, dbManager, distributed, cron.Plugins{
+			Lookup: s.dispatcher.Job, Store: svc.Store, Logger: plugin.Logger, HTTP: pluginHTTP,
+		})
 		if err != nil {
 			if err := degraded("initializing cron scheduler failed", err); err != nil {
 				return err
@@ -378,6 +489,9 @@ func (s *Server) Run() error {
 	}
 	if outboxWorker != nil {
 		outboxWorker.Start()
+	}
+	if inboxWorker != nil {
+		inboxWorker.Start()
 	}
 
 	// ── serve ────────────────────────────────────────────────────────────────
@@ -418,7 +532,7 @@ func (s *Server) Run() error {
 	// Graceful shutdown, all within shutdown_timeout:
 	//   1. report not-ready and keep serving for drain_delay so load balancers move off;
 	//   2. stop accepting connections and finish in-flight requests;
-	//   3. stop cron and the outbox worker (pending messages stay queued for next start);
+	//   3. stop cron and the outbox/inbox workers (pending messages stay queued for next start);
 	//   4. shut plugins down; databases close via defer.
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.Server.ShutdownTimeout+cfg.Server.DrainDelay)
 	defer cancel()
@@ -438,12 +552,23 @@ func (s *Server) Run() error {
 	if outboxWorker != nil {
 		outboxWorker.Stop(ctx)
 	}
+	if inboxWorker != nil {
+		inboxWorker.Stop(ctx)
+	}
 	if stopAuditRetention != nil {
 		stopAuditRetention()
 	}
 	s.dispatcher.ShutdownAll(ctx)
 	log.Info().Msg("shutdown complete")
 	return runErr
+}
+
+// pluginHTTP is the outbound client plugins get: SSRF-safe unless AllowPrivateNetwork.
+func pluginHTTP(o sdk.HTTPOptions) *http.Client {
+	if o.Timeout <= 0 {
+		o.Timeout = 30 * time.Second
+	}
+	return netsafe.NewClient(netsafe.Options{Timeout: o.Timeout, AllowPrivate: o.AllowPrivateNetwork})
 }
 
 func smtpRetry(c *config.SMTPConfig) *config.RetryConfig {

@@ -120,7 +120,7 @@ metrics:
 
 plugins:
   - name: string                # matched to PluginInfo.Name; config passed to Init
-    config: {}
+    config: {}                  # listing any plugin also creates yaypi_sync_cursors (Store.Cursor)
 
 include:
   - entities/**/*.yaml
@@ -156,6 +156,9 @@ entity:
   audit: true                   # yaypi_audit_log row per change (actor, field diff), same transaction
   tenant_scoped: true           # rows isolated by tenant_field = caller's "tenant" claim
   tenant_field: tenant_id       # default tenant_id (must be a declared field)
+  natural_key: [external_id]    # identifies a row from an outside system; enables upserts.
+                                # Must be a unique field or a unique index over exactly these fields
+  stale_guard: source_updated_at  # timestamp/number: an upsert that is not newer is skipped
 
   fields:
     - name: id
@@ -224,6 +227,16 @@ entity:
 
 Every provided body field is type-checked and coerced to its declared type before it reaches the database (wrong type → 400 `validation_failed` with per-field `errors`). Integers must be integral; `timestamptz` takes RFC 3339; `date` takes `YYYY-MM-DD`; `bytea` takes base64; `jsonb` takes any JSON; `decimal` keeps exact precision. Explicit `null` on a non-nullable field is a 400. Unknown fields are dropped (or 400 with `strict: true`). Server-managed columns (`created_at`, `updated_at`, `deleted_at`, `default_from` fields, PK on update) are never client-writable.
 
+### Upserts (`natural_key`)
+
+An entity with `natural_key` can be written by key instead of by id — through the `upsert` crud op, `create.on_conflict`, inbound webhook routes (`op: upsert`) and plugin `Store.Upsert`. One code path does all of them:
+
+- No row with the key → create (`created`).
+- A row exists → update it in place (`updated`); the id, `created_at`, immutable and `default_from` fields keep their stored values. A soft-deleted match is revived (`deleted_at` cleared).
+- With `stale_guard`, the update only applies when the incoming value is newer than the stored one (or the stored one is NULL); otherwise nothing is written (`unchanged`). This keeps out-of-order deliveries from overwriting newer data.
+- Upserts run the `before_create` hooks (the input is a full representation), then `after_create` or `after_update` for what happened. The audit log and outbound webhooks see a normal create or update.
+- The lookup locks the row (Postgres/MySQL). Two concurrent upserts of a *new* key can still race; the loser gets 409 and should retry.
+
 ---
 
 ## Endpoint YAML (`kind: endpoints`)
@@ -275,8 +288,11 @@ endpoints:
       bulk_error_mode: abort    # abort (default): one transaction, nothing inserted on error
                                 # partial: each item commits alone; 207 with per-item results
       strict: false             # 400 on unknown fields
+      on_conflict: error        # existing natural_key: error (409, default) | update (upsert) | ignore
+                                # update/ignore need natural_key; X-Write-Action (bulk: results[].action)
+                                # reports created | updated | unchanged | ignored
 
-    update:                     # also used by replace (PUT)
+    update:                     # also used by replace (PUT); row_access also limits upsert targets
       allowed_fields: [title, body, status]
       strict: false
       row_access: [...]         # no match → 404
@@ -295,6 +311,9 @@ endpoints:
 | `update` | PATCH | `/path/{id}` | partial; `If-Match` → 412 on stale ETag |
 | `replace` | PUT | `/path/{id}` | full replace: omitted nullable writable fields become null |
 | `delete` | DELETE | `/path/{id}` | `If-Match` supported; 204 |
+| `upsert` | PUT | `/path` | create or update by `natural_key`: 201 created, 200 updated/unchanged; `X-Write-Action` |
+
+`upsert` (and `create` with `on_conflict: update`) can both create and update, so Casbin must allow **both** `create` and `update` for the role. `create.auth` applies; `update.row_access` and tenant scope limit which existing rows can be overwritten (a hidden match → 409).
 
 ### List query syntax
 
@@ -479,6 +498,10 @@ emails:
 
 ## Webhooks YAML (`kind: webhooks`)
 
+One kind, two directions, chosen by `mode`. Omitted `mode` = `outbound`, so existing files are unchanged. Fields of the other mode fail validation.
+
+### Outbound (default)
+
 ```yaml
 version: "1"
 kind: webhooks
@@ -491,7 +514,8 @@ webhooks:
     method: POST
     headers: { X-Source: yaypi }
     payload: '{"order_id": "{{record.id}}", "total": {{record.total}}}'  # JSON-safe substitution
-    secret: ${ORDER_WEBHOOK_SECRET}   # signs deliveries
+    secret: ${ORDER_WEBHOOK_SECRET}   # signs deliveries (yaypi_v1 unless signature: says otherwise)
+    signature: { scheme: github }     # optional; see "Signature schemes"
     timeout: 10s
     allow_private_network: false      # private/loopback/metadata IPs blocked by default
     retry:
@@ -504,6 +528,78 @@ Emails and webhooks use a **transactional outbox** (`yaypi_outbox`): the message
 
 Condition syntax: `record.<field> <op> <value>` with `== != > >= < <=`; value is a quoted string, number, `true`/`false` or `null`; join with `and`/`&&`. Invalid conditions fail at boot.
 
+### Inbound (`mode: inbound`)
+
+```yaml
+  - name: crm-events
+    mode: inbound
+    path: /webhooks/crm                   # mounted under project.base_url
+    secret: ${CRM_WEBHOOK_SECRET}
+    signature:
+      scheme: hmac_sha256
+      header: X-Crm-Signature
+      encoding: hex                       # hex | base64
+      prefix: "sha256="                   # optional
+      timestamp_header: X-Crm-Timestamp   # optional replay window
+      tolerance: 5m
+    challenge: { method: GET, query_param: challenge }   # echo during endpoint setup
+    dedupe_key: body.id                   # repeats are acknowledged and dropped
+    event: body.type                      # selects the route
+    routes:
+      contact.created: { entity: Contact, op: upsert, map: { external_id: "{{body.data.id}}", email: "{{body.data.email}}" } }
+      contact.deleted: { entity: Contact, op: delete, key: { external_id: "{{body.data.id}}" } }
+      "*":             { handler: crm.OnOther }   # plugin fallback (WebhookPlugin)
+    as_role: integration                  # optional: Casbin + write_roles checked against it
+    retry: { max_attempts: 8 }
+    timeout: 30s                          # per processing attempt
+    rate_limit: { requests_per_minute: 600 }   # default 300/min per IP; cannot be disabled
+    max_body_size: 1MB
+```
+
+Flow: verify (signature or guard) → answer a handshake if this is one → dedupe on `(name, dedupe_key)` → store in `yaypi_inbox` → `200 {"status":"accepted"}` (repeats: `"duplicate"`). A worker then runs the route with retries (same backoff and dead-lettering as the outbox, shared through `internal/queue`).
+
+- **Routes**: the event value picks a route; `"*"` matches events without their own route; anything else is acknowledged and ignored. `handler: x.y` at the top level is shorthand for `routes: {"*": {handler: x.y}}`.
+- **Entity routes** (`op: create | update | upsert | delete`) go through the same write path as the CRUD API: validation, hooks, audit log, outbound webhooks. `upsert` matches the entity's `natural_key`; `update`/`delete` need `key` (the primary key or exactly the natural key). Deleting a missing row is a no-op; updating one is retried (the create may arrive later), then dead.
+- **Templates** in `map`/`key`: `{{body.a.b}}`, `{{body.items.0.id}}`, `{{headers.X-Id}}`, `{{query.x}}`. A value that is exactly one placeholder keeps its JSON type; mixed text renders as a string; non-string YAML values are literals. Values are adapted to the field type where unambiguous (number → string column, `"7"` → integer, unix seconds → timestamp). Form-encoded bodies are readable as `body.*` too.
+- **Writes are system writes** unless `as_role` is set: no role checks, `default_from`/tenant columns come from `map`. With `as_role`, Casbin must allow the op (upsert = create + update) and field `write_roles` apply. The audit actor is `webhook:<name>`.
+- **Plugin handlers** get `sdk.WebhookContext` (raw body, headers without credentials, query, event, attempt, `Store`). Return `sdk.Permanent(err)` to skip retries.
+
+### Signature schemes
+
+`secret` + `signature` drive both directions: outbound signs, inbound verifies.
+
+| scheme | header | signed | notes |
+|---|---|---|---|
+| `yaypi_v1` (default with a secret) | `X-Yaypi-Signature: v1=<hex>` + `X-Yaypi-Timestamp` | `{timestamp}.{body}` | yayPi ↔ yayPi |
+| `github` | `X-Hub-Signature-256: sha256=<hex>` | `{body}` | |
+| `slack` | `X-Slack-Signature: v0=<hex>` + `X-Slack-Request-Timestamp` | `v0:{timestamp}:{body}` | |
+| `stripe` | `Stripe-Signature: t=…,v1=<hex>` | `{timestamp}.{body}` | multiple `v1` accepted |
+| `hmac_sha256` / `hmac_sha1` | `header` (required) | `signed_payload` (default `{body}`, or `{timestamp}.{body}` with `timestamp_header`) | `prefix`, `encoding` |
+| `plugin` | — | — | inbound only: `handler: <plugin>.<verifier>` (WebhookVerifierPlugin) |
+| `none` | — | — | see rules below |
+
+All comparisons are constant-time. Timestamps (unix seconds) must be within `tolerance` (default 5m).
+
+### Inbound protection rules (checked at boot)
+
+| `secret` | `signature` | Result |
+|---|---|---|
+| set | omitted | `yaypi_v1` |
+| set | signing scheme | that scheme |
+| not set | signing scheme | error: scheme needs secret |
+| not set | omitted, or `scheme: none` | allowed only with a guard: `auth`, `token` or `allowed_ips` |
+| set | `scheme: none` | error: the secret would never be checked |
+
+Guards (at least one when unsigned):
+
+```yaml
+    auth: { require: true, roles: [system] }        # API key or JWT, like endpoints
+    token: { header: X-Webhook-Token, value: ${TOKEN} }   # or query_param:; constant-time
+    allowed_ips: [203.0.113.0/24]                   # matched against the client IP
+```
+
+Unsigned receivers also need `dedupe_key` (the only replay protection), log a warning at every boot, and keep the always-on rate limit. `allowed_ips` matches the TCP peer unless `server.trusted_proxies` is set — behind a reverse proxy, set it. The auth chain is mounted only when `auth` is declared, so a provider's own `Authorization` header is never mistaken for a yayPi token. Credential headers (`Authorization`, `Cookie`, API key, `token` header/param) are never stored in the inbox.
+
 ---
 
 ## Jobs YAML (`kind: jobs`)
@@ -515,13 +611,14 @@ jobs:
   - name: purge-deleted-posts
     schedule: "0 3 * * *"       # 5/6-field cron, @hourly/@daily/…, or "@every 10m"
     timezone: America/New_York  # IANA zone (default UTC)
-    handler: sql                # sql | http
+    handler: sql                # sql | http | plugin
     timeout: 5m                 # default 5m
     retry:
       max_attempts: 3
       backoff: exponential      # exponential (default) | fixed
       initial_delay: 1s
       max_delay: 1m
+    on_failure: alerts.JobFailed  # optional <plugin>.<job>, run once after the last attempt fails
     config:
       sql: DELETE FROM posts WHERE deleted_at < NOW() - INTERVAL '30 days'
       database: primary
@@ -531,9 +628,21 @@ jobs:
     handler: http
     config:
       url: https://uptime.example.com/ping
-      method: GET
-      allowed_hosts: [uptime.example.com]
+      method: POST
+      headers: { Authorization: "Bearer ${UPTIME_TOKEN}" }
+      body: { source: yaypi }   # string, or a map/list sent as JSON
+      secret: ${PING_SECRET}    # optional: sign the body like an outbound webhook
+      signature: { scheme: github }
+      allowed_hosts: [uptime.example.com]   # checked at boot
       allow_private_network: false
+
+  - name: sync-contacts
+    schedule: "@every 15m"
+    handler: plugin
+    plugin: crm.SyncContacts    # JobHandlerPlugin entry, registered with Server.RegisterJobs
+    config: { page_size: 200 }  # → sdk.JobContext.Config
 ```
+
+A plugin job gets `sdk.JobContext` (`Ctx` with the timeout, `Config`, `Attempt`, `Store`, `Logger`, `HTTP`). Returning `sdk.Permanent(err)` stops the retries. An unregistered `plugin`/`on_failure` name fails the boot (subject to `strict_startup`).
 
 With a database configured (and `cron.distributed` not false), each run is coordinated through `yaypi_job_locks`, so a tick executes on exactly one replica. A job never overlaps itself on one instance.

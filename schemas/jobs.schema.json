@@ -50,17 +50,18 @@
         },
         "handler": {
           "type": "string",
-          "description": "SQL query or HTTP URL to execute. Use plugin for plugin-based handlers.",
-          "examples": ["DELETE FROM sessions WHERE expires_at < NOW()", "https://api.example.com/trigger"]
+          "description": "sql: run config.sql. http: call config.url (with optional headers, body, secret + signature). plugin: run the JobHandlerPlugin job named by plugin.",
+          "enum": ["sql", "http", "plugin"]
         },
         "plugin": {
           "type": "string",
-          "description": "Plugin name whose Handler method to invoke. Required when handler is a plugin method.",
-          "examples": ["reportPlugin", "cleanupPlugin"]
+          "description": "<plugin>.<job> to run for handler: plugin (registered with Server.RegisterJobs).",
+          "pattern": "^[^.]+\\..+$",
+          "examples": ["crm.SyncContacts"]
         },
         "config": {
           "type": "object",
-          "description": "Arbitrary key-value config passed to the plugin handler.",
+          "description": "Handler settings. sql: sql, database. http: url, method, headers, body (string, or a map sent as JSON), allowed_hosts, allow_private_network, secret, signature (same block as webhooks). plugin: passed to the job as JobContext.Config.",
           "additionalProperties": true
         },
         "retry": { "$ref": "#/$defs/RetryConfig" },
@@ -72,8 +73,9 @@
         },
         "on_failure": {
           "type": "string",
-          "description": "Plugin name to notify on job failure.",
-          "examples": ["alertPlugin"]
+          "description": "log (default: failures are logged) or <plugin>.<job> run once after the last attempt fails; JobContext.Failure describes the failure.",
+          "pattern": "^(log|[^.]+\\..+)$",
+          "examples": ["alerts.JobFailed"]
         }
       }
     },

@@ -34,6 +34,11 @@ Full structured context for AI assistants lives in [`.ai/`](.ai/):
 | Change time formats in responses / input | `internal/timefmt/` (presets, patterns), `internal/schema/timefmt.go` (resolution, `RenderTimes`) |
 | Change how row values reach JSON | `internal/query/builder.go` (`scanRows`, `AsBool`, SQLite time binding) |
 | Change email / webhook delivery | `internal/outbox/` (observer renders in-tx, worker delivers), `internal/mailer/mailer.go` (SMTP) |
+| Change inbound webhooks | `internal/inbox/` (receiver, worker, templates), `internal/config/validate_webhooks.go` (mode/guard rules) |
+| Change webhook signing / verification | `internal/signature/signature.go` |
+| Change upsert / natural keys | `internal/handler/upsert.go`, `internal/query/builder.go` (`FindByKey`, `UpdateGuarded`), `internal/schema/resolver.go` |
+| Change non-HTTP writes (webhooks, plugins) | `internal/handler/write.go` (`Factory.Write`), `internal/store/store.go` (`sdk.Store`) |
+| Change plugin APIs | `pkg/sdk/plugin.go`, `internal/plugin/host.go`, `pkg/server/server.go` (`Register*`) |
 | Change audit logging | `internal/audit/audit.go` |
 | Change outbound HTTP safety | `internal/netsafe/netsafe.go` |
 | Change metrics / logging | `internal/metrics/`, `internal/middleware/logger.go`, `internal/logging/` |
@@ -65,6 +70,7 @@ yaypi spec generate --name api             # generate OpenAPI spec
 - **Placeholders** — use `dialect.Rebind(query)` to convert `$1,$2` to `?` for MySQL/SQLite
 - **Identifier quoting** — use `dialect.QuoteIdent(name)`; never interpolate raw names into SQL
 - **Email/webhooks** go through the transactional outbox (`internal/outbox`), registered as a `handler.TxObserver` by `pkg/server/server.go`; never send from a request goroutine
+- **Inbound webhooks** are stored in `yaypi_inbox` before they are acknowledged and processed by `inbox.Worker`; entity writes from them (and from plugins) go through `handler.Factory.Write`, never raw SQL
 - **Writes run in a transaction** (`handler.withTx`); anything that must commit with the change implements `handler.TxObserver`
 - **Errors** use `apierr` (`{"error","code","request_id","errors"}`); never leak driver error text to clients
 - **Outbound HTTP to user-influenced URLs** must use `netsafe.NewClient`

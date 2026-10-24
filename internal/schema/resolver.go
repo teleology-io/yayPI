@@ -99,6 +99,10 @@ func buildEntity(ec *config.EntityConfig) (*Entity, error) {
 		})
 	}
 
+	if err := resolveNaturalKey(entity, def); err != nil {
+		return nil, err
+	}
+
 	// Build hooks
 	entity.Hooks = EntityHooks{
 		BeforeCreate: def.Hooks.BeforeCreate,
@@ -110,6 +114,74 @@ func buildEntity(ec *config.EntityConfig) (*Entity, error) {
 	}
 
 	return entity, nil
+}
+
+// resolveNaturalKey checks natural_key / stale_guard and records their columns. A natural
+// key must be unique in the database — a unique field or a unique index over exactly its
+// columns — or concurrent upserts could create duplicates.
+func resolveNaturalKey(entity *Entity, def config.EntityDef) error {
+	if len(def.NaturalKey) == 0 {
+		if def.StaleGuard != "" {
+			return fmt.Errorf("stale_guard needs natural_key")
+		}
+		return nil
+	}
+	cols := make([]string, 0, len(def.NaturalKey))
+	unique := false
+	for _, name := range def.NaturalKey {
+		f, ok := entity.FieldByName(name)
+		if !ok {
+			return fmt.Errorf("natural_key: unknown field %q", name)
+		}
+		cols = append(cols, f.ColumnName)
+		unique = len(def.NaturalKey) == 1 && (f.Unique || f.PrimaryKey)
+	}
+	for _, idx := range entity.Indexes {
+		if idx.Unique && sameColumns(entity, idx.Columns, cols) {
+			unique = true
+		}
+	}
+	if !unique {
+		return fmt.Errorf("natural_key %v must be unique: mark the field unique: true or add a unique index over exactly these fields", def.NaturalKey)
+	}
+	entity.NaturalKey = cols
+
+	if def.StaleGuard != "" {
+		f, ok := entity.FieldByName(def.StaleGuard)
+		if !ok {
+			return fmt.Errorf("stale_guard: unknown field %q", def.StaleGuard)
+		}
+		switch f.Type {
+		case types.FieldTypeTimestamptz, types.FieldTypeDate, types.FieldTypeInteger, types.FieldTypeBigint,
+			types.FieldTypeFloat, types.FieldTypeDecimal:
+		default:
+			return fmt.Errorf("stale_guard field %q must be a timestamp, date or number (got %s)", def.StaleGuard, f.Type)
+		}
+		entity.StaleGuard = f.ColumnName
+	}
+	return nil
+}
+
+// sameColumns reports whether names (field or column names) are the same set as cols.
+func sameColumns(entity *Entity, names, cols []string) bool {
+	if len(names) != len(cols) {
+		return false
+	}
+	set := map[string]bool{}
+	for _, c := range cols {
+		set[c] = true
+	}
+	for _, n := range names {
+		col := n
+		if f, ok := entity.FieldByName(n); ok {
+			col = f.ColumnName
+		}
+		if !set[col] {
+			return false
+		}
+		delete(set, col)
+	}
+	return len(set) == 0
 }
 
 // buildField converts a config.FieldDef to a schema.Field.

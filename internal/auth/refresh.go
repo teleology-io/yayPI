@@ -133,7 +133,7 @@ func (h *Handler) rotateRefreshToken(ctx context.Context, dbc *db.DB, plain stri
 	if err != nil {
 		return "", "", err
 	}
-	row, err := scanRow(rows)
+	row, err := scanRow(nil, rows)
 	rows.Close()
 	if err != nil {
 		return "", "", err

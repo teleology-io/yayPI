@@ -16,6 +16,9 @@ type AuthOpts struct {
 	Require    bool
 	Roles      []string
 	Conditions []string
+	// Actions overrides the Casbin action(s) derived from the HTTP method; every one must
+	// be allowed. An upsert can create or update, so it needs both.
+	Actions []string
 }
 
 // ConditionChecker evaluates a list of condition expressions against a subject.
@@ -63,15 +66,20 @@ func RBAC(enforcer RBACEnforcer, resource string, auth AuthOpts, checkConditions
 
 			// Casbin policy check.
 			if enforcer != nil {
-				action := methodToAction(r.Method)
-				allowed, err := enforcer.Enforce(sub.Role, resource, action)
-				if err != nil {
-					writeJSONError(w, http.StatusInternalServerError, "authorization error")
-					return
+				actions := auth.Actions
+				if len(actions) == 0 {
+					actions = []string{methodToAction(r.Method)}
 				}
-				if !allowed {
-					writeJSONError(w, http.StatusForbidden, "forbidden")
-					return
+				for _, action := range actions {
+					allowed, err := enforcer.Enforce(sub.Role, resource, action)
+					if err != nil {
+						writeJSONError(w, http.StatusInternalServerError, "authorization error")
+						return
+					}
+					if !allowed {
+						writeJSONError(w, http.StatusForbidden, "forbidden")
+						return
+					}
 				}
 			}
 

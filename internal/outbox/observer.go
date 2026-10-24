@@ -10,6 +10,7 @@ import (
 	"github.com/teleology-io/yayPI/internal/config"
 	"github.com/teleology-io/yayPI/internal/dialect"
 	"github.com/teleology-io/yayPI/internal/handler"
+	"github.com/teleology-io/yayPI/internal/signature"
 )
 
 type compiledWebhook struct {
@@ -41,6 +42,12 @@ func triggerFor(action string) string { return "after_" + action }
 func NewObserver(webhooks []config.WebhookDef, emails []config.EmailDef) (*Observer, error) {
 	o := &Observer{webhooks: map[string][]compiledWebhook{}, emails: map[string][]compiledEmail{}}
 	for _, w := range webhooks {
+		if w.IsInbound() {
+			continue // handled by internal/inbox
+		}
+		if _, err := signature.Resolve(w.Signature, w.Secret); err != nil {
+			return nil, fmt.Errorf("webhook %q: %w", w.Name, err)
+		}
 		if err := checkTrigger(w.Trigger); err != nil {
 			return nil, fmt.Errorf("webhook %q: %w", w.Name, err)
 		}

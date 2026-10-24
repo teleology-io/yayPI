@@ -36,10 +36,11 @@ jobs:
 | `description` | string | no | Human-readable description |
 | `schedule` | string | yes | Cron expression or shortcut (see below) |
 | `timezone` | string | no | IANA timezone name (e.g. `America/New_York`); default UTC. Invalid names fail startup |
-| `handler` | string | yes | `sql` or `http` |
+| `handler` | string | yes | `sql`, `http` or `plugin` |
+| `plugin` | string | with `handler: plugin` | `<plugin>.<job>` to run (see [Plugin handler](#plugin-handler)) |
 | `timeout` | duration | no | Max time per attempt (default 5m); the job's context is cancelled after it |
 | `retry` | object | no | Retry configuration |
-| `on_failure` | string | no | `log` (default). Failures are also counted in `yaypi_cron_runs_total` |
+| `on_failure` | string | no | `log` (default) or `<plugin>.<job>`, run once after the last attempt fails. Failures are always logged and counted in `yaypi_cron_runs_total` |
 | `config` | map | yes | Handler-specific configuration |
 
 ### `retry` fields
@@ -120,17 +121,66 @@ Makes an outbound HTTP request on a schedule (e.g. ping an uptime monitor).
 handler: http
 config:
   url: https://uptime.example.com/ping/abc123
-  method: GET           # default GET
+  method: POST          # default GET
+  headers:
+    Authorization: "Bearer ${UPTIME_TOKEN}"
+  body: { source: yaypi }   # a string, or a map/list sent as JSON (Content-Type set for you)
+  secret: ${PING_SECRET}    # optional: sign the body like an outbound webhook
+  signature: { scheme: github }   # optional; default yaypi_v1 when secret is set
   allowed_hosts:
     - uptime.example.com
     - api.monitoring.io
 ```
+
+`url`, `allowed_hosts`, `headers` and `signature` are checked at startup, so a typo fails the boot rather than every run.
 
 **Security restrictions:**
 - The connection is refused if the target's resolved IP is loopback, private (RFC 1918, IPv6 ULA), link-local (including the `169.254.169.254` cloud metadata address), CGNAT, or unspecified. The check runs at connect time, so DNS names and redirects can't be used to bypass it.
 - Set `allow_private_network: true` in `config` for jobs that intentionally call internal services.
 - `allowed_hosts`, if set, is an allowlist of target hostnames.
 - Responses with status ≥ 400 count as failures (and are retried per `retry`).
+
+## Plugin handler
+
+Runs Go code from a plugin, with everything else — schedule, cross-replica lock, timeout, retries, metrics — still configured in YAML. Use it for work YAML can't express, like paging through a third-party API and upserting the results.
+
+```yaml
+- name: sync-contacts
+  schedule: "@every 15m"
+  handler: plugin
+  plugin: crm.SyncContacts      # <plugin name>.<key in Jobs()>
+  timeout: 10m
+  retry: { max_attempts: 3 }
+  on_failure: alerts.JobFailed  # optional
+  config:                       # handed to the job as JobContext.Config
+    page_size: 200
+```
+
+```go
+func (p *CRM) Jobs() map[string]sdk.JobFunc {
+	return map[string]sdk.JobFunc{
+		"SyncContacts": func(c sdk.JobContext) error {
+			since, _ := c.Store.Cursor(c.Ctx, "crm", "contacts")
+			contacts, next, err := p.client.ListContacts(c.Ctx, since)
+			if err != nil {
+				return err // retried per retry:
+			}
+			rows := make([]map[string]any, len(contacts))
+			for i, ct := range contacts {
+				rows[i] = map[string]any{"external_id": ct.ID, "email": ct.Email}
+			}
+			if _, err := c.Store.Upsert(c.Ctx, "Contact", rows...); err != nil {
+				return err
+			}
+			return c.Store.SetCursor(c.Ctx, "crm", "contacts", next)
+		},
+	}
+}
+```
+
+`JobContext` carries `Ctx` (cancelled at `timeout`), `Job`, `Config`, `Attempt`, `Store`, `Logger` and `HTTP` (an SSRF-safe client). Return `sdk.Permanent(err)` to stop retrying. An `on_failure` handler is a job function too; its `JobContext.Failure` holds the failed job's name, error and attempt count.
+
+Register the plugin with `srv.RegisterJobs(p)` (or `srv.Register(p)`) — an unregistered `plugin` or `on_failure` name stops the boot. `Store.Upsert` needs the entity to declare a [`natural_key`](entities.md#natural-keys-and-upserts); `Store.Cursor` needs the plugin listed under `plugins:` in `yaypi.yaml`. See [Plugins](plugins.md#store-database-access).
 
 ## Complete example
 

@@ -34,6 +34,8 @@ entity:
 | `audit` | boolean | `false` | Write an audit log row for every change (see [Audit log](#audit-log)) |
 | `tenant_scoped` | boolean | `false` | Isolate rows per tenant (see [Multi-tenancy](#multi-tenancy-tenant_scoped)) |
 | `tenant_field` | string | `tenant_id` | Tenant column for `tenant_scoped` |
+| `natural_key` | list | — | Field(s) identifying a row from an outside system; enables upserts (see [Natural keys](#natural-keys-and-upserts)) |
+| `stale_guard` | string | — | Timestamp/number field: an upsert that isn't newer is skipped |
 
 ## Field types
 
@@ -197,6 +199,43 @@ entity:
 ```
 
 Every list, get, update and delete of a tenant-scoped entity is restricted to rows whose `tenant_field` equals the caller's `tenant` token claim, on top of any `row_access` rules. On create the field is set from the claim. Callers without a tenant claim get 403. The built-in auth issues the claim from a `tenant_id` column on the user (add it under `auth.user.fields`). For other token issuers, include a `"tenant"` claim. Use `:subject.tenant` in `row_access` filters and `subject.tenant` in conditions.
+
+## Natural keys and upserts
+
+When rows come from another system — a CRM, a calendar, a payment provider — you usually know them by *its* id, not yours. Declare that id as the natural key and every write path can match on it:
+
+```yaml
+entity:
+  name: Contact
+  natural_key: [external_id]       # one or more fields
+  stale_guard: source_updated_at   # optional
+  soft_delete: true
+  fields:
+    - { name: id, type: uuid, primary_key: true }
+    - { name: external_id, type: string, unique: true }   # the key must be unique
+    - { name: email, type: string }
+    - { name: source_updated_at, type: timestamptz, nullable: true }
+```
+
+The key must be unique in the database: a single field with `unique: true`, or a unique index over exactly the key fields (for a composite key). Startup fails otherwise.
+
+Upserts are available through:
+
+- the `upsert` crud op — `PUT /contacts` with the full record ([Endpoints](endpoints.md#upsert))
+- `create.on_conflict: update | ignore` on a normal or bulk create
+- inbound webhook routes with `op: upsert` ([Webhooks](webhooks.md))
+- `Store.Upsert` / `Store.Write` in plugins ([Plugins](plugins.md#store-database-access))
+
+All of them behave the same way:
+
+| Situation | Result |
+|---|---|
+| No row with the key | Created |
+| A row exists | Updated in place: id, `created_at`, immutable and `default_from` fields keep their stored values |
+| The match is soft-deleted | Revived (`deleted_at` cleared) and updated |
+| `stale_guard` value is not newer than the stored one | Nothing is written (`unchanged`) |
+
+`stale_guard` stops out-of-order deliveries — a retried webhook, a slow sync page — from overwriting newer data. A row whose stored guard value is `NULL` is always updated.
 
 ## Immutable fields
 

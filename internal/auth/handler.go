@@ -239,7 +239,7 @@ func (h *Handler) insertUser(ctx context.Context, dbc *db.DB, entity *schema.Ent
 			return nil, err
 		}
 		defer rows.Close()
-		user, err := scanRow(rows)
+		user, err := scanRow(entity, rows)
 		if err == nil && user == nil {
 			err = errors.New("insert returned no row")
 		}
@@ -476,7 +476,7 @@ func (h *Handler) findUserBy(ctx context.Context, dbc *db.DB, entity *schema.Ent
 		return nil, err
 	}
 	defer rows.Close()
-	return scanRow(rows)
+	return scanRow(entity, rows)
 }
 
 // fieldToColumn returns the snake_case column name for a given entity field name.
@@ -569,7 +569,13 @@ func stripSensitive(entity *schema.Entity, user map[string]any) {
 }
 
 // scanRow reads the first row from *sql.Rows into a map[string]any; nil when empty.
-func scanRow(rows *sql.Rows) (map[string]any, error) {
+// With an entity, values get the CRUD read conversions (query.ScanOne) — without them
+// MySQL text arrives as []byte and would be base64-encoded in JSON responses. Without
+// one (internal token tables), []byte is still turned into a string.
+func scanRow(entity *schema.Entity, rows *sql.Rows) (map[string]any, error) {
+	if entity != nil {
+		return query.ScanOne(entity, rows)
+	}
 	cols, err := rows.Columns()
 	if err != nil {
 		return nil, err
@@ -587,7 +593,11 @@ func scanRow(rows *sql.Rows) (map[string]any, error) {
 	}
 	result := make(map[string]any, len(cols))
 	for i, col := range cols {
-		result[col] = vals[i]
+		if b, ok := vals[i].([]byte); ok {
+			result[col] = string(b)
+		} else {
+			result[col] = vals[i]
+		}
 	}
 	return result, nil
 }

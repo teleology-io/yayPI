@@ -19,9 +19,21 @@ type Entity struct {
 	Hooks        EntityHooks
 	SoftDelete   bool
 	Timestamps   bool
-	Internal     bool   // framework-owned table: migrated, but never exposed via endpoints/OpenAPI
-	Audit        bool   // write an audit log row for every change
-	TenantColumn string // non-empty: rows are isolated by this column = subject.tenant
+	Internal     bool     // framework-owned table: migrated, but never exposed via endpoints/OpenAPI
+	Audit        bool     // write an audit log row for every change
+	TenantColumn string   // non-empty: rows are isolated by this column = subject.tenant
+	NaturalKey   []string // columns identifying a row from an outside system; enables upsert
+	StaleGuard   string   // column: upserts only overwrite when the incoming value is newer
+}
+
+// FieldByName resolves a field or column name.
+func (e *Entity) FieldByName(name string) (*Field, bool) {
+	for i := range e.Fields {
+		if e.Fields[i].Name == name || e.Fields[i].ColumnName == name {
+			return &e.Fields[i], true
+		}
+	}
+	return nil, false
 }
 
 // PrimaryKey returns the primary key field, or nil when none is declared.

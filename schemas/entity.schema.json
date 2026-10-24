@@ -85,6 +85,18 @@
           "type": "string",
           "description": "Tenant column for tenant_scoped.",
           "default": "tenant_id"
+        },
+        "natural_key": {
+          "type": "array",
+          "description": "Field(s) identifying a row from an outside system (e.g. an external id). Enables upserts: the upsert crud op, create.on_conflict, inbound webhook routes and plugin Store.Upsert. Must be backed by a unique field or a unique index over exactly these fields.",
+          "items": { "type": "string" },
+          "minItems": 1,
+          "examples": [["external_id"], ["provider", "provider_id"]]
+        },
+        "stale_guard": {
+          "type": "string",
+          "description": "Timestamp or number field compared on upsert: an incoming row that is not newer than the stored one is skipped, so out-of-order deliveries never overwrite newer data. Requires natural_key.",
+          "examples": ["source_updated_at"]
         }
       }
     },

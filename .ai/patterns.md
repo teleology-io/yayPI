@@ -629,6 +629,101 @@ entity:
 
 ---
 
+## Mirror an external API into a table (plugin job + upsert)
+
+YAML owns the table, the schedule and the lock; a small plugin owns the API calls.
+
+```yaml
+# entities/event.yaml
+entity:
+  name: CalendarEvent
+  natural_key: [external_id]          # upsert matches on this
+  stale_guard: source_updated_at      # older data never overwrites newer
+  soft_delete: true
+  fields:
+    - { name: id, type: uuid, primary_key: true }
+    - { name: external_id, type: string, unique: true }
+    - { name: title, type: string }
+    - { name: starts_at, type: timestamptz }
+    - { name: source_updated_at, type: timestamptz, nullable: true }
+
+# jobs/sync.yaml
+jobs:
+  - name: calendar-sync
+    schedule: "@every 15m"            # one replica per tick (yaypi_job_locks)
+    handler: plugin
+    plugin: calendar.Sync
+    retry: { max_attempts: 3 }
+    config: { base_url: "https://api.example.com/v3", api_key: "${CAL_API_KEY}" }
+
+# yaypi.yaml
+plugins:
+  - name: calendar                    # listing it creates yaypi_sync_cursors
+```
+
+```go
+func (p *Calendar) Jobs() map[string]sdk.JobFunc {
+	return map[string]sdk.JobFunc{"Sync": func(c sdk.JobContext) error {
+		cursor, err := c.Store.Cursor(c.Ctx, "calendar", "events")
+		if err != nil {
+			return err
+		}
+		page, next, err := p.fetchEvents(c.Ctx, c.HTTP(sdk.HTTPOptions{}), c.Config, cursor) // your API call
+		if err != nil {
+			return err // retried per retry:
+		}
+		rows := make([]map[string]any, len(page))
+		for i, e := range page {
+			rows[i] = map[string]any{"external_id": e.ID, "title": e.Title, "starts_at": e.Start, "source_updated_at": e.Updated}
+		}
+		if _, err := c.Store.Upsert(c.Ctx, "CalendarEvent", rows...); err != nil { // one transaction
+			return err
+		}
+		return c.Store.SetCursor(c.Ctx, "calendar", "events", next)
+	}}
+}
+
+// main.go
+srv := server.New("yaypi.yaml")
+srv.Register(&Calendar{}) // routes, jobs, webhook handlers — whatever it implements
+log.Fatal(srv.Run())
+```
+
+The same rows can also come in over HTTP: `crud: [upsert]` (PUT the collection) or `create.on_conflict: update` with `bulk: true`.
+
+---
+
+## Receive a signed webhook (no code)
+
+```yaml
+# webhooks/calendar.yaml
+kind: webhooks
+webhooks:
+  - name: calendar-events
+    mode: inbound
+    path: /webhooks/calendar
+    secret: ${CAL_WEBHOOK_SECRET}
+    signature: { scheme: hmac_sha256, header: X-Cal-Signature }
+    challenge: { method: GET, query_param: challenge }   # provider setup handshake
+    dedupe_key: body.id
+    event: body.type
+    routes:
+      event.created: { entity: CalendarEvent, op: upsert, map: &event { external_id: "{{body.data.object.id}}", title: "{{body.data.object.title}}", starts_at: "{{body.data.object.when.start_time}}", source_updated_at: "{{body.data.object.updated_at}}" } }
+      event.updated: { entity: CalendarEvent, op: upsert, map: *event }
+      event.deleted: { entity: CalendarEvent, op: delete, key: { external_id: "{{body.data.object.id}}" } }
+```
+
+Verified, deduplicated, stored in `yaypi_inbox`, acknowledged with 200, then applied by a worker with retries. Unix-second timestamps are converted for `timestamptz` fields. For logic YAML can't express, route to a plugin: `"*": { handler: calendar.OnEvent }`.
+
+Unsigned sender (internal service)? Use a guard instead of a secret, plus a dedupe key:
+
+```yaml
+    token: { header: X-Webhook-Token, value: ${INTERNAL_TOKEN} }   # or auth: / allowed_ips:
+    dedupe_key: headers.X-Request-Id
+```
+
+---
+
 ## Health + readiness endpoints
 
 ```yaml

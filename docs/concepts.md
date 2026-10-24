@@ -34,7 +34,7 @@ Every YAML file (other than `yaypi.yaml` itself) must declare a `kind`. The load
 | `jobs` | Defines background cron jobs |
 | `seed` | Defines idempotent seed rows inserted at startup |
 | `email` | Defines email notifications triggered by lifecycle events |
-| `webhooks` | Defines HTTP webhooks triggered by lifecycle events |
+| `webhooks` | HTTP webhooks: outbound on lifecycle events, or inbound receivers (`mode: inbound`) that write entities |
 | `policy` | Defines RBAC roles and permissions |
 
 Files are discovered via the `include:` globs in `yaypi.yaml`.

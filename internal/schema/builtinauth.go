@@ -163,3 +163,60 @@ func NewAuditEntity() *Entity {
 		},
 	}
 }
+
+// Inbound webhook inbox.
+const (
+	InboxEntityName = "YaypiInbox"
+	InboxTable      = "yaypi_inbox"
+)
+
+// NewInboxEntity returns the internal inbox table: inbound webhook requests are stored
+// once verified (deduplicated on (webhook, dedupe_key)) and processed with retries by a
+// background worker, mirroring the outbox.
+func NewInboxEntity() *Entity {
+	return &Entity{
+		Name:     InboxEntityName,
+		Table:    InboxTable,
+		Internal: true,
+		Fields: []Field{
+			{Name: "id", ColumnName: "id", Type: types.FieldTypeString, Length: 36, PrimaryKey: true},
+			internalStr("webhook", 100, false),
+			internalStr("dedupe_key", 191, false),
+			internalStr("event", 191, true),
+			{Name: "payload", ColumnName: "payload", Type: types.FieldTypeText},
+			internalStr("status", 16, false), // pending | done | dead
+			{Name: "attempts", ColumnName: "attempts", Type: types.FieldTypeInteger, Default: "0"},
+			internalInt("next_attempt_at", false),
+			internalInt("locked_until", false),
+			{Name: "last_error", ColumnName: "last_error", Type: types.FieldTypeText, Nullable: true},
+			internalInt("created_at", false),
+		},
+		Indexes: []Index{
+			{Name: "uq_yaypi_inbox_dedupe", Columns: []string{"webhook", "dedupe_key"}, Unique: true},
+			{Name: "idx_yaypi_inbox_due", Columns: []string{"status", "next_attempt_at"}},
+		},
+	}
+}
+
+// Sync cursors: where a plugin's incremental sync left off.
+const (
+	SyncCursorEntityName = "YaypiSyncCursor"
+	SyncCursorTable      = "yaypi_sync_cursors"
+)
+
+// NewSyncCursorEntity returns the internal table behind sdk.Store Cursor/SetCursor. The
+// id is a digest of (source, key) so any key length fits a portable primary key.
+func NewSyncCursorEntity() *Entity {
+	return &Entity{
+		Name:     SyncCursorEntityName,
+		Table:    SyncCursorTable,
+		Internal: true,
+		Fields: []Field{
+			{Name: "id", ColumnName: "id", Type: types.FieldTypeString, Length: 64, PrimaryKey: true},
+			internalStr("source", 100, false),
+			{Name: "cursor_key", ColumnName: "cursor_key", Type: types.FieldTypeText},
+			{Name: "value", ColumnName: "value", Type: types.FieldTypeText},
+			internalInt("updated_at", false),
+		},
+	}
+}

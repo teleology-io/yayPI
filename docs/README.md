@@ -24,6 +24,7 @@ yaypi run
 - **Safe writes** — every write is a transaction; ETag / If-Match optimistic concurrency; Idempotency-Key retries; consistent error envelope
 - **Immutable fields** — set on create, silently ignored on update
 - **Bulk create** — post an array; all-or-nothing transaction or partial success (207)
+- **Upserts** — `natural_key` on an entity: create-or-update by an outside system's id, with a stale-write guard
 - **Auth endpoints** — register, login, /me, logout, password reset, email verification, OAuth2 with PKCE (Google, GitHub, custom)
 - **Token refresh** — stored, rotating refresh tokens with reuse detection; HS/RS/ES signing with JWKS
 - **API key auth** — static or DB-backed (hashed) keys; works alongside JWT
@@ -32,11 +33,12 @@ yaypi run
 - **Rate limiting & brute-force protection** — global and per-endpoint limits, trusted-proxy aware, login lockout
 - **Health/readiness endpoints** — for Kubernetes liveness and readiness probes
 - **Diff-based migrations** — per-database, transactional, locked, drift-checked
-- **Background jobs** — cron-scheduled SQL or HTTP jobs, run once across replicas
+- **Background jobs** — cron-scheduled SQL, HTTP or plugin jobs, run once across replicas
 - **Seed data** — idempotent rows via `yaypi seed`
 - **Email & webhooks** — transactional outbox with retries, signed webhooks, SSRF protection
+- **Inbound webhooks** — verified (GitHub/Stripe/Slack/HMAC presets), deduplicated, stored, then applied to entities or plugins with retries
 - **Operations** — JSON logs, Prometheus metrics, trace-context, graceful draining shutdown
-- **Custom plugins** — hook into any lifecycle event (before/after create/update/delete)
+- **Custom plugins** — lifecycle hooks, custom routes, scheduled jobs and webhook handlers, with a `Store` for database access
 - **OpenAPI 3.1** — auto-generated specs, served live, exportable to JSON
 
 ## Documentation
@@ -52,7 +54,8 @@ yaypi run
 | Set up JWT auth, API keys, and roles | [Authorization](authorization.md) |
 | Generate and run migrations | [Migrations](migrations.md) |
 | Schedule background jobs | [Jobs](jobs.md) |
-| Write a plugin (hooks) | [Plugins](plugins.md) |
+| Send or receive webhooks | [Webhooks](webhooks.md) |
+| Write a plugin (hooks, routes, jobs, webhooks) | [Plugins](plugins.md) |
 | Deploy and operate in production | [Production](production.md) |
 | See all CLI commands | [CLI Reference](cli.md) |
 | See common patterns | [Patterns Cookbook](patterns.md) |

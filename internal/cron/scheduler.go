@@ -3,6 +3,7 @@ package cron
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -11,30 +12,59 @@ import (
 
 	"github.com/teleology-io/yayPI/internal/config"
 	"github.com/teleology-io/yayPI/internal/db"
+	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
 // Scheduler manages background cron jobs.
 type Scheduler struct {
-	s      gocron.Scheduler
-	jobs   []config.JobDef
-	db     *db.Manager
-	locker gocron.Locker // nil = run on every instance
+	s       gocron.Scheduler
+	jobs    []config.JobDef
+	db      *db.Manager
+	plugins Plugins
+	locker  gocron.Locker // nil = run on every instance
 	// OnRun, when set, is called after every run (metrics).
 	OnRun func(job string, d time.Duration, err error)
 }
 
+// Plugins resolves `handler: plugin` jobs and on_failure handlers, and supplies what
+// their JobContext carries.
+type Plugins struct {
+	Lookup func(name string) (sdk.JobFunc, bool) // nil = no plugin jobs registered
+	Store  sdk.Store
+	Logger func(name string) sdk.Logger
+	HTTP   func(sdk.HTTPOptions) *http.Client
+}
+
+func (p Plugins) job(name string) (sdk.JobFunc, error) {
+	if p.Lookup != nil {
+		if fn, ok := p.Lookup(name); ok {
+			return fn, nil
+		}
+	}
+	return nil, fmt.Errorf("no plugin job %q is registered (Server.RegisterJobs)", name)
+}
+
+func (p Plugins) context(ctx context.Context, job config.JobDef, attempt int) sdk.JobContext {
+	jc := sdk.JobContext{Ctx: ctx, Job: job.Name, Config: job.Config, Attempt: attempt, Store: p.Store, HTTP: p.HTTP}
+	if p.Logger != nil {
+		jc.Logger = p.Logger(job.Name)
+	}
+	return jc
+}
+
 // New creates a Scheduler from a list of job definitions. With a database and distributed
 // set, runs are coordinated through a lock table so each tick executes on one replica only.
-func New(jobs []config.JobDef, dbManager *db.Manager, distributed bool) (*Scheduler, error) {
+func New(jobs []config.JobDef, dbManager *db.Manager, distributed bool, plugins Plugins) (*Scheduler, error) {
 	s, err := gocron.NewScheduler()
 	if err != nil {
 		return nil, fmt.Errorf("creating scheduler: %w", err)
 	}
 
 	sched := &Scheduler{
-		s:    s,
-		jobs: jobs,
-		db:   dbManager,
+		s:       s,
+		jobs:    jobs,
+		db:      dbManager,
+		plugins: plugins,
 	}
 	if dbManager != nil && distributed {
 		sched.locker = newDBLocker(dbManager.Default())
@@ -49,12 +79,18 @@ func New(jobs []config.JobDef, dbManager *db.Manager, distributed bool) (*Schedu
 	return sched, nil
 }
 
-// runWithRetry runs fn under the job's timeout, retrying per its retry: block.
-func runWithRetry(job config.JobDef, fn func(ctx context.Context) error) error {
-	timeout := 5 * time.Minute
+// jobTimeout is the job's timeout: block (default 5m).
+func jobTimeout(job config.JobDef) time.Duration {
 	if d, err := time.ParseDuration(job.Timeout); job.Timeout != "" && err == nil && d > 0 {
-		timeout = d
+		return d
 	}
+	return 5 * time.Minute
+}
+
+// runWithRetry runs fn under the job's timeout, retrying per its retry: block (an
+// sdk.Permanent error stops early). It returns the attempts made and the last error.
+func runWithRetry(job config.JobDef, fn func(ctx context.Context, attempt int) error) (int, error) {
+	timeout := jobTimeout(job)
 	attempts, delay, maxDelay, exponential := 1, time.Second, time.Minute, true
 	if r := job.Retry; r != nil {
 		if r.MaxAttempts > 1 {
@@ -78,13 +114,13 @@ func runWithRetry(job config.JobDef, fn func(ctx context.Context) error) error {
 			}
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
-		err = fn(ctx)
+		err = fn(ctx, i+1)
 		cancel()
-		if err == nil {
-			return nil
+		if err == nil || sdk.IsPermanent(err) {
+			return i + 1, err
 		}
 	}
-	return err
+	return attempts, err
 }
 
 func (s *Scheduler) recordRun(name string, start time.Time, err error) {
@@ -96,6 +132,18 @@ func (s *Scheduler) recordRun(name string, start time.Time, err error) {
 	}
 	if s.OnRun != nil {
 		s.OnRun(name, d, err)
+	}
+}
+
+// runOnFailure hands a failed run to the job's on_failure handler (once, under the job
+// timeout). Its own failure is only logged.
+func (s *Scheduler) runOnFailure(job config.JobDef, fn sdk.JobFunc, attempts int, runErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), jobTimeout(job))
+	defer cancel()
+	jc := s.plugins.context(ctx, job, 1)
+	jc.Failure = &sdk.JobFailure{Job: job.Name, Err: runErr, Attempts: attempts}
+	if err := fn(jc); err != nil {
+		log.Error().Str("job", job.Name).Str("on_failure", job.OnFailure).Err(err).Msg("cron on_failure handler failed")
 	}
 }
 
@@ -113,15 +161,34 @@ func (s *Scheduler) Stop() {
 
 // registerJob registers a single job with the scheduler.
 func (s *Scheduler) registerJob(job config.JobDef, dbManager *db.Manager) error {
-	var taskFn func(ctx context.Context) error
+	var taskFn func(ctx context.Context, attempt int) error
 
 	switch strings.ToLower(job.Handler) {
 	case "sql":
-		taskFn = sqlHandler(job, dbManager)
+		fn := sqlHandler(job, dbManager)
+		taskFn = func(ctx context.Context, _ int) error { return fn(ctx) }
 	case "http":
-		taskFn = httpHandler(job)
+		fn, err := httpHandler(job)
+		if err != nil {
+			return err
+		}
+		taskFn = func(ctx context.Context, _ int) error { return fn(ctx) }
+	case "plugin":
+		fn, err := s.plugins.job(job.Plugin)
+		if err != nil {
+			return err
+		}
+		taskFn = func(ctx context.Context, attempt int) error { return fn(s.plugins.context(ctx, job, attempt)) }
 	default:
-		return fmt.Errorf("unknown job handler %q (supported: sql, http)", job.Handler)
+		return fmt.Errorf("unknown job handler %q (supported: sql, http, plugin)", job.Handler)
+	}
+	var onFailure sdk.JobFunc
+	if job.OnFailure != "" && job.OnFailure != "log" { // log: the default (failures are always logged)
+		fn, err := s.plugins.job(job.OnFailure)
+		if err != nil {
+			return fmt.Errorf("on_failure: %w", err)
+		}
+		onFailure = fn
 	}
 
 	jobDef, err := s.buildJobDefinition(job)
@@ -142,8 +209,11 @@ func (s *Scheduler) registerJob(job config.JobDef, dbManager *db.Manager) error 
 		jobDef,
 		gocron.NewTask(func() {
 			start := time.Now()
-			err := runWithRetry(job, taskFn)
+			attempts, err := runWithRetry(job, taskFn)
 			s.recordRun(name, start, err)
+			if err != nil && onFailure != nil {
+				s.runOnFailure(job, onFailure, attempts, err)
+			}
 		}),
 		opts...,
 	)

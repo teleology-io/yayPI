@@ -13,10 +13,10 @@ Every included YAML file has a `kind` field that tells yayPi what it contains:
 | `entity` | A database table and its fields, relations, indexes, constraints |
 | `endpoints` | REST routes for one or more entities |
 | `auth` | Built-in register/login/me/OAuth2/refresh endpoints |
-| `jobs` | Background cron jobs (SQL or HTTP) |
+| `jobs` | Background cron jobs (SQL, HTTP or plugin) |
 | `seed` | Idempotent seed data rows inserted at startup |
 | `email` | Email notification hooks triggered by entity lifecycle events |
-| `webhooks` | HTTP webhook hooks triggered by entity lifecycle events |
+| `webhooks` | Outbound HTTP hooks on entity lifecycle events, and (`mode: inbound`) signed receivers that write entities or call plugins |
 | `policy` | Casbin RBAC rules (skipped at load time; processed by policy engine) |
 
 ## Request flow
@@ -38,6 +38,11 @@ HTTP request
         → transaction: query.Builder (+ row filter) → TxObservers (audit log, outbox) → commit
         → After* plugin hooks (post-commit)
   → outbox.Worker (background) delivers webhooks/emails with retries
+
+Inbound webhook (mode: inbound)
+  → BodyLimit → RateLimit (always on) → [auth chain if declared]
+  → inbox.Receiver: IP allowlist / token / signature → handshake → dedupe → yaypi_inbox → 200
+  → inbox.Worker (background): route by event → Factory.Write (same path as CRUD) or plugin handler
 ```
 
 ## Package map
@@ -58,6 +63,10 @@ HTTP request
 | `apierr` | `internal/apierr/` | The single JSON error envelope |
 | `netsafe` | `internal/netsafe/` | SSRF-safe HTTP client (dial-time IP checks) |
 | `outbox` | `internal/outbox/` | Transactional outbox: render webhooks/emails in-tx, deliver with retries/signatures |
+| `inbox` | `internal/inbox/` | Inbound webhooks: verify/guard, dedupe, store; worker routes events to entity writes or plugins |
+| `queue` | `internal/queue/` | Lease-claim / retry / dead-letter machinery shared by the outbox and inbox tables |
+| `signature` | `internal/signature/` | Webhook signing schemes (yaypi_v1, github, stripe, slack, hmac_*), both directions |
+| `store` | `internal/store/` | `sdk.Store` for plugins: dialect-aware SQL, entity writes, sync cursors |
 | `audit` | `internal/audit/` | Audit log observer (`audit: true`) |
 | `metrics` | `internal/metrics/` | Dependency-free Prometheus exposition |
 | `logging` | `internal/logging/` | zerolog setup (level, json/console) |
@@ -69,7 +78,7 @@ HTTP request
 | `health` | `internal/health/` | Liveness/readiness (draining-aware) |
 | `seed` | `internal/seed/` | Idempotent seeding (hashes User passwords) |
 | `mailer` | `internal/mailer/` | SMTP sender |
-| `sdk` | `pkg/sdk/` | Plugin SDK — hooks, route plugins, `HookError` |
+| `sdk` | `pkg/sdk/` | Plugin SDK — hooks, routes, jobs, webhook handlers/verifiers, `Store`, `HookError`, `Permanent` |
 
 ## Data flow: YAML → running API
 
@@ -83,9 +92,9 @@ yaypi.yaml
   policy engine                  → fatal on any error
   handler.Factory + observers    → outbox (webhooks/emails), audit
   token.Keys, auth.Handler, API keys, OpenAPI, health, metrics
-  plugins.InitAll()
+  plugins.InitAll(Store, HTTP)    → inbound receivers + inbox worker
   router.Build()
-  cron + outbox worker start
+  cron + outbox/inbox workers start
   http.Server (all timeouts) → SIGTERM → drain → Shutdown → stop workers → plugins.ShutdownAll
 ```
 
@@ -97,6 +106,7 @@ yaypi.yaml
 - **Registry is immutable at runtime** — built once at startup; all handlers close over entity/endpoint pointers
 - **OpenAPI specs are pre-marshaled** — `openapi.NewHandler` marshals all specs to JSON bytes at startup; serving is a map lookup + `w.Write`
 - **Email/webhook via transactional outbox** — rendered inside the write transaction by `outbox.Observer` (a `handler.TxObserver`) and delivered by `outbox.Worker`; never fire-and-forget
+- **One write path** — CRUD handlers, inbound webhook routes and plugin `Store.Write` all go through `handler.Factory` (coercion, validation, hooks, transaction, TxObservers); upserts match the entity's `natural_key`
 - **Fail closed** — misconfigured security (policy, secrets, auth without DB) stops the boot; `roles`/`conditions` are enforced with or without Casbin
 - **API key + JWT are OR-logic** — `APIKeyAuth` runs before `RequireAuth`; if the API key succeeds it sets the Subject in context and JWT parsing is skipped
 

@@ -20,8 +20,8 @@ Start with [overview.md](overview.md) to understand how the pieces fit together,
 | `entity` | Database table, fields, relations, indexes, constraints, hooks |
 | `endpoints` | REST routes: list/get/create/update/replace/delete with auth, filters, keyset pagination, includes, bulk create, rate limiting |
 | `auth` | register/login/me/refresh/logout, password reset, email verification, OAuth2 (PKCE) |
-| `jobs` | Cron jobs (SQL or HTTP), run once across replicas |
+| `jobs` | Cron jobs (SQL, HTTP or plugin), run once across replicas |
 | `seed` | Idempotent data applied by `yaypi seed` |
 | `email` | SMTP email on lifecycle events, delivered via the transactional outbox |
-| `webhooks` | Signed HTTP webhooks on lifecycle events, delivered via the transactional outbox |
+| `webhooks` | Signed webhooks both ways: outbound on lifecycle events (transactional outbox), inbound receivers (inbox) that write entities or call plugins |
 | `policy` | Casbin RBAC role definitions |

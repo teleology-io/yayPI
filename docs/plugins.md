@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins let you add custom logic that runs during entity lifecycle events (before/after create, update, delete). When you need plugins, you use yaypi as a library inside your own `main.go` rather than the standalone `yaypi` binary.
+Plugins add Go code where YAML runs out: entity lifecycle hooks (before/after create, update, delete), custom routes, scheduled jobs, and inbound webhook handlers. The framework keeps the plumbing — transactions, locks, retries, signatures, metrics — so a plugin is usually a few small functions. When you need plugins, you use yaypi as a library inside your own `main.go` rather than the standalone `yaypi` binary.
 
 > **For email and webhooks, you don't need a plugin.** yayPi has built-in email and webhook hooks driven by YAML files (`kind: email`, `kind: webhooks`). See the sections below for when to use each approach.
 
@@ -15,6 +15,9 @@ Plugins let you add custom logic that runs during entity lifecycle events (befor
 | Validate business rules that can't be expressed in field constraints | Custom plugin |
 | Bulk export/import, a report, a file upload — anything that isn't one CRUD row | Custom route plugin ([below](#custom-route-plugins)) |
 | Complex data transformation before a write | Custom plugin |
+| Pull data from a third-party API on a schedule | Plugin job (`handler: plugin`) + `Store.Upsert` ([Jobs](jobs.md#plugin-handler)) |
+| Receive webhooks from another system | `mode: inbound` webhook — no code for entity writes; a plugin handler for anything else ([Webhooks](webhooks.md)) |
+| Verify an unusual webhook signature format | `WebhookVerifierPlugin` |
 
 ## Delivery model for email and webhooks
 
@@ -158,6 +161,60 @@ type RouteHandlerPlugin interface {
 Each key in the returned map is referenced from endpoints YAML as
 `handler: <PluginInfo.Name>.<key>`. See [Custom route plugins](#custom-route-plugins) below.
 
+#### `JobHandlerPlugin`
+
+Scheduled jobs (`handler: plugin`, `plugin: <name>.<key>`) and `on_failure` handlers. See [Jobs](jobs.md#plugin-handler).
+
+```go
+type JobHandlerPlugin interface {
+    Plugin
+    Jobs() map[string]JobFunc   // JobFunc func(JobContext) error
+}
+```
+
+#### `WebhookPlugin` and `WebhookVerifierPlugin`
+
+Inbound webhook handlers (a route's `handler: <name>.<key>`) and custom signature verifiers (`signature: {scheme: plugin, handler: <name>.<key>}`). See [Webhooks](webhooks.md).
+
+```go
+type WebhookPlugin interface {
+    Plugin
+    WebhookHandlers() map[string]WebhookHandlerFunc   // func(WebhookContext) error
+}
+
+type WebhookVerifierPlugin interface {
+    Plugin
+    WebhookVerifiers() map[string]WebhookVerifyFunc   // func(r *http.Request, body []byte, secret string) error
+}
+```
+
+A handler runs from the inbox worker after the request was verified, stored and acknowledged; an error retries it with backoff. Return `sdk.Permanent(err)` for failures retrying can't fix.
+
+### Store (database access)
+
+`InitContext.Store` — also on `JobContext` and `WebhookContext` — is the plugin's way into the database. It is `nil` when no database is configured.
+
+```go
+type Store interface {
+    Dialect() string                     // postgres | mysql | sqlite
+    QuoteIdent(name string) string
+    Query(ctx, sql string, args ...any) ([]map[string]any, error)  // $1, $2 on every dialect
+    Exec(ctx, sql string, args ...any) (int64, error)
+    WithTx(ctx, fn func(tx Tx) error) error
+    Write(ctx, reqs ...WriteRequest) ([]WriteResult, error)        // create | update | upsert | delete
+    Upsert(ctx, entity string, rows ...map[string]any) ([]WriteResult, error)
+    Cursor(ctx, source, key string) (string, error)
+    SetCursor(ctx, source, key, value string) error
+}
+```
+
+- **Prefer `Write` / `Upsert` for entity data.** They run the same validation, hooks, audit log and outbound webhooks as the REST API, in one transaction per call. `upsert` matches the entity's [`natural_key`](entities.md#natural-keys-and-upserts); `update`/`delete` take a `Key` (primary key or natural key). Without a `Subject` (or with one that has no `Role`) a write is a trusted system write; with a role, field `write_roles` apply.
+- **Raw SQL** uses `$1, $2` placeholders on every database (rewritten for MySQL/SQLite); quote identifiers with `QuoteIdent`.
+- **Cursors** remember where an incremental sync stopped (`source` + `key` → string). The `yaypi_sync_cursors` table is created when any plugin is listed under `plugins:` in `yaypi.yaml`.
+- Invalid writes come back as `sdk.Permanent`, so a job or webhook handler that returns them unchanged isn't retried.
+
+`InitContext.HTTP(sdk.HTTPOptions{...})` returns an outbound client that refuses private, loopback and cloud-metadata addresses (unless `AllowPrivateNetwork`). Use it for any URL that isn't fully under your control.
+
 ### Supporting types
 
 ```go
@@ -170,6 +227,8 @@ type PluginInfo struct {
 type InitContext struct {
     Config map[string]any   // values from `config:` in yaypi.yaml
     Logger Logger
+    Store  Store                         // nil without a database
+    HTTP   func(HTTPOptions) *http.Client  // SSRF-safe outbound client
 }
 
 type HookContext struct {
@@ -341,6 +400,8 @@ func main() {
 ```
 
 `server.New` loads `yaypi.yaml`, `RegisterHook` wires the plugin to the named entity, and `Run` starts the HTTP server and blocks until interrupted.
+
+Other plugin types register the same way: `RegisterRoutes`, `RegisterJobs`, `RegisterWebhooks` (handlers, plus verifiers when the plugin has them) and `RegisterVerifiers`. `srv.Register(p)` registers everything `p` implements except entity hooks, which are per entity. A name in YAML that no registered plugin provides stops the boot.
 
 **`go.mod`:**
 
