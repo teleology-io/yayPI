@@ -6,7 +6,7 @@ import (
 	"github.com/teleology-io/yayPI/internal/query"
 )
 
-// WalmProfile is what walm-cl's OpenAPI support needs beyond the spec:
+// WalmProfile is what walm's OpenAPI support needs beyond the spec:
 // yayPI's conventions that OpenAPI can't express (response envelopes, the
 // error message path, filter and sort syntax) and the base URL.
 // `yaypi spec generate --walm` writes it next to the spec.

@@ -273,10 +273,10 @@ yaypi spec generate --name sdk --output sdk.json
 
 ---
 
-## walm-cl
+## walm
 
 `yaypi spec generate --name api --walm` also writes `walm.profile.yaml`
-next to the spec: the conventions walm-cl needs beyond OpenAPI (the
+next to the spec: the conventions walm needs beyond OpenAPI (the
 `{data, meta}` envelopes, the `error` message path, filter operators, sort
 syntax and `project.base_url`). A WALM definition then uses both:
 
@@ -287,5 +287,5 @@ api:
   token: token
 ```
 
-walm-cl expands `op: GET /posts` requests against them and checks fields,
+walm expands `op: GET /posts` requests against them and checks fields,
 filters, sorts, path parameters and bodies at build time.

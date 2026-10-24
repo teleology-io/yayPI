@@ -280,7 +280,7 @@ yaypi spec generate --name sdk --output sdk-spec.json --config path/to/yaypi.yam
 |---|---|---|
 | `--name` | required | Name of the spec to generate (must match a `spec[].name` in `yaypi.yaml`) |
 | `--output` | `openapi.json` | Output file path |
-| `--walm` | off | Also write `walm.profile.yaml` next to the spec, for walm-cl (see [OpenAPI](openapi.md#walm-cl)) |
+| `--walm` | off | Also write `walm.profile.yaml` next to the spec, for walm (see [OpenAPI](openapi.md#walm)) |
 | `--config` | `yaypi.yaml` | Path to `yaypi.yaml` |
 
 The generated file is valid OpenAPI 3.1 JSON that can be used with tools like Swagger UI, Redoc, or OpenAPI Generator.
