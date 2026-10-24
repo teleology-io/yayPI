@@ -398,6 +398,25 @@ Rules are evaluated **in order** — the first matching `when` wins. If no rule 
 
 `row_access` is **opt-in**: omitting it means all rows are accessible. Defining it without a catch-all `when: "*"` means any caller not matched by a rule is denied.
 
+## Custom routes
+
+An endpoint with `method` and `handler` (instead of `crud`) runs a plugin's
+route handler behind the same auth, rate-limit and RBAC chain. Declare its
+`params`, `body` and `response` so yayPi checks the input, hands the
+handler typed values and documents the route in OpenAPI:
+
+```yaml
+- path: /calendar
+  method: GET
+  entity: Event
+  handler: cal.view
+  params:
+    date: {type: date, required: true}
+  response: {list: Event}
+```
+
+See [Declaring a route's contract](plugins.md#declaring-a-routes-contract).
+
 ## OpenAPI spec integration
 
 When you define named specs in `yaypi.yaml` (see [OpenAPI](openapi.md)), all endpoints are automatically included in all specs. You can override this per endpoint.

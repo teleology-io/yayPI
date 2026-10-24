@@ -11,7 +11,7 @@ entity:
     - name: id
       type: uuid
       primary_key: true
-      default: gen_random_uuid()
+      default: uuid
 
     - name: post_id
       type: uuid
@@ -49,13 +49,13 @@ entity:
 
     - name: edited
       type: boolean
-      default: "false"
+      default: false
       nullable: false
 
     # Admins can mark comments for review; regular users never see or set this.
     - name: flagged
       type: boolean
-      default: "false"
+      default: false
       nullable: false
       access:
         read_roles: [admin, editor]

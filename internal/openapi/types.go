@@ -90,6 +90,7 @@ type Schema struct {
 	Description string             `json:"description,omitempty"`
 	Nullable    bool               `json:"nullable,omitempty"`
 	Enum        []string           `json:"enum,omitempty"`
+	Default     any                `json:"default,omitempty"` // nil is omitted; false, 0 and "" are kept
 	Properties  map[string]*Schema `json:"properties,omitempty"`
 	Items       *Schema            `json:"items,omitempty"`
 	Required    []string           `json:"required,omitempty"`

@@ -9,6 +9,7 @@ import (
 
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/query"
 	"github.com/teleology-io/yayPI/internal/schema"
 )
@@ -157,6 +158,9 @@ func (f *Factory) prepareWrite(ctx context.Context, entity *schema.Entity, req W
 				return p, err
 			}
 		}
+		if err := applyRules(entity, nil, data); err != nil {
+			return p, err
+		}
 		p.data = data
 	case "update":
 		stripServerManaged(entity, raw, true)
@@ -202,7 +206,7 @@ func (f *Factory) applyWrite(ctx context.Context, tx *sql.Tx, dbc *db.DB, p prep
 
 	if p.req.Action == "delete" {
 		if f.plugins != nil {
-			if err := f.plugins.BeforeDelete(ctx, p.entity.Name, idString(id)); err != nil {
+			if err := f.plugins.BeforeDelete(plugin.InWrite(ctx, dbc.Dialect, tx, before), p.entity.Name, idString(id)); err != nil {
 				return writeOutcome{}, err
 			}
 		}
@@ -217,9 +221,12 @@ func (f *Factory) applyWrite(ctx context.Context, tx *sql.Tx, dbc *db.DB, p prep
 
 	data := p.data
 	if f.plugins != nil {
-		if data, err = f.plugins.BeforeUpdate(ctx, p.entity.Name, idString(id), data); err != nil {
+		if data, err = f.plugins.BeforeUpdate(plugin.InWrite(ctx, dbc.Dialect, tx, before), p.entity.Name, idString(id), data); err != nil {
 			return writeOutcome{}, err
 		}
+	}
+	if err := applyRules(p.entity, before, data); err != nil {
+		return writeOutcome{}, err
 	}
 	rec, err := b.Update(ctx, id, data, query.RowFilter{})
 	if errors.Is(err, query.ErrNoFields) {

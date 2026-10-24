@@ -159,13 +159,16 @@ entity:
   natural_key: [external_id]    # identifies a row from an outside system; enables upserts.
                                 # Must be a unique field or a unique index over exactly these fields
   stale_guard: source_updated_at  # timestamp/number: an upsert that is not newer is skipped
+  rules:                        # checks across fields on create/update, against the stored row + change
+    - { check: ends_at > starts_at, message: End must be after start }   # == != > < >= <=; fields, numbers,
+    - { check: seats >= 1 }       # "strings", true/false, null, now; null operand passes; failure → 422 rule_failed
 
   fields:
     - name: id
       type: uuid                # uuid|string|text|integer|bigint|float|decimal|boolean|
                                 # timestamptz|date|jsonb|enum|array|bytea
       primary_key: true
-      default: gen_random_uuid()  # portable: translated per dialect (also now())
+      default: uuid               # a value of the field's type (draft, "", 0, false); uuid / now generate; {sql: "expr"} for raw SQL
 
     - name: title
       type: string
@@ -174,6 +177,11 @@ entity:
       unique: false
       index: false
       immutable: true           # settable on create only (dropped from PATCH/PUT)
+
+    - name: completed_at
+      type: timestamptz
+      nullable: true
+      stamp_when: done          # now when the condition turns true, null when false; server-managed
 
     - name: author_id
       type: uuid
@@ -225,7 +233,7 @@ entity:
 
 ### Input handling
 
-Every provided body field is type-checked and coerced to its declared type before it reaches the database (wrong type → 400 `validation_failed` with per-field `errors`). Integers must be integral; `timestamptz` takes RFC 3339; `date` takes `YYYY-MM-DD`; `bytea` takes base64; `jsonb` takes any JSON; `decimal` keeps exact precision. Explicit `null` on a non-nullable field is a 400. Unknown fields are dropped (or 400 with `strict: true`). Server-managed columns (`created_at`, `updated_at`, `deleted_at`, `default_from` fields, PK on update) are never client-writable.
+Every provided body field is type-checked and coerced to its declared type before it reaches the database (wrong type → 400 `validation_failed` with per-field `errors`). Integers must be integral; `timestamptz` takes RFC 3339; `date` takes `YYYY-MM-DD`; `bytea` takes base64; `jsonb` takes any JSON; `decimal` keeps exact precision. Explicit `null` on a non-nullable field is a 400. Unknown fields are dropped (or 400 with `strict: true`). Server-managed columns (`created_at`, `updated_at`, `deleted_at`, `default_from` and `stamp_when` fields, PK on update) are never client-writable.
 
 ### Upserts (`natural_key`)
 
@@ -299,7 +307,25 @@ endpoints:
 
     delete:
       row_access: [...]         # soft delete happens automatically when the entity has soft_delete
+
+  - path: /calendar             # custom route: method + handler (a RouteHandlerPlugin)
+    method: GET
+    entity: Event               # RBAC resource; the action follows the method
+    handler: cal.view
+    operation_id: calendarView  # OpenAPI operationId (default: handler key)
+    params:                     # query params: checked + typed before the handler (c.Params)
+      date: { type: date, required: true }
+      limit: { type: integer, validate: { min: 1, max: 100 } }
+    body:                       # POST/PUT/PATCH: JSON fields (c.Body); unknown keys → 400
+      note: string
+    response: { list: Event }   # data shape: {one|list: Entity | {fields: {...}}}, or {status: 204}
 ```
+
+Custom routes appear in OpenAPI from these declarations (walm `op:` requests
+are checked against them). Plugins answer with `c.Data(v)` / `c.Created(v)` /
+`c.Error(status, msg)` and read on a caller's behalf with
+`Store.Read(ctx, sdk.ReadRequest{Entity, Subject, Where: {"starts_at[gte]": t}})`,
+which applies the list endpoint's `row_access`, tenant scope and field rules.
 
 ### CRUD → HTTP mapping
 

@@ -10,6 +10,7 @@ import (
 // their pattern.
 func fieldSchemaFor(f *schema.Field) *Schema {
 	s := fieldSchema(f.Type, f.EnumValues)
+	s.Default = f.DefaultValue
 	if f.Time == nil {
 		return s
 	}

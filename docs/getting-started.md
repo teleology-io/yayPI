@@ -61,7 +61,7 @@ entity:
     - name: id
       type: uuid
       primary_key: true
-      default: gen_random_uuid()
+      default: uuid
 
     - name: name
       type: string
@@ -81,14 +81,14 @@ entity:
       precision: 10
       scale: 2
       nullable: false
-      default: "0.00"
+      default: 0.00
       validate:
         min: 0
         max: 99999.99
 
     - name: published
       type: boolean
-      default: "false"
+      default: false
       nullable: false
 ```
 

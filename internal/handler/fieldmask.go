@@ -82,6 +82,8 @@ func stripServerManaged(entity *schema.Entity, data map[string]interface{}, isUp
 			drop = true
 		case isUpdate && (f.PrimaryKey || f.Immutable || f.DefaultFrom != ""):
 			drop = true
+		case f.StampWhen != nil: // set from its condition (applyRules)
+			drop = true
 		}
 		if drop {
 			delete(data, f.Name)

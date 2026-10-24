@@ -23,6 +23,38 @@
     }
   },
   "$defs": {
+    "RouteFields": {
+      "type": "object",
+      "description": "Field name → type, or a mapping with type, required, nullable, values (enum), description and validate.",
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/RouteFieldType" },
+          {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["type"],
+            "properties": {
+              "type": { "$ref": "#/$defs/RouteFieldType" },
+              "required": { "type": "boolean" },
+              "nullable": { "type": "boolean" },
+              "values": { "type": "array", "items": { "type": "string" } },
+              "description": { "type": "string" },
+              "validate": { "type": "object", "description": "Same rules as entity fields: min_length, max_length, min, max, pattern, format, message." }
+            }
+          }
+        ]
+      }
+    },
+    "RouteFieldType": {
+      "type": "string",
+      "enum": ["uuid", "string", "text", "integer", "bigint", "float", "decimal", "boolean", "timestamptz", "date", "jsonb", "enum", "array"]
+    },
+    "RouteShape": {
+      "oneOf": [
+        { "type": "string", "description": "An entity name." },
+        { "type": "object", "additionalProperties": false, "required": ["fields"], "properties": { "fields": { "$ref": "#/$defs/RouteFields" } } }
+      ]
+    },
     "EndpointDef": {
       "type": "object",
       "description": "A single endpoint or group of CRUD endpoints for an entity.",
@@ -57,6 +89,30 @@
           "type": "string",
           "description": "Plugin handler name for custom endpoints.",
           "examples": ["myPlugin.HandleReport"]
+        },
+        "operation_id": {
+          "type": "string",
+          "description": "Custom routes: the OpenAPI operationId (default: the handler key).",
+          "examples": ["calendarView"]
+        },
+        "params": {
+          "$ref": "#/$defs/RouteFields",
+          "description": "Custom routes: query parameters, checked and typed before the handler runs (RouteContext.Params). Undeclared parameters are ignored."
+        },
+        "body": {
+          "$ref": "#/$defs/RouteFields",
+          "description": "Custom routes: JSON body fields, checked and typed before the handler runs (RouteContext.Body). Unknown keys are refused. Not for GET/DELETE/HEAD."
+        },
+        "response": {
+          "type": "object",
+          "description": "Custom routes: what `data` holds. one: an entity name or {fields: {...}}; list: the same, as an array; status: the success status (204 has no body).",
+          "additionalProperties": false,
+          "properties": {
+            "status": { "type": "integer", "minimum": 200, "maximum": 299 },
+            "one": { "$ref": "#/$defs/RouteShape" },
+            "list": { "$ref": "#/$defs/RouteShape" }
+          },
+          "examples": [{ "list": "Event" }, { "one": { "fields": { "ok": "boolean" } } }, { "status": 204 }]
         },
         "middleware": {
           "type": "array",

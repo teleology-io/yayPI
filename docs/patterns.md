@@ -640,7 +640,7 @@ fields:
 
   - name: flagged
     type: boolean
-    default: "false"
+    default: false
     access:
       read_roles: [admin, editor]
       write_roles: [admin]

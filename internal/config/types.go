@@ -277,6 +277,16 @@ type EntityDef struct {
 	// incoming row whose value is not newer than the stored one is skipped, so
 	// out-of-order deliveries never overwrite newer data.
 	StaleGuard string `yaml:"stale_guard"`
+	// Rules are checks across fields, run on every create and update against
+	// the row as it will be stored (e.g. `ends_at > starts_at`). A failure is
+	// a 422 with Message. A rule whose fields are null passes.
+	Rules []RuleDef `yaml:"rules"`
+}
+
+// RuleDef is one entity rule.
+type RuleDef struct {
+	Check   string `yaml:"check"`
+	Message string `yaml:"message"`
 }
 
 // FieldDef describes a single field on an entity.
@@ -289,7 +299,7 @@ type FieldDef struct {
 	Nullable      bool              `yaml:"nullable"`
 	Unique        bool              `yaml:"unique"`
 	PrimaryKey    bool              `yaml:"primary_key"`
-	Default       string            `yaml:"default"`
+	Default       *DefaultDef       `yaml:"default"` // literal of the field type, or {sql: expr}
 	Index         bool              `yaml:"index"`
 	Immutable     bool              `yaml:"immutable"` // stripped from PATCH body; accepted on create only
 	Values        []string          `yaml:"values"`    // for enum
@@ -301,6 +311,10 @@ type FieldDef struct {
 	// client value, and makes it read-only on update. Values: subject.id, subject.email,
 	// subject.role. Typical use: an owner column (author_id: default_from: subject.id).
 	DefaultFrom string `yaml:"default_from"`
+	// StampWhen keeps a timestamp in step with a condition: set to the current
+	// time when the condition becomes true, cleared when it becomes false
+	// (completed_at: stamp_when: done). Server-managed: clients can't set it.
+	StampWhen string `yaml:"stamp_when"`
 }
 
 // FieldValidateDef holds validation rules for a field.
@@ -406,6 +420,13 @@ type EndpointDef struct {
 	Delete      *DeleteConfig    `yaml:"delete"`
 	Spec        *bool            `yaml:"spec"`  // nil = include in all specs; false = exclude
 	Specs       *EndpointSpecRef `yaml:"specs"` // optional metadata / per-spec filter
+	// Custom routes (method + handler) declare their contract: typed query
+	// parameters and body fields are checked before the handler runs, and the
+	// route appears in OpenAPI with them and its response.
+	OperationID string            `yaml:"operation_id"`
+	Params      RouteFields       `yaml:"params"`
+	Body        RouteFields       `yaml:"body"`
+	Response    *RouteResponseDef `yaml:"response"`
 }
 
 // EndpointSpecRef holds per-endpoint OpenAPI documentation overrides.

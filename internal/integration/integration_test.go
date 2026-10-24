@@ -58,7 +58,7 @@ func rootConfig() *config.RootConfig {
 		Entities: []*config.EntityConfig{{Entity: config.EntityDef{
 			Name: "Note", Table: "notes", Timestamps: true, SoftDelete: true,
 			Fields: []config.FieldDef{
-				{Name: "id", Type: "uuid", PrimaryKey: true, Default: "gen_random_uuid()"},
+				{Name: "id", Type: "uuid", PrimaryKey: true, Default: &config.DefaultDef{Literal: "uuid", LiteralTag: "!!str"}},
 				{Name: "title", Type: "string", Length: 100, Validate: &config.FieldValidateDef{Required: true}},
 				{Name: "rank", Type: "integer", Nullable: true},
 				{Name: "meta", Type: "jsonb", Nullable: true},

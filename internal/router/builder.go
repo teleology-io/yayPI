@@ -271,14 +271,22 @@ func registerCustomHandler(r chi.Router, ep *schema.Endpoint, entity *schema.Ent
 		return
 	}
 	mws := buildMiddlewareChain(ep, entity, cfg, "")
-	r.With(mws...).Method(strings.ToUpper(ep.Method), ep.Path, wrapRouteHandler(fn))
+	r.With(mws...).Method(strings.ToUpper(ep.Method), ep.Path, wrapRouteHandler(fn, ep.Contract))
 }
 
 // wrapRouteHandler adapts an sdk.RouteHandlerFunc to an http.HandlerFunc, attaching the
-// authenticated Subject the same way internal/plugin's hook dispatch does.
-func wrapRouteHandler(fn sdk.RouteHandlerFunc) http.HandlerFunc {
+// authenticated Subject the same way internal/plugin's hook dispatch does, and checking
+// the route's declared params/body first (a failure answers 400 without calling fn).
+func wrapRouteHandler(fn sdk.RouteHandlerFunc, contract *schema.RouteContract) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		rc := sdk.RouteContext{Ctx: r.Context(), Request: r, Response: w}
+		rc := sdk.RouteContext{Ctx: r.Context(), Request: r, Response: w, RequestID: middleware.GetRequestID(r),
+			Params: map[string]any{}, Body: map[string]any{}}
+		if contract != nil {
+			var ok bool
+			if rc.Params, rc.Body, ok = handler.RouteInput(w, r, contract); !ok {
+				return
+			}
+		}
 		if sub := middleware.SubjectFromContext(r.Context()); sub != nil {
 			rc.Subject = &sdk.Subject{ID: sub.ID, Role: sub.Role, Email: sub.Email, Tenant: sub.Tenant}
 		}

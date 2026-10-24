@@ -70,6 +70,9 @@ func (f *Factory) prepareCreate(r *http.Request, entity *schema.Entity, opts *sc
 			return nil, &itemError{err: err, stage: "pre-create"}
 		}
 	}
+	if err := applyRules(entity, nil, data); err != nil {
+		return nil, &itemError{err: err, stage: "rules"}
+	}
 	return data, nil
 }
 

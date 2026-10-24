@@ -61,6 +61,12 @@ func (s *Server) RegisterHook(entity string, p sdk.EntityHookPlugin) {
 	s.dispatcher.RegisterHook(entity, p)
 }
 
+// RegisterHooks registers one entity's hooks as plain functions (nil fields
+// are skipped). Must be called before Run.
+func (s *Server) RegisterHooks(entity string, h sdk.Hooks) {
+	s.dispatcher.RegisterHooks(entity, h)
+}
+
 // RegisterRoutes registers a plugin's custom route handlers, referenceable from endpoints
 // YAML as `handler: <p.Info().Name>.<key>`. Must be called before Run.
 func (s *Server) RegisterRoutes(p sdk.RouteHandlerPlugin) {

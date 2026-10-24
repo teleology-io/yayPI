@@ -88,8 +88,9 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 		if ep.ExcludeFromSpec {
 			continue
 		}
-		// Only CRUD endpoints with a known entity are supported.
-		if len(ep.CRUD) == 0 || ep.Entity == "" {
+		// CRUD endpoints, and custom routes (method + handler), with a known entity.
+		custom := len(ep.CRUD) == 0 && ep.Method != "" && ep.Handler != ""
+		if (len(ep.CRUD) == 0 && !custom) || ep.Entity == "" {
 			continue
 		}
 		entity, ok := reg.GetEntity(ep.Entity)
@@ -113,6 +114,18 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 				continue
 			}
 
+			if custom {
+				operation := buildCustomOperation(ep, entity, projectName, authConfigured)
+				operation.OperationID = uniqueID(idsSeen[specName], operation.OperationID, ep.Path)
+				if s.Paths[ep.Path] == nil {
+					s.Paths[ep.Path] = &PathItem{}
+				}
+				attachMethod(s.Paths[ep.Path], ep.Method, operation)
+				for _, tag := range operation.Tags {
+					tagSeen[specName][tag] = struct{}{}
+				}
+				continue
+			}
 			for _, op := range ep.CRUD {
 				oaiPath := resolvePath(ep.Path, op)
 				operation := buildOperation(op, ep, entity, projectName, authConfigured)
@@ -457,7 +470,7 @@ func buildCreateSchema(entity *schema.Entity) *Schema {
 		if f.PrimaryKey || f.OmitResponse {
 			continue
 		}
-		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" || f.DefaultFrom != "" {
+		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" || f.DefaultFrom != "" || f.StampWhen != nil {
 			continue
 		}
 		prop := fieldSchemaFor(&f)
@@ -491,7 +504,7 @@ func buildUpdateSchema(entity *schema.Entity, ep *schema.Endpoint) *Schema {
 		Properties: make(map[string]*Schema),
 	}
 	for _, f := range entity.Fields {
-		if f.PrimaryKey || f.OmitResponse || f.Immutable || f.DefaultFrom != "" {
+		if f.PrimaryKey || f.OmitResponse || f.Immutable || f.DefaultFrom != "" || f.StampWhen != nil {
 			continue
 		}
 		if f.Name == "created_at" || f.Name == "updated_at" || f.Name == "deleted_at" {

@@ -36,12 +36,13 @@ entity:
 | `tenant_field` | string | `tenant_id` | Tenant column for `tenant_scoped` |
 | `natural_key` | list | — | Field(s) identifying a row from an outside system; enables upserts (see [Natural keys](#natural-keys-and-upserts)) |
 | `stale_guard` | string | — | Timestamp/number field: an upsert that isn't newer is skipped |
+| `rules` | list | — | Checks across fields on create/update, e.g. `ends_at > starts_at` (see [Rules](#rules)) |
 
 ## Field types
 
 | YAML type | PostgreSQL type | Notes |
 |---|---|---|
-| `uuid` | `uuid` | Use with `default: gen_random_uuid()` for auto IDs |
+| `uuid` | `uuid` | Use with `default: uuid` for auto IDs |
 | `string` | `varchar(255)` | Override with `length:` |
 | `text` | `text` | Unbounded string |
 | `integer` | `integer` | 32-bit signed |
@@ -68,7 +69,7 @@ entity:
 | `nullable` | boolean | Allow NULL (default: `false`) |
 | `unique` | boolean | Add UNIQUE constraint |
 | `primary_key` | boolean | Mark as primary key |
-| `default` | string | SQL default expression (e.g. `gen_random_uuid()`, `"0"`, `"'draft'"`) |
+| `default` | value or `{sql: …}` | Default value, a literal of the field's type (`draft`, `""`, `0`, `false`); `uuid` / `now` shorthands; `{sql: "expr"}` for any other SQL expression. See below |
 | `index` | boolean | Shorthand for a single-column btree index |
 | `immutable` | boolean | Once set on create, cannot be changed via update |
 | `values` | list | Enum values (required when `type: enum`) |
@@ -76,6 +77,7 @@ entity:
 | `serialization` | object | Controls API response and log behavior |
 | `access` | object | ABAC: per-role read and write restrictions (opt-in) |
 | `validate` | object | Validation rules run on create and update |
+| `stamp_when` | string | Nullable timestamptz/date set to now when the condition turns true, cleared when false (see [`stamp_when`](#stamp_when)) |
 
 ### Column naming
 
@@ -85,16 +87,27 @@ Field names are automatically converted to snake_case for column names:
 - `createdAt` → `created_at`
 - `viewCount` → `view_count`
 
-### The `default` field and quoting
+### The `default` field
 
-SQL defaults are passed through verbatim. This means:
+A default is a **value of the field's type**; yayPi writes the SQL for it
+and checks it at startup:
 
-- Numbers: `default: "0"` → `DEFAULT 0`
-- Booleans: `default: "false"` → `DEFAULT false`
-- String literals: `default: "'draft'"` → `DEFAULT 'draft'` (note the inner single quotes)
-- Functions: `default: gen_random_uuid()` → `DEFAULT gen_random_uuid()`
+| You write | Field type | Column default |
+|---|---|---|
+| `default: draft` | string / text / enum | `DEFAULT 'draft'` |
+| `default: ""` | string / text | `DEFAULT ''` |
+| `default: 0` | integer / float / decimal | `DEFAULT 0` |
+| `default: false` | boolean | `DEFAULT false` |
+| `default: 2026-01-01` | date / timestamptz | `DEFAULT '2026-01-01'` |
+| `default: uuid` | uuid | a generated UUID (`gen_random_uuid()`, translated per dialect) |
+| `default: now` | timestamptz / date | the current time (`now()`, translated per dialect) |
+| `default: {sql: "lower(hex(randomblob(8)))"}` | any | the expression, verbatim |
 
-If you forget the inner quotes on a string default, PostgreSQL will treat it as a column reference and error.
+A value that doesn't fit the type (`default: abc` on an integer) stops
+startup with the field named. The SQL-expression spellings of older
+versions are refused with the fix: `default: "'draft'"` → write `draft`;
+`default: gen_random_uuid()` → write `uuid`. Literal defaults also appear as
+`default` in the OpenAPI schema.
 
 ## Field validation
 
@@ -236,6 +249,55 @@ All of them behave the same way:
 | `stale_guard` value is not newer than the stored one | Nothing is written (`unchanged`) |
 
 `stale_guard` stops out-of-order deliveries — a retried webhook, a slow sync page — from overwriting newer data. A row whose stored guard value is `NULL` is always updated.
+
+## Rules
+
+Checks across fields, declared on the entity. They run on every create and
+update (HTTP, `Store.Write`, inbound webhooks), after the Before* hooks,
+against the row as it will be stored: the stored row merged with the
+change, so a partial update that only sends `ends_at` is checked against
+the stored `starts_at`.
+
+```yaml
+entity:
+  name: Event
+  fields:
+    - {name: starts_at, type: timestamptz}
+    - {name: ends_at, type: timestamptz, nullable: true}
+    - {name: seats, type: integer, default: 1}
+  rules:
+    - check: ends_at > starts_at
+      message: End must be after start
+    - check: seats >= 1            # message defaults to "must satisfy seats >= 1"
+```
+
+- A check is `a <op> b` with `==`, `!=`, `>`, `<`, `>=`, `<=` (spaces around
+  the operator). Operands are field names, numbers, quoted strings, `true`,
+  `false`, `null` and `now`. A bare boolean field means `field == true`.
+- Times compare as times, numbers as numbers; a comparison that can't mean
+  anything (a number with a time) stops startup.
+- A rule whose field is null passes (`ends_at` unset above); write
+  `ends_at != null` as its own rule to require it.
+- A failure is **422** `{"error": message, "code": "rule_failed", "errors":
+  {field: message}}` naming the fields the rule reads, on create and update.
+- On upserts, rules see the fields sent (the stored row isn't loaded first).
+
+### `stamp_when`
+
+A timestamp kept in step with a condition: set to the current time when the
+condition becomes true, cleared when it becomes false. Clients can't set it.
+
+```yaml
+fields:
+  - {name: done, type: boolean, default: false}
+  - {name: completed_at, type: timestamptz, nullable: true, stamp_when: done}
+  - {name: status, type: enum, values: [draft, published]}
+  - {name: published_at, type: timestamptz, nullable: true, stamp_when: status == "published"}
+```
+
+The field must be a nullable `timestamptz` or `date`; the condition uses the
+rule syntax. It's evaluated only when a write changes a field it reads, so
+saving an already-done task keeps its `completed_at`.
 
 ## Immutable fields
 

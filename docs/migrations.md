@@ -211,7 +211,7 @@ yaypi migrate down --steps 1
 - **Locked.** `up` and `down` hold a database lock (`pg_advisory_lock` on Postgres, `GET_LOCK` on MySQL), so two deploy jobs or replicas never apply migrations at the same time.
 - **Drift-checked.** `up` verifies the checksums of applied files first and refuses to continue if one was edited. Use `--allow-drift` only when you mean it.
 - **Driver-independent.** The runner splits files into statements itself (respecting quotes, comments and `$$` bodies), so MySQL does not need `multiStatements=true`. `BEGIN`/`COMMIT` lines in files are ignored; the runner manages the transaction.
-- **Portable defaults.** `now()` and `gen_random_uuid()` are translated to each dialect (`CURRENT_TIMESTAMP`, `(UUID())`, a SQLite expression).
+- **Portable defaults.** `default: now` and `default: uuid` (and `now()` / `gen_random_uuid()` inside `{sql: …}`) are translated to each dialect (`CURRENT_TIMESTAMP`, `(UUID())`, a SQLite expression).
 
 ## Multiple databases
 

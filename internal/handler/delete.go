@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/query"
 	"github.com/teleology-io/yayPI/internal/schema"
 )
@@ -53,7 +54,7 @@ func (f *Factory) Delete(entity *schema.Entity, opts *schema.DeleteOpts) http.Ha
 				return query.ErrNotFound
 			}
 			if f.plugins != nil {
-				if hookErr = f.plugins.BeforeDelete(r.Context(), entity.Name, idString(id)); hookErr != nil {
+				if hookErr = f.plugins.BeforeDelete(plugin.InWrite(r.Context(), dbc.Dialect, tx, before), entity.Name, idString(id)); hookErr != nil {
 					return hookErr
 				}
 			}

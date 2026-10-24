@@ -168,6 +168,9 @@ func (d *Dispatcher) WebhookVerifier(name string) (sdk.WebhookVerifyFunc, bool) 
 // extracting the authenticated subject if present.
 func buildHookContext(ctx context.Context) sdk.HookContext {
 	hCtx := sdk.HookContext{Ctx: ctx, RequestID: middleware.RequestIDFromContext(ctx)}
+	if s, ok := ctx.Value(writeScopeKey{}).(*writeScope); ok {
+		hCtx.Tx, hCtx.Before = s.tx, s.before
+	}
 	if sub := middleware.SubjectFromContext(ctx); sub != nil {
 		hCtx.Subject = &sdk.Subject{
 			ID:     sub.ID,

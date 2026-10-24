@@ -11,7 +11,7 @@ entity:
     - name: id
       type: uuid
       primary_key: true
-      default: gen_random_uuid()
+      default: uuid
 
     - name: author_id
       type: uuid
@@ -44,7 +44,7 @@ entity:
     - name: status
       type: enum
       values: [draft, published, archived]
-      default: "'draft'"
+      default: draft
 
     - name: published_at
       type: timestamptz
@@ -52,7 +52,7 @@ entity:
 
     - name: view_count
       type: bigint
-      default: "0"
+      default: 0
       nullable: false
 
     - name: metadata

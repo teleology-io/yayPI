@@ -12,7 +12,12 @@ Plugins add Go code where YAML runs out: entity lifecycle hooks (before/after cr
 | Fire an HTTP webhook on lifecycle events | `kind: webhooks` YAML file — no code needed |
 | Hash passwords before saving | Custom plugin (or use the built-in auth `/register` endpoint) |
 | Write an audit log | `audit: true` on the entity — no code needed |
-| Validate business rules that can't be expressed in field constraints | Custom plugin |
+| Range, length, pattern or format checks | `validate:` on the field — no code needed |
+| One field compared with another (end after start) | entity `rules:` — no code needed |
+| Stamp a time when a flag or status changes (`completed_at`) | `stamp_when:` on the field — no code needed |
+| Let users edit only their own rows (profile, settings) | CRUD `update` + `row_access` + `allowed_fields` — no code needed |
+| Validate business rules a comparison can't express | Custom plugin (`sdk.Hooks`; `c.Before` + `c.Tx` for the stored row) |
+| Read rows on a caller's behalf in plugin code | `Store.Read` (applies `row_access`), not `Store.Query` |
 | Bulk export/import, a report, a file upload — anything that isn't one CRUD row | Custom route plugin ([below](#custom-route-plugins)) |
 | Complex data transformation before a write | Custom plugin |
 | Pull data from a third-party API on a schedule | Plugin job (`handler: plugin`) + `Store.Upsert` ([Jobs](jobs.md#plugin-handler)) |
@@ -128,7 +133,20 @@ type Plugin interface {
 
 #### `EntityHookPlugin`
 
-To handle entity lifecycle events, also implement `EntityHookPlugin`:
+To handle entity lifecycle events, register plain functions for one entity:
+
+```go
+s.RegisterHooks("Event", sdk.Hooks{
+    BeforeUpdate: func(c sdk.HookContext, id string, data map[string]any) (map[string]any, error) {
+        // c.Before is the stored row; c.Tx the write's transaction.
+        return data, nil
+    },
+})
+```
+
+Only the functions you set run. Or implement `EntityHookPlugin` (embed
+`sdk.NoHooks` to get no-op versions of the hooks you don't need) and
+register it with `s.RegisterHook(entity, p)`:
 
 ```go
 type EntityHookPlugin interface {
@@ -200,6 +218,7 @@ type Store interface {
     QuoteIdent(name string) string
     Query(ctx, sql string, args ...any) ([]map[string]any, error)  // $1, $2 on every dialect
     Exec(ctx, sql string, args ...any) (int64, error)
+    Read(ctx, req ReadRequest) ([]map[string]any, error)           // rows as a list endpoint serves them to a subject
     WithTx(ctx, fn func(tx Tx) error) error
     Write(ctx, reqs ...WriteRequest) ([]WriteResult, error)        // create | update | upsert | delete
     Upsert(ctx, entity string, rows ...map[string]any) ([]WriteResult, error)
@@ -209,7 +228,19 @@ type Store interface {
 ```
 
 - **Prefer `Write` / `Upsert` for entity data.** They run the same validation, hooks, audit log and outbound webhooks as the REST API, in one transaction per call. `upsert` matches the entity's [`natural_key`](entities.md#natural-keys-and-upserts); `update`/`delete` take a `Key` (primary key or natural key). Without a `Subject` (or with one that has no `Role`) a write is a trusted system write; with a role, field `write_roles` apply.
-- **Raw SQL** uses `$1, $2` placeholders on every database (rewritten for MySQL/SQLite); quote identifiers with `QuoteIdent`.
+- **Reading for a caller: `Read`.** It returns an entity's rows the way one of its list endpoints serves them to `req.Subject`: that endpoint's `row_access`, the tenant scope and field visibility (`omit_response`, `read_roles`) all apply, so a plugin can't leak another user's rows by forgetting a `WHERE owner_id = …`.
+
+  ```go
+  rows, err := store.Read(c.Ctx, sdk.ReadRequest{
+      Entity: "Cycle", Subject: c.Subject,
+      Via:    "GET /cycles",                       // optional when the entity has one list endpoint
+      Where:  map[string]any{"starts_at[gte]": from, "paused": false},  // list-filter syntax
+      Sort:   "-starts_at", Limit: 100,           // default primary key; limit ≤ 1000
+  })
+  ```
+
+- **Raw SQL** (`Query`/`Exec`) applies no access rules: use it for system work (jobs, reports), not on a caller's behalf. `$1, $2` placeholders work on every database (rewritten for MySQL/SQLite); quote identifiers with `QuoteIdent`.
+- **Inside an entity hook**, `Query`, `Exec`, `Read` and `WithTx` called with the hook's `Ctx` run in the write's own transaction (a second connection would deadlock a one-connection SQLite pool, and wouldn't see the write). `Write` can't be nested in a Before* hook; write through `HookContext.Tx` or in an After* hook.
 - **Cursors** remember where an incremental sync stopped (`source` + `key` → string). The `yaypi_sync_cursors` table is created when any plugin is listed under `plugins:` in `yaypi.yaml`.
 - Invalid writes come back as `sdk.Permanent`, so a job or webhook handler that returns them unchanged isn't retried.
 
@@ -235,7 +266,11 @@ type HookContext struct {
     Ctx       context.Context
     RequestID string
     Subject   *Subject        // authenticated user, nil if unauthenticated
+    Tx        Tx              // BeforeUpdate/BeforeDelete: the write's transaction (nil elsewhere)
+    Before    map[string]any  // BeforeUpdate/BeforeDelete: the stored row, column names (nil elsewhere)
 }
+
+// sdk.Reject(422, "End must be after start") builds one.
 
 type Subject struct {
     ID     string
@@ -244,7 +279,8 @@ type Subject struct {
     Tenant string
 }
 
-// Return from a Before* hook to reject the request with a specific status.
+// Return from a Before* hook to reject the request with a specific status
+// (sdk.Reject(status, msg) is the short form).
 type HookError struct {
     Status  int               // e.g. 422
     Message string            // returned as "error"
@@ -258,11 +294,21 @@ type Logger interface {
 }
 
 type RouteContext struct {
-    Ctx      context.Context
-    Subject  *Subject          // authenticated user, nil if unauthenticated
-    Request  *http.Request
-    Response http.ResponseWriter
+    Ctx       context.Context
+    Subject   *Subject          // authenticated user, nil if unauthenticated
+    Request   *http.Request
+    Response  http.ResponseWriter
+    RequestID string
+    Params    map[string]any    // declared `params`, checked and typed
+    Body      map[string]any    // declared `body`, checked and typed
 }
+
+// Answering in yayPi's envelopes:
+//   c.Data(v)            200 {"data": v}
+//   c.Created(v)         201 {"data": v}
+//   c.JSON(status, v)    anything else
+//   c.Error(status, msg) {"error", "code", "request_id"}
+//   c.Decode(&v)         an undeclared JSON body
 
 type RouteHandlerFunc func(RouteContext)
 ```
@@ -273,10 +319,12 @@ type RouteHandlerFunc func(RouteContext)
 |---|---|---|---|
 | `BeforeCreate` | After validation, before INSERT | Yes — return modified map | Aborts the operation |
 | `AfterCreate` | After the transaction commits | No | Logged only |
-| `BeforeUpdate` | Inside the transaction, after the row is found, locked and access-checked | Yes — return modified map | Aborts and rolls back |
+| `BeforeUpdate` | Inside the transaction, after the row is found, locked and access-checked; gets `Tx` and `Before` | Yes — return modified map | Aborts and rolls back |
 | `AfterUpdate` | After commit | No | Logged only |
-| `BeforeDelete` | Inside the transaction, after the row is found and access-checked | No | Aborts and rolls back |
+| `BeforeDelete` | Inside the transaction, after the row is found and access-checked; gets `Tx` and `Before` | No | Aborts and rolls back |
 | `AfterDelete` | After commit | No | Logged only |
+
+**Cross-field checks need no hook**: declare entity [`rules`](entities.md#rules) (`ends_at > starts_at`) and [`stamp_when`](entities.md#stamp_when) fields; they run after the Before* hooks, against the row as it will be stored. Use a hook for checks a comparison can't express, merging `c.Before` with `data` to see the whole row on partial updates.
 
 **Before hooks** that return an error cancel the operation. Return `&sdk.HookError{Status: 422, Message: "…", Code: "…"}` to send that status and message to the client. Any other error becomes a generic 500, and its text is only logged. `BeforeUpdate`/`BeforeDelete` never run for rows that don't exist or that the caller can't access.
 
@@ -493,6 +541,59 @@ endpoints:
     auth:
       require: true
 ```
+
+### Declaring a route's contract
+
+A route that takes input or returns JSON should declare it. yayPi then
+checks the input before the handler runs (same type checks and `validate`
+rules as CRUD fields; a failure is the standard 400 with per-field
+`errors`), hands the handler typed values, and documents the route in the
+OpenAPI spec, so typed clients (walm `op:` requests) are checked against it.
+
+```yaml
+  - path: /calendar
+    method: GET
+    entity: Event
+    handler: cal.view
+    operation_id: calendarView         # default: the handler key ("view")
+    params:                            # query parameters: name: type, or a mapping
+      date: {type: date, required: true}
+      limit: {type: integer, validate: {min: 1, max: 100}}
+      busy: boolean
+    response: {list: Event}            # data: [Event]
+
+  - path: /cycles/{id}/doses
+    method: POST
+    entity: Cycle
+    handler: cal.dose
+    body:                              # JSON body fields; unknown keys are refused
+      at: {type: timestamptz, required: true}
+      taken: boolean
+    response: {one: {fields: {ok: boolean}}}   # data: {ok: …}; or {one: Dose}; or {status: 204}
+```
+
+```go
+func (p *plugin) view(c sdk.RouteContext) {
+    day := c.Params["date"].(string)            // "YYYY-MM-DD", present: required
+    limit, _ := c.Params["limit"].(int64)       // absent when not sent
+    events, err := p.store.Read(c.Ctx, sdk.ReadRequest{Entity: "Event", Subject: c.Subject,
+        Where: map[string]any{"starts_at[gte]": day + "T00:00:00Z", "starts_at[lt]": nextDay(day)},
+        Sort:  "starts_at", Limit: int(limit)})
+    if err != nil {
+        c.Error(500, "could not load the calendar")
+        return
+    }
+    c.Data(events)                              // 200 {"data": [...]}
+}
+```
+
+Field types are the entity field types; values arrive as `int64`, `float64`,
+`bool`, `string` (`date` as `YYYY-MM-DD`, `decimal` as its exact string),
+`time.Time` for `timestamptz`, decoded JSON for `jsonb`/`array`. Undeclared
+query parameters are ignored. A route without declarations works as before
+(read `Request` or `c.Decode(&v)`), and is listed in the spec without
+input or response schemas. `response.status` documents the success status
+(default 200); errors always use the standard envelope.
 
 **Wiring in `main.go`** — `RegisterRoutes` instead of `RegisterHook`:
 

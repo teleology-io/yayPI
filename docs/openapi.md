@@ -141,6 +141,17 @@ For each CRUD operation on each included endpoint:
 | `replace` | PUT | `/path/{id}` | Same as `update` |
 | `delete` | DELETE | `/path/{id}` | `If-Match` header; 204, 404, 412 |
 
+**Custom routes** (`method` + `handler`) are documented from their declared
+contract: `operation_id` (default: the handler key), path parameters, typed
+`params` as query parameters (required ones marked), `body` as the request
+body, and `response` as `{"data": …}` (an entity `$ref`, an object of
+`fields`, or an array of either; `status` sets the success code). A route
+without declarations is listed with no input or response schema. See
+[Declaring a route's contract](plugins.md#declaring-a-routes-contract).
+
+Literal field defaults appear as `default` in entity and body schemas;
+`stamp_when` fields are left out of request bodies (server-managed).
+
 With a `kind: auth` file, the enabled auth routes are documented too, under
 the `Auth` tag and the configured `base_path`: `register`, `login`, `me`,
 `refresh`/`logout`/`logout-all`, `password/*`, `verify-email*` and the OAuth2

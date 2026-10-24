@@ -2,6 +2,13 @@
 
 yayPi is a **YAML-driven REST API framework** written in Go. YAML config files define entities (database tables), endpoints (REST routes), auth, jobs, seeds, emails, webhooks, and policies — the framework compiles them into a running HTTP server with no hand-written Go code required.
 
+> **Building an app with yayPi** (not changing yayPi itself)? Read
+> [`.ai/building-apps.md`](.ai/building-apps.md) before writing any Go: most
+> plugin code agents write duplicates YAML features (validation, cross-field
+> rules, owner filters, timestamps, typed custom routes) and loses access
+> rules or OpenAPI coverage on the way. Never patch the framework to get an
+> app working; record the limit instead.
+
 ## AI context directory
 
 Full structured context for AI assistants lives in [`.ai/`](.ai/):
@@ -9,6 +16,7 @@ Full structured context for AI assistants lives in [`.ai/`](.ai/):
 | File | Contents |
 |---|---|
 | [`.ai/overview.md`](.ai/overview.md) | Architecture, request flow, package map, design decisions |
+| [`.ai/building-apps.md`](.ai/building-apps.md) | Building apps: "about to write Go for X? use this YAML instead", and a done checklist |
 | [`.ai/config-reference.md`](.ai/config-reference.md) | Every YAML field for all file kinds (`entity`, `endpoints`, `auth`, `jobs`, `seed`, `email`, `webhooks`) |
 | [`.ai/patterns.md`](.ai/patterns.md) | Copy-paste YAML patterns for common use cases |
 

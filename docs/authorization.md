@@ -293,7 +293,7 @@ Injects a SQL `WHERE` fragment so users only see rows they're allowed to access.
 
 **Opt-in:** if `row_access` is omitted, all rows are accessible. If `row_access` is defined but no rule matches the current subject, the request returns **403**.
 
-Use `when: "*"` as a catch-all to avoid accidental 403s for any role you don't explicitly restrict.
+Use `when: "*"` as a catch-all to avoid accidental 403s for any role you don't explicitly restrict. Strings in conditions take double or single quotes (`subject.role == "admin"` or `subject.role == 'admin'`).
 
 ```yaml
 list:

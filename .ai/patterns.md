@@ -303,7 +303,7 @@ entity:
     - name: id
       type: uuid
       primary_key: true
-      default: gen_random_uuid()
+      default: uuid
     - name: token
       type: string
       length: 64

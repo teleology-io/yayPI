@@ -6,7 +6,6 @@ package store
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -15,8 +14,9 @@ import (
 	"github.com/teleology-io/yayPI/internal/db"
 	"github.com/teleology-io/yayPI/internal/handler"
 	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/plugin"
+	"github.com/teleology-io/yayPI/internal/rawsql"
 	"github.com/teleology-io/yayPI/internal/schema"
-	"github.com/teleology-io/yayPI/internal/timefmt"
 	"github.com/teleology-io/yayPI/pkg/sdk"
 )
 
@@ -41,23 +41,32 @@ func (s *Store) Dialect() string { return s.db.Dialect.Name() }
 // QuoteIdent implements sdk.Store.
 func (s *Store) QuoteIdent(name string) string { return s.db.Dialect.QuoteIdent(name) }
 
-type querier interface {
-	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
-	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+// on returns where plugin SQL runs: inside an entity hook, the write's own
+// transaction (a second connection would deadlock a one-connection pool and
+// wouldn't see the write); otherwise the database.
+func (s *Store) on(ctx context.Context) rawsql.Querier {
+	if tx := plugin.WriteTx(ctx); tx != nil {
+		return tx
+	}
+	return s.db.SQL
 }
 
 // Query implements sdk.Store.
 func (s *Store) Query(ctx context.Context, q string, args ...any) ([]map[string]any, error) {
-	return s.query(ctx, s.db.SQL, q, args)
+	return rawsql.Query(ctx, s.db.Dialect, s.on(ctx), q, args)
 }
 
 // Exec implements sdk.Store.
 func (s *Store) Exec(ctx context.Context, q string, args ...any) (int64, error) {
-	return s.exec(ctx, s.db.SQL, q, args)
+	return rawsql.Exec(ctx, s.db.Dialect, s.on(ctx), q, args)
 }
 
-// WithTx implements sdk.Store.
+// WithTx implements sdk.Store. Inside an entity hook fn runs in the write's
+// transaction (committed with the write).
 func (s *Store) WithTx(ctx context.Context, fn func(tx sdk.Tx) error) (err error) {
+	if tx := plugin.WriteTx(ctx); tx != nil {
+		return fn(rawsql.Tx(s.db.Dialect, tx))
+	}
 	tx, err := s.db.SQL.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
@@ -71,84 +80,23 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx sdk.Tx) error) (err error
 			_ = tx.Rollback()
 		}
 	}()
-	if err = fn(txWrap{s: s, tx: tx}); err != nil {
+	if err = fn(rawsql.Tx(s.db.Dialect, tx)); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-type txWrap struct {
-	s  *Store
-	tx *sql.Tx
-}
-
-func (t txWrap) Query(ctx context.Context, q string, args ...any) ([]map[string]any, error) {
-	return t.s.query(ctx, t.tx, q, args)
-}
-
-func (t txWrap) Exec(ctx context.Context, q string, args ...any) (int64, error) {
-	return t.s.exec(ctx, t.tx, q, args)
-}
-
-func (s *Store) query(ctx context.Context, x querier, q string, args []any) ([]map[string]any, error) {
-	rows, err := x.QueryContext(ctx, s.db.Dialect.Rebind(q), s.bind(args)...)
-	if err != nil {
-		return nil, err
+// Read implements sdk.Store. Invalid requests come back as sdk.Permanent.
+func (s *Store) Read(ctx context.Context, req sdk.ReadRequest) ([]map[string]any, error) {
+	hr := handler.ReadRequest{Entity: req.Entity, Via: req.Via, Where: req.Where, Sort: req.Sort, Limit: req.Limit}
+	if req.Subject != nil {
+		hr.Subject = &middleware.Subject{ID: req.Subject.ID, Role: req.Subject.Role, Email: req.Subject.Email, Tenant: req.Subject.Tenant}
 	}
-	defer rows.Close()
-	cols, err := rows.Columns()
-	if err != nil {
-		return nil, err
+	rows, err := s.writer.Read(ctx, hr)
+	if errors.Is(err, handler.ErrInvalidRead) {
+		return nil, sdk.Permanent(err)
 	}
-	out := []map[string]any{}
-	for rows.Next() {
-		vals := make([]any, len(cols))
-		ptrs := make([]any, len(cols))
-		for i := range vals {
-			ptrs[i] = &vals[i]
-		}
-		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
-		}
-		row := make(map[string]any, len(cols))
-		for i, c := range cols {
-			if b, ok := vals[i].([]byte); ok {
-				row[c] = string(b)
-			} else {
-				row[c] = vals[i]
-			}
-		}
-		out = append(out, row)
-	}
-	return out, rows.Err()
-}
-
-func (s *Store) exec(ctx context.Context, x querier, q string, args []any) (int64, error) {
-	res, err := x.ExecContext(ctx, s.db.Dialect.Rebind(q), s.bind(args)...)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
-}
-
-// bind stores times on SQLite in the same sortable text form the query builder uses.
-func (s *Store) bind(args []any) []any {
-	if s.db.Dialect.Name() != "sqlite" {
-		return args
-	}
-	var out []any // copied on the first time value; the caller keeps its slice
-	for i, v := range args {
-		if t, ok := v.(time.Time); ok {
-			if out == nil {
-				out = append([]any(nil), args...)
-			}
-			out[i] = t.UTC().Format(timefmt.SQLiteLayout)
-		}
-	}
-	if out == nil {
-		return args
-	}
-	return out
+	return rows, err
 }
 
 // Write implements sdk.Store. Problems retrying cannot fix come back as sdk.Permanent.

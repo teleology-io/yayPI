@@ -8,7 +8,7 @@ entity:
     - name: id
       type: uuid
       primary_key: true
-      default: gen_random_uuid()
+      default: uuid
     - name: name
       type: string
       length: 64

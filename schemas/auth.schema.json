@@ -101,9 +101,12 @@
           "default": false
         },
         "default": {
-          "type": "string",
-          "description": "SQL default expression.",
-          "examples": ["'active'", "now()"]
+          "description": "Default value: a literal of the field's type (\"\", draft, 0, false, a date), `uuid` (generate a UUID) on uuid fields, `now` on timestamptz/date fields, or {sql: \"expression\"} for anything else.",
+          "oneOf": [
+            { "type": ["string", "number", "boolean", "null"] },
+            { "type": "object", "properties": { "sql": { "type": "string", "minLength": 1 } }, "required": ["sql"], "additionalProperties": false }
+          ],
+          "examples": ["", "draft", 0, false, "uuid", "now", { "sql": "lower(hex(randomblob(8)))" }]
         },
         "index": {
           "type": "boolean",

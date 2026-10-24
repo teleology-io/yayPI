@@ -46,6 +46,17 @@ func resolveTimeFormats(reg *Registry, sc config.RootSerializationConfig) error 
 			f.Time = tf
 		}
 	}
+	// Custom route fields use the project formats.
+	for _, ep := range reg.endpoints {
+		if ep.Contract == nil {
+			continue
+		}
+		for _, f := range ep.Contract.AllFields() {
+			if def, isTime := defaults[f.Type]; isTime {
+				f.Time, _ = timefmt.New(def, loc) // validated above
+			}
+		}
+	}
 	return nil
 }
 

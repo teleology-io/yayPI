@@ -97,6 +97,19 @@
           "type": "string",
           "description": "Timestamp or number field compared on upsert: an incoming row that is not newer than the stored one is skipped, so out-of-order deliveries never overwrite newer data. Requires natural_key.",
           "examples": ["source_updated_at"]
+        },
+        "rules": {
+          "type": "array",
+          "description": "Checks across fields, run on every create and update against the row as it will be stored. A failure is a 422 with the message; a rule whose fields are null passes.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["check"],
+            "properties": {
+              "check": { "type": "string", "description": "`a <op> b` with == != > < >= <=; operands are fields, numbers, \"strings\", true, false, null or now. A bare boolean field means `field == true`.", "examples": ["ends_at > starts_at", "seats >= 1", "status != \"archived\""] },
+              "message": { "type": "string", "examples": ["End must be after start"] }
+            }
+          }
         }
       }
     },
@@ -148,9 +161,12 @@
           "default": false
         },
         "default": {
-          "type": "string",
-          "description": "SQL default expression.",
-          "examples": ["gen_random_uuid()", "now()", "'active'"]
+          "description": "Default value: a literal of the field's type (\"\", draft, 0, false, a date), `uuid` (generate a UUID) on uuid fields, `now` on timestamptz/date fields, or {sql: \"expression\"} for anything else.",
+          "oneOf": [
+            { "type": ["string", "number", "boolean", "null"] },
+            { "type": "object", "properties": { "sql": { "type": "string", "minLength": 1 } }, "required": ["sql"], "additionalProperties": false }
+          ],
+          "examples": ["", "draft", 0, false, "uuid", "now", { "sql": "lower(hex(randomblob(8)))" }]
         },
         "index": {
           "type": "boolean",
@@ -176,6 +192,11 @@
           "type": "string",
           "description": "Set from the caller on create (client value ignored) and read-only afterwards.",
           "enum": ["subject.id", "subject.email", "subject.role", "subject.tenant"]
+        },
+        "stamp_when": {
+          "type": "string",
+          "description": "timestamptz/date fields (nullable): set to the current time when this condition becomes true, cleared when it becomes false. Server-managed. Same syntax as rules[].check.",
+          "examples": ["done", "status == \"published\""]
         }
       }
     },

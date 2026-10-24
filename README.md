@@ -146,6 +146,7 @@ See [docs/intellisense.md](docs/intellisense.md) for details and manual setup in
 | CLI Reference | [docs/cli.md](docs/cli.md) |
 | Running in Production | [docs/production.md](docs/production.md) |
 | Patterns Cookbook | [docs/patterns.md](docs/patterns.md) |
+| Building apps (AI agents: read first) | [.ai/building-apps.md](.ai/building-apps.md) |
 | YAML IntelliSense | [docs/intellisense.md](docs/intellisense.md) |
 
 ## Examples

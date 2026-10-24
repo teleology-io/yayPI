@@ -191,14 +191,16 @@ func compareValues(op, lhs, rhs string) bool {
 	return false
 }
 
-// parseString extracts a quoted string value from s (e.g. `"hello"` → `hello`).
+// parseString extracts a quoted string value from s (`"hello"` or 'hello' →
+// hello). A single-quoted value used to be taken literally, quotes included,
+// so `subject.role == 'admin'` silently never matched.
 func parseString(s, expr string) (string, error) {
 	s = strings.TrimSpace(s)
-	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {
+	if len(s) >= 2 && (s[0] == '"' && s[len(s)-1] == '"' || s[0] == '\'' && s[len(s)-1] == '\'') {
 		return s[1 : len(s)-1], nil
 	}
 	// Also accept unquoted single tokens for convenience
-	if !strings.ContainsAny(s, " \t\"[]") {
+	if !strings.ContainsAny(s, " \t\"'[]") {
 		return s, nil
 	}
 	return "", fmt.Errorf("condition %q: expected quoted string, got %q", expr, s)

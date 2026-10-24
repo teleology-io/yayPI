@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/teleology-io/yayPI/internal/middleware"
+	"github.com/teleology-io/yayPI/internal/plugin"
 	"github.com/teleology-io/yayPI/internal/query"
 	"github.com/teleology-io/yayPI/internal/schema"
 )
@@ -96,9 +97,12 @@ func (f *Factory) update(entity *schema.Entity, opts *schema.UpdateOpts, replace
 			}
 			// Hooks run only once the row is known to exist and be accessible.
 			if f.plugins != nil {
-				if data, hookErr = f.plugins.BeforeUpdate(r.Context(), entity.Name, idString(id), data); hookErr != nil {
+				if data, hookErr = f.plugins.BeforeUpdate(plugin.InWrite(r.Context(), dbc.Dialect, tx, before), entity.Name, idString(id), data); hookErr != nil {
 					return hookErr
 				}
+			}
+			if hookErr = applyRules(entity, before, data); hookErr != nil {
+				return hookErr
 			}
 			record, err = b.Update(r.Context(), id, data, row)
 			if err != nil {

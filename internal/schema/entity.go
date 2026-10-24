@@ -24,6 +24,7 @@ type Entity struct {
 	TenantColumn string   // non-empty: rows are isolated by this column = subject.tenant
 	NaturalKey   []string // columns identifying a row from an outside system; enables upsert
 	StaleGuard   string   // column: upserts only overwrite when the incoming value is newer
+	Rules        []Rule   // checks across fields on create/update
 }
 
 // FieldByName resolves a field or column name.
@@ -72,7 +73,8 @@ type Field struct {
 	Nullable     bool
 	Unique       bool
 	PrimaryKey   bool
-	Default      string
+	Default      string // SQL default expression (dialect-neutral)
+	DefaultValue any    // the literal default as a JSON value (OpenAPI); nil for expressions
 	Reference    *Reference
 	OmitResponse bool
 	OmitLog      bool
@@ -87,6 +89,8 @@ type Field struct {
 	Validate     *FieldValidation
 	DefaultFrom  string // subject.id | subject.email | subject.role — server-set on create, immutable after
 	FormatSpec   string // serialization.format as configured ("" = project default)
+	Description  string // OpenAPI description (custom route fields)
+	StampWhen    *Cond  // set to now when this turns true, cleared when false; server-managed
 	// Time is the resolved output format of a timestamptz or date field; nil otherwise.
 	Time *timefmt.Format
 }

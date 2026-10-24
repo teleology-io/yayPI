@@ -2,6 +2,7 @@ package schema
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/rs/zerolog/log"
 	"github.com/teleology-io/yayPI/internal/config"
@@ -59,6 +60,7 @@ type Endpoint struct {
 	Update          *UpdateOpts
 	Delete          *DeleteOpts
 	ExcludeFromSpec bool                    // true when spec: false
+	Contract        *RouteContract          // custom routes: declared params/body/response (nil: undeclared)
 	Specs           *EndpointSpecMembership // nil = include in all specs with no metadata override
 }
 
@@ -247,7 +249,11 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 	// Register endpoints
 	for _, ef := range cfg.Endpoints {
 		for i := range ef.Endpoints {
-			ep := buildEndpoint(&ef.Endpoints[i])
+			ep, err := buildEndpoint(&ef.Endpoints[i])
+			if err != nil {
+				d := &ef.Endpoints[i]
+				return nil, fmt.Errorf("endpoint %s %s in %s: %w", strings.ToUpper(d.Method), d.Path, ef.FilePath, err)
+			}
 			reg.RegisterEndpoint(ep)
 		}
 	}
@@ -266,6 +272,9 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 		reg.Specs = append(reg.Specs, sm)
 	}
 
+	if err := checkRouteContracts(reg); err != nil {
+		return nil, err
+	}
 	if err := resolveTimeFormats(reg, cfg.Serialization); err != nil {
 		return nil, err
 	}
@@ -273,7 +282,7 @@ func Build(cfg *config.RootConfig) (*Registry, error) {
 }
 
 // buildEndpoint converts a config.EndpointDef to a schema.Endpoint.
-func buildEndpoint(def *config.EndpointDef) *Endpoint {
+func buildEndpoint(def *config.EndpointDef) (*Endpoint, error) {
 	ep := &Endpoint{
 		Path:       def.Path,
 		Entity:     def.Entity,
@@ -311,7 +320,9 @@ func buildEndpoint(def *config.EndpointDef) *Endpoint {
 			Summary:     def.Specs.Summary,
 		}
 	}
-	return ep
+	var err error
+	ep.Contract, err = buildRouteContract(def)
+	return ep, err
 }
 
 func buildRateLimit(r *config.RateLimitConfig) *RateLimit {

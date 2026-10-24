@@ -113,6 +113,9 @@ func buildEntity(ec *config.EntityConfig) (*Entity, error) {
 		AfterDelete:  def.Hooks.AfterDelete,
 	}
 
+	if err := buildRules(entity, def); err != nil {
+		return nil, err
+	}
 	return entity, nil
 }
 
@@ -205,7 +208,6 @@ func buildField(fd config.FieldDef) (Field, error) {
 		Nullable:     fd.Nullable,
 		Unique:       fd.Unique,
 		PrimaryKey:   fd.PrimaryKey,
-		Default:      fd.Default,
 		OmitResponse: fd.Serialization.OmitResponse,
 		OmitLog:      fd.Serialization.OmitLog,
 		EnumValues:   fd.Values,
@@ -217,6 +219,10 @@ func buildField(fd config.FieldDef) (Field, error) {
 		DefaultFrom:  fd.DefaultFrom,
 		FormatSpec:   fd.Serialization.Format,
 	}
+	if f.Default, err = defaultSQL(fd.Default, ft); err != nil {
+		return Field{}, fmt.Errorf("field %q: %w", fd.Name, err)
+	}
+	f.DefaultValue = defaultValue(fd.Default, ft)
 	switch fd.DefaultFrom {
 	case "", "subject.id", "subject.email", "subject.role", "subject.tenant":
 	default:
