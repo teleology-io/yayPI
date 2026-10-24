@@ -23,6 +23,10 @@ express (domain algorithms, third-party APIs), and keep that Go small.
 | Set an owner column in a hook | `default_from: subject.id` | [entities.md](../docs/entities.md#owner-fields-default_from) |
 | Filter rows per user in a plugin with `WHERE owner_id = $1` | `Store.Read(ctx, sdk.ReadRequest{Entity, Subject, Where})`: applies the list endpoint's `row_access`, tenant scope and hidden fields | [plugins.md#store-database-access](../docs/plugins.md#store-database-access) |
 | Use `Store.Query` on a caller's behalf | `Store.Read`. `Query` is raw SQL with no access rules: system work only (jobs, reports) | same |
+| Loop over pages with `id[gt]` yourself | `Store.ReadAll` (or `Read` + `page.Next` as `Cursor`) | same |
+| Convert `time.Time` to strings before `Store` calls | Pass them as they are: `Store` accepts `time.Time` for timestamps and dates | same |
+| Split one screen's data over several custom routes (and raise rate-limit bursts for the parallel calls) | One route with a nested `response` (`events: {list: Event}`, `totals: {one: {fields: …}}`) | [plugins.md#declaring-a-routes-contract](../docs/plugins.md#declaring-a-routes-contract) |
+| Expect auto-migrate to change an existing column (nullability, type, default) | Write that migration by hand: the diff only adds | [migrations.md#changing-an-existing-column](../docs/migrations.md#changing-an-existing-column) |
 | Write a custom route without declaring its input/output | Declare `params`, `body`, `response` on the endpoint: input is checked and typed (`c.Params`, `c.Body`), and the route appears in OpenAPI so clients are checked against it | [plugins.md#declaring-a-routes-contract](../docs/plugins.md#declaring-a-routes-contract) |
 | Hand-roll `respond()` / `fail()` / JSON decoding helpers | `c.Data(v)`, `c.Created(v)`, `c.Error(status, msg)`, `c.Decode(&v)` (yayPi's envelopes) | [plugins.md](../docs/plugins.md#supporting-types) |
 | Implement all six hook methods and switch on the entity name | `s.RegisterHooks("Event", sdk.Hooks{BeforeUpdate: …})` per entity, or embed `sdk.NoHooks` | [plugins.md#entityhookplugin](../docs/plugins.md#entityhookplugin) |

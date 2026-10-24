@@ -200,8 +200,11 @@ type Store interface {
 	// Read returns an entity's rows as one of its list endpoints serves them
 	// to req.Subject: that endpoint's row_access, the tenant scope and field
 	// visibility (omit_response, read_roles) apply, so a plugin can't leak
-	// another caller's rows by forgetting a WHERE clause.
-	Read(ctx context.Context, req ReadRequest) ([]map[string]any, error)
+	// another caller's rows by forgetting a WHERE clause. One page of at
+	// most Limit (≤ 1000) rows; pass page.Next as Cursor for the next.
+	Read(ctx context.Context, req ReadRequest) (ReadPage, error)
+	// ReadAll is Read following every page: all matching rows.
+	ReadAll(ctx context.Context, req ReadRequest) ([]map[string]any, error)
 	// WithTx runs fn in a transaction on the default database (commit on nil error).
 	WithTx(ctx context.Context, fn func(tx Tx) error) error
 	// Write applies entity writes in one transaction: all or nothing.
@@ -241,9 +244,16 @@ type ReadRequest struct {
 	// Where filters as list query parameters do: "field" is equality ([]any
 	// is IN, nil IS NULL); "field[op]" takes gt gte lt lte ne in nin contains
 	// starts_with is_null, e.g. {"starts_at[gte]": from, "starts_at[lt]": to}.
-	Where map[string]any
-	Sort  string // "field" or "-field" (descending); default primary key
-	Limit int    // default and maximum 1000
+	Where  map[string]any
+	Sort   string // "field" or "-field" (descending); default primary key
+	Limit  int    // page size; default and maximum 1000
+	Cursor string // ReadPage.Next of the previous page
+}
+
+// ReadPage is one page of a Store.Read. Next is "" on the last page.
+type ReadPage struct {
+	Rows []map[string]any
+	Next string
 }
 
 // WriteResult reports what a write did: created | updated | unchanged | deleted |

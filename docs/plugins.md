@@ -231,13 +231,18 @@ type Store interface {
 - **Reading for a caller: `Read`.** It returns an entity's rows the way one of its list endpoints serves them to `req.Subject`: that endpoint's `row_access`, the tenant scope and field visibility (`omit_response`, `read_roles`) all apply, so a plugin can't leak another user's rows by forgetting a `WHERE owner_id = …`.
 
   ```go
-  rows, err := store.Read(c.Ctx, sdk.ReadRequest{
+  page, err := store.Read(c.Ctx, sdk.ReadRequest{
       Entity: "Cycle", Subject: c.Subject,
       Via:    "GET /cycles",                       // optional when the entity has one list endpoint
       Where:  map[string]any{"starts_at[gte]": from, "paused": false},  // list-filter syntax
-      Sort:   "-starts_at", Limit: 100,           // default primary key; limit ≤ 1000
+      Sort:   "-starts_at", Limit: 100,           // page size; default primary key; limit ≤ 1000
   })
+  // page.Rows; page.Next != "" → set req.Cursor = page.Next for the next page.
+  rows, err := store.ReadAll(c.Ctx, req)          // or every matching row, paging for you
   ```
+
+  Values may be Go types (`time.Time` for timestamps and dates) or their
+  JSON forms, in `Where` and in `Write`/`Upsert` data alike.
 
 - **Raw SQL** (`Query`/`Exec`) applies no access rules: use it for system work (jobs, reports), not on a caller's behalf. `$1, $2` placeholders work on every database (rewritten for MySQL/SQLite); quote identifiers with `QuoteIdent`.
 - **Inside an entity hook**, `Query`, `Exec`, `Read` and `WithTx` called with the hook's `Ctx` run in the write's own transaction (a second connection would deadlock a one-connection SQLite pool, and wouldn't see the write). `Write` can't be nested in a Before* hook; write through `HookContext.Tx` or in an After* hook.
@@ -570,7 +575,26 @@ OpenAPI spec, so typed clients (walm `op:` requests) are checked against it.
       at: {type: timestamptz, required: true}
       taken: boolean
     response: {one: {fields: {ok: boolean}}}   # data: {ok: …}; or {one: Dose}; or {status: 204}
+
+  - path: /days
+    method: GET
+    entity: Event
+    handler: cal.day
+    params:
+      date: {type: date, required: true}
+    response:                          # one request for a whole screen
+      one:
+        fields:
+          date: date
+          events: {list: Event}                                    # nested list of an entity
+          doses: {list: {fields: {at: timestamptz, taken: boolean}}}
+          totals: {one: {fields: {open: integer}}, nullable: true}
 ```
+
+Response members nest (`{one: …}` / `{list: …}`) so a screen that needs
+several lists gets them from one route; a walm app reads them with one
+`op:` request (`state` for the scalars, `lists` for the arrays). Inputs
+(`params`, `body`) stay flat.
 
 ```go
 func (p *plugin) view(c sdk.RouteContext) {
@@ -589,7 +613,8 @@ func (p *plugin) view(c sdk.RouteContext) {
 
 Field types are the entity field types; values arrive as `int64`, `float64`,
 `bool`, `string` (`date` as `YYYY-MM-DD`, `decimal` as its exact string),
-`time.Time` for `timestamptz`, decoded JSON for `jsonb`/`array`. Undeclared
+`time.Time` for `timestamptz`, decoded JSON for `jsonb`/`array`. They can be
+passed straight to `Store.Read`/`Write`. Undeclared
 query parameters are ignored. A route without declarations works as before
 (read `Request` or `c.Decode(&v)`), and is listed in the spec without
 input or response schemas. `response.status` documents the success status

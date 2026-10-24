@@ -52,8 +52,20 @@
     "RouteShape": {
       "oneOf": [
         { "type": "string", "description": "An entity name." },
-        { "type": "object", "additionalProperties": false, "required": ["fields"], "properties": { "fields": { "$ref": "#/$defs/RouteFields" } } }
+        { "type": "object", "additionalProperties": false, "required": ["fields"], "properties": { "fields": { "$ref": "#/$defs/ResponseFields" } } }
       ]
+    },
+    "ResponseFields": {
+      "type": "object",
+      "description": "Response object members: name → type, a field mapping, or a nested {one|list: Entity | {fields: …}}.",
+      "additionalProperties": {
+        "oneOf": [
+          { "$ref": "#/$defs/RouteFieldType" },
+          { "type": "object", "required": ["type"], "properties": { "type": { "$ref": "#/$defs/RouteFieldType" }, "nullable": { "type": "boolean" }, "description": { "type": "string" }, "values": { "type": "array", "items": { "type": "string" } } }, "additionalProperties": false },
+          { "type": "object", "required": ["one"], "properties": { "one": { "$ref": "#/$defs/RouteShape" }, "nullable": { "type": "boolean" }, "description": { "type": "string" } }, "additionalProperties": false },
+          { "type": "object", "required": ["list"], "properties": { "list": { "$ref": "#/$defs/RouteShape" }, "nullable": { "type": "boolean" }, "description": { "type": "string" } }, "additionalProperties": false }
+        ]
+      }
     },
     "EndpointDef": {
       "type": "object",
@@ -105,7 +117,7 @@
         },
         "response": {
           "type": "object",
-          "description": "Custom routes: what `data` holds. one: an entity name or {fields: {...}}; list: the same, as an array; status: the success status (204 has no body).",
+          "description": "Custom routes: what `data` holds. one: an entity name or {fields: {...}} (members may nest {one|list: …}); list: the same, as an array; status: the success status (204 has no body).",
           "additionalProperties": false,
           "properties": {
             "status": { "type": "integer", "minimum": 200, "maximum": 299 },

@@ -7,11 +7,15 @@ import (
 )
 
 // RouteFieldDef is one declared query parameter or body field of a custom
-// route (`params:` / `body:`). Written as `name: type` or as a mapping:
+// route (`params:` / `body:`), or a member of a response object. Written as
+// `name: type` or as a mapping:
 //
 //	params:
 //	  date: date
 //	  limit: {type: integer, validate: {min: 1, max: 100}}
+//
+// Response members may also nest: `events: {list: Event}`,
+// `totals: {one: {fields: {count: integer}}}`.
 type RouteFieldDef struct {
 	Name        string
 	Type        string            `yaml:"type"`
@@ -20,6 +24,8 @@ type RouteFieldDef struct {
 	Values      []string          `yaml:"values"` // enum
 	Description string            `yaml:"description"`
 	Validate    *FieldValidateDef `yaml:"validate"`
+	// Shape is set for a nested member ({one: …} or {list: …}).
+	Shape *RouteShapeDef `yaml:"-"`
 }
 
 // RouteFields keeps declaration order (the spec and error messages follow it).
@@ -32,10 +38,22 @@ func (f *RouteFields) UnmarshalYAML(n *yaml.Node) error {
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k, v := n.Content[i], n.Content[i+1]
 		d := RouteFieldDef{Name: k.Value}
-		switch v.Kind {
-		case yaml.ScalarNode:
+		switch {
+		case v.Kind == yaml.ScalarNode:
 			d.Type = v.Value
-		case yaml.MappingNode:
+		case v.Kind == yaml.MappingNode && (hasKey(v, "one") || hasKey(v, "list")):
+			shape, err := parseShape(v)
+			if err != nil {
+				return err
+			}
+			d.Shape = shape
+			if desc := keyValue(v, "description"); desc != nil {
+				d.Description = desc.Value
+			}
+			if nb := keyValue(v, "nullable"); nb != nil {
+				d.Nullable = nb.Value == "true"
+			}
+		case v.Kind == yaml.MappingNode:
 			type plain RouteFieldDef
 			var p plain
 			if err := v.Decode(&p); err != nil {
@@ -51,17 +69,71 @@ func (f *RouteFields) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// RouteResponseDef declares what a custom route returns in `data`: one
-// entity or object (`one:`), a list of them (`list:`), or nothing
-// (`status: 204`). `one`/`list` take an entity name or a field mapping.
-//
-//	response: {list: Event}
-//	response: {one: {fields: {ok: boolean}}}
-type RouteResponseDef struct {
-	Status int
+// RouteShapeDef is `{one: X}` or `{list: X}` where X is an entity name or
+// `{fields: {...}}` (whose members may nest again).
+type RouteShapeDef struct {
 	List   bool
 	Entity string
 	Fields RouteFields
+}
+
+func hasKey(n *yaml.Node, key string) bool { return keyValue(n, key) != nil }
+
+func keyValue(n *yaml.Node, key string) *yaml.Node {
+	for i := 0; i+1 < len(n.Content); i += 2 {
+		if n.Content[i].Value == key {
+			return n.Content[i+1]
+		}
+	}
+	return nil
+}
+
+// parseShape reads the one/list key of mapping n (other keys are the
+// caller's: status, description, nullable).
+func parseShape(n *yaml.Node) (*RouteShapeDef, error) {
+	one, list := keyValue(n, "one"), keyValue(n, "list")
+	if one != nil && list != nil {
+		return nil, fmt.Errorf("line %d: either one or list, not both", n.Line)
+	}
+	shape := &RouteShapeDef{List: list != nil}
+	v := one
+	if list != nil {
+		v = list
+	}
+	switch v.Kind {
+	case yaml.ScalarNode:
+		shape.Entity = v.Value
+	case yaml.MappingNode:
+		var m struct {
+			Fields RouteFields `yaml:"fields"`
+		}
+		if err := v.Decode(&m); err != nil {
+			return nil, err
+		}
+		if len(m.Fields) == 0 || len(v.Content) != 2 {
+			return nil, fmt.Errorf("line %d: give an entity name or {fields: {name: type}}", v.Line)
+		}
+		shape.Fields = m.Fields
+	default:
+		return nil, fmt.Errorf("line %d: give an entity name or {fields: {name: type}}", v.Line)
+	}
+	return shape, nil
+}
+
+// RouteResponseDef declares what a custom route returns in `data`: one
+// entity or object (`one:`), a list of them (`list:`), or nothing
+// (`status: 204`). Object members may nest further.
+//
+//	response: {list: Event}
+//	response:
+//	  one:
+//	    fields:
+//	      day: date
+//	      events: {list: Event}
+//	      doses: {list: {fields: {at: timestamptz, taken: boolean}}}
+type RouteResponseDef struct {
+	Status int
+	Shape  *RouteShapeDef // nil: no body declared
 	Line   int
 }
 
@@ -70,7 +142,6 @@ func (r *RouteResponseDef) UnmarshalYAML(n *yaml.Node) error {
 	if n.Kind != yaml.MappingNode {
 		return fmt.Errorf("line %d: response is a mapping ({list: Entity}, {one: Entity}, {status: 204})", n.Line)
 	}
-	var shape *yaml.Node
 	for i := 0; i+1 < len(n.Content); i += 2 {
 		k, v := n.Content[i], n.Content[i+1]
 		switch k.Value {
@@ -79,33 +150,16 @@ func (r *RouteResponseDef) UnmarshalYAML(n *yaml.Node) error {
 				return err
 			}
 		case "one", "list":
-			if shape != nil {
-				return fmt.Errorf("line %d: response takes either one or list, not both", n.Line)
-			}
-			shape, r.List = v, k.Value == "list"
 		default:
 			return fmt.Errorf("line %d: unknown response key %q (status, one, list)", k.Line, k.Value)
 		}
 	}
-	if shape == nil {
-		return nil
-	}
-	switch shape.Kind {
-	case yaml.ScalarNode:
-		r.Entity = shape.Value
-	case yaml.MappingNode:
-		var m struct {
-			Fields RouteFields `yaml:"fields"`
-		}
-		if err := shape.Decode(&m); err != nil {
+	if hasKey(n, "one") || hasKey(n, "list") {
+		shape, err := parseShape(n)
+		if err != nil {
 			return err
 		}
-		if len(m.Fields) == 0 {
-			return fmt.Errorf("line %d: give an entity name or {fields: {name: type}}", shape.Line)
-		}
-		r.Fields = m.Fields
-	default:
-		return fmt.Errorf("line %d: give an entity name or {fields: {name: type}}", shape.Line)
+		r.Shape = shape
 	}
 	return nil
 }

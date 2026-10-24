@@ -87,16 +87,30 @@ func (s *Store) WithTx(ctx context.Context, fn func(tx sdk.Tx) error) (err error
 }
 
 // Read implements sdk.Store. Invalid requests come back as sdk.Permanent.
-func (s *Store) Read(ctx context.Context, req sdk.ReadRequest) ([]map[string]any, error) {
-	hr := handler.ReadRequest{Entity: req.Entity, Via: req.Via, Where: req.Where, Sort: req.Sort, Limit: req.Limit}
+func (s *Store) Read(ctx context.Context, req sdk.ReadRequest) (sdk.ReadPage, error) {
+	p, err := s.writer.Read(ctx, readRequest(req))
+	return sdk.ReadPage{Rows: p.Rows, Next: p.Next}, readErr(err)
+}
+
+// ReadAll implements sdk.Store.
+func (s *Store) ReadAll(ctx context.Context, req sdk.ReadRequest) ([]map[string]any, error) {
+	rows, err := s.writer.ReadAll(ctx, readRequest(req))
+	return rows, readErr(err)
+}
+
+func readRequest(req sdk.ReadRequest) handler.ReadRequest {
+	hr := handler.ReadRequest{Entity: req.Entity, Via: req.Via, Where: req.Where, Sort: req.Sort, Limit: req.Limit, Cursor: req.Cursor}
 	if req.Subject != nil {
 		hr.Subject = &middleware.Subject{ID: req.Subject.ID, Role: req.Subject.Role, Email: req.Subject.Email, Tenant: req.Subject.Tenant}
 	}
-	rows, err := s.writer.Read(ctx, hr)
+	return hr
+}
+
+func readErr(err error) error {
 	if errors.Is(err, handler.ErrInvalidRead) {
-		return nil, sdk.Permanent(err)
+		return sdk.Permanent(err)
 	}
-	return rows, err
+	return err
 }
 
 // Write implements sdk.Store. Problems retrying cannot fix come back as sdk.Permanent.

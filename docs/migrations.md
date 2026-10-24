@@ -21,6 +21,10 @@ When you run `yaypi migrate generate`, the engine:
 **What is NOT auto-detected:**
 - Dropped tables or columns (the engine warns and skips)
 - Renamed tables or columns (appear as new table/column + old one still exists)
+- **Changes to an existing column**: its type, `nullable`, `default`,
+  `unique` or `references`. The diff only adds, so editing a field that
+  already exists in the database changes nothing there; write that DDL
+  yourself (see [Changing an existing column](#changing-an-existing-column)).
 
 Never auto-drops prevent accidental data loss. To drop a column, write the DDL manually.
 
@@ -273,3 +277,24 @@ COMMIT;
 ```bash
 yaypi migrate up
 ```
+
+## Changing an existing column
+
+Generated migrations only add. When you change a field that already exists
+in a database (make it nullable, change its type or default, convert legacy
+data), write the migration by hand: add a `{timestamp}_{name}.up.sql` /
+`.down.sql` pair to the migrations directory (see
+[naming](#migration-file-format)) with the DDL and any data conversion. It is
+applied, tracked and checksummed like a generated one.
+
+```sql
+-- 20261024120000_task_completed_at_nullable.up.sql  (PostgreSQL)
+ALTER TABLE "tasks" ALTER COLUMN "completed_at" DROP NOT NULL;
+UPDATE "tasks" SET "completed_at" = NULL WHERE "completed_at" = '';   -- legacy text data
+ALTER TABLE "tasks" ALTER COLUMN "status" SET DEFAULT 'draft';
+```
+
+SQLite can't alter a column in place: rebuild the table in one transaction
+(`CREATE TABLE new … ; INSERT INTO new SELECT … ; DROP TABLE old ; ALTER
+TABLE new RENAME TO old`). After the migration, `yaypi migrate generate`
+should report nothing to do for that table.

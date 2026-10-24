@@ -68,22 +68,44 @@ func buildCustomOperation(ep *schema.Endpoint, entity *schema.Entity, projectNam
 		status = r.Status
 	}
 	resp := Response{Description: http.StatusText(status)}
-	if r := c.Response; r != nil && status != http.StatusNoContent && (r.Entity != "" || len(r.Fields) > 0) {
-		item := &Schema{Ref: "#/components/schemas/" + r.Entity}
-		if r.Entity == "" {
-			item = objectSchema(r.Fields)
-		}
-		data := item
-		if r.List {
-			data = &Schema{Type: "array", Items: item}
-		}
+	if r := c.Response; r != nil && status != http.StatusNoContent && r.Shape != nil {
 		resp.Content = map[string]MediaType{"application/json": {Schema: &Schema{
-			Type: "object", Properties: map[string]*Schema{"data": data}, Required: []string{"data"},
+			Type: "object", Properties: map[string]*Schema{"data": shapeSchema(r.Shape)}, Required: []string{"data"},
 		}}}
 	}
 	op.Responses[strconv.Itoa(status)] = resp
 	addErrorResponses(op, "custom", authed)
 	return op
+}
+
+// shapeSchema documents a response shape: an entity $ref or an object, or
+// an array of either; object members may nest.
+func shapeSchema(sh *schema.RouteShape) *Schema {
+	item := &Schema{Ref: "#/components/schemas/" + sh.Entity}
+	if sh.Entity == "" {
+		item = &Schema{Type: "object", Properties: map[string]*Schema{}}
+		for i := range sh.Members {
+			m := &sh.Members[i]
+			var p *Schema
+			if m.Shape != nil {
+				p = shapeSchema(m.Shape)
+			} else {
+				p = fieldSchemaFor(&m.Field)
+			}
+			if m.Field.Description != "" {
+				p.Description = m.Field.Description
+			}
+			p.Nullable = m.Field.Nullable
+			item.Properties[m.Field.Name] = p
+			if !m.Field.Nullable {
+				item.Required = append(item.Required, m.Field.Name) // a response always carries its members
+			}
+		}
+	}
+	if sh.List {
+		return &Schema{Type: "array", Items: item}
+	}
+	return item
 }
 
 // objectSchema is an object with the given fields (required as declared).

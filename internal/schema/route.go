@@ -20,12 +20,23 @@ type RouteContract struct {
 // RouteResponse is what the route returns in `data` (nil Response: undeclared).
 type RouteResponse struct {
 	Status int
-	List   bool
-	Entity string  // entity schema, or
-	Fields []Field // an object with these fields
+	Shape  *RouteShape // nil: no body
 }
 
-// AllFields lists every declared field (for time formats).
+// RouteShape is one entity or object, or a list of them.
+type RouteShape struct {
+	List    bool
+	Entity  string        // entity schema, or
+	Members []RouteMember // an object with these members
+}
+
+// RouteMember is a scalar field or a nested shape of a response object.
+type RouteMember struct {
+	Field Field       // name, type, nullable, description (Type unset when Shape is)
+	Shape *RouteShape // nested {one|list: …}; nil for a scalar
+}
+
+// AllFields lists every declared scalar field (for time formats).
 func (c *RouteContract) AllFields() []*Field {
 	var out []*Field
 	for _, fs := range [][]Field{c.Params, c.Body} {
@@ -34,9 +45,36 @@ func (c *RouteContract) AllFields() []*Field {
 		}
 	}
 	if c.Response != nil {
-		for i := range c.Response.Fields {
-			out = append(out, &c.Response.Fields[i])
+		out = c.Response.Shape.fields(out)
+	}
+	return out
+}
+
+func (s *RouteShape) fields(out []*Field) []*Field {
+	if s == nil {
+		return out
+	}
+	for i := range s.Members {
+		m := &s.Members[i]
+		if m.Shape != nil {
+			out = m.Shape.fields(out)
+		} else {
+			out = append(out, &m.Field)
 		}
+	}
+	return out
+}
+
+// entities lists the entity names a shape refers to.
+func (s *RouteShape) entities(out []string) []string {
+	if s == nil {
+		return out
+	}
+	if s.Entity != "" {
+		out = append(out, s.Entity)
+	}
+	for _, m := range s.Members {
+		out = m.Shape.entities(out)
 	}
 	return out
 }
@@ -49,6 +87,9 @@ func buildRouteFields(defs config.RouteFields, where string) ([]Field, error) {
 			return nil, fmt.Errorf("%s: %q declared twice", where, d.Name)
 		}
 		seen[d.Name] = true
+		if d.Shape != nil {
+			return nil, fmt.Errorf("%s: %q: nested one/list members are for responses; input fields are scalars (or jsonb)", where, d.Name)
+		}
 		v := d.Validate
 		if d.Required {
 			c := config.FieldValidateDef{}
@@ -93,28 +134,58 @@ func buildRouteContract(def *config.EndpointDef) (*RouteContract, error) {
 		}
 	}
 	if r := def.Response; r != nil {
-		c.Response = &RouteResponse{Status: r.Status, List: r.List, Entity: r.Entity}
-		if c.Response.Fields, err = buildRouteFields(r.Fields, "response"); err != nil {
-			return nil, err
+		c.Response = &RouteResponse{Status: r.Status}
+		if r.Shape != nil {
+			if c.Response.Shape, err = buildShape(r.Shape, "response"); err != nil {
+				return nil, err
+			}
 		}
 		if r.Status != 0 && (r.Status < 200 || r.Status > 299) {
 			return nil, fmt.Errorf("response.status %d: declare the success status (2xx); errors use the standard envelope", r.Status)
 		}
-		if r.Status == http.StatusNoContent && (r.Entity != "" || len(r.Fields) > 0) {
+		if r.Status == http.StatusNoContent && r.Shape != nil {
 			return nil, fmt.Errorf("response: status 204 has no body")
 		}
 	}
 	return c, nil
 }
 
+func buildShape(d *config.RouteShapeDef, where string) (*RouteShape, error) {
+	s := &RouteShape{List: d.List, Entity: d.Entity}
+	seen := map[string]bool{}
+	for _, m := range d.Fields {
+		at := where + "." + m.Name
+		if seen[m.Name] {
+			return nil, fmt.Errorf("%s declared twice", at)
+		}
+		seen[m.Name] = true
+		if m.Shape != nil {
+			inner, err := buildShape(m.Shape, at)
+			if err != nil {
+				return nil, err
+			}
+			s.Members = append(s.Members, RouteMember{Field: Field{Name: m.Name, ColumnName: m.Name, Nullable: m.Nullable, Description: m.Description}, Shape: inner})
+			continue
+		}
+		fs, err := buildRouteFields(config.RouteFields{m}, where)
+		if err != nil {
+			return nil, err
+		}
+		s.Members = append(s.Members, RouteMember{Field: fs[0]})
+	}
+	return s, nil
+}
+
 // checkRouteContracts verifies references once every entity is registered.
 func checkRouteContracts(reg *Registry) error {
 	for _, ep := range reg.endpoints {
-		if ep.Contract == nil || ep.Contract.Response == nil || ep.Contract.Response.Entity == "" {
+		if ep.Contract == nil || ep.Contract.Response == nil {
 			continue
 		}
-		if _, ok := reg.GetEntity(ep.Contract.Response.Entity); !ok {
-			return fmt.Errorf("endpoint %s %s: response entity %q is not defined", strings.ToUpper(ep.Method), ep.Path, ep.Contract.Response.Entity)
+		for _, name := range ep.Contract.Response.Shape.entities(nil) {
+			if _, ok := reg.GetEntity(name); !ok {
+				return fmt.Errorf("endpoint %s %s: response entity %q is not defined", strings.ToUpper(ep.Method), ep.Path, name)
+			}
 		}
 	}
 	return nil

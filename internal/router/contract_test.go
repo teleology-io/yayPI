@@ -46,6 +46,17 @@ endpoints:
       at: timestamptz
       note: {type: string, validate: {max_length: 10}}
     response: {one: {fields: {ok: boolean, count: integer}}}
+  - path: /days/{date}
+    method: GET
+    entity: Event
+    handler: cal.day
+    response:
+      one:
+        fields:
+          date: date
+          events: {list: Event}
+          doses: {list: {fields: {at: timestamptz, taken: boolean}}}
+          totals: {one: {fields: {count: integer}}, nullable: true}
 `
 
 func contractRegistry(t *testing.T) *schema.Registry {
@@ -74,6 +85,7 @@ func TestCustomRouteInputIsCheckedAndTyped(t *testing.T) {
 	d := plugin.NewDispatcher()
 	d.RegisterRoutePlugin(fakeRoutePlugin{name: "cal", handlers: map[string]sdk.RouteHandlerFunc{
 		"view": func(c sdk.RouteContext) { got = c; c.Data([]any{}) },
+		"day":  func(c sdk.RouteContext) { c.Data(map[string]any{}) },
 		"rsvp": func(c sdk.RouteContext) {
 			got = c
 			if c.Body["going"] == false {
@@ -166,6 +178,26 @@ func TestCustomRoutesAreInTheSpec(t *testing.T) {
 	}
 }
 
+func TestNestedResponsesAreInTheSpec(t *testing.T) {
+	spec := openapi.Build(contractRegistry(t), "p", false)["api"]
+	data := spec.Paths["/days/{date}"].Get.Responses["200"].Content["application/json"].Schema.Properties["data"]
+	if data.Type != "object" || data.Properties["date"].Format != "date" {
+		t.Fatalf("day: %+v", data)
+	}
+	if ev := data.Properties["events"]; ev.Type != "array" || ev.Items.Ref != "#/components/schemas/Event" {
+		t.Errorf("events: %+v", ev)
+	}
+	if d := data.Properties["doses"]; d.Type != "array" || d.Items.Properties["taken"].Type != "boolean" {
+		t.Errorf("doses: %+v", d)
+	}
+	if tot := data.Properties["totals"]; tot.Type != "object" || !tot.Nullable || tot.Properties["count"].Type != "integer" {
+		t.Errorf("totals: %+v", tot)
+	}
+	if len(data.Required) != 3 {
+		t.Errorf("required members: %v", data.Required)
+	}
+}
+
 func TestContractErrorsAreReported(t *testing.T) {
 	bad := map[string]string{
 		"crud with params":   "  - {path: /x, entity: Event, crud: [list], params: {a: string}}",
@@ -175,6 +207,8 @@ func TestContractErrorsAreReported(t *testing.T) {
 		"error status":       "  - {path: /x, method: GET, entity: Event, handler: a.b, response: {status: 404}}",
 		"one and list":       "  - {path: /x, method: GET, entity: Event, handler: a.b, response: {one: Event, list: Event}}",
 		"204 with a payload": "  - {path: /x, method: POST, entity: Event, handler: a.b, response: {status: 204, one: Event}}",
+		"nested input":       "  - {path: /x, method: POST, entity: Event, handler: a.b, body: {a: {list: Event}}}",
+		"nested unknown":     "  - {path: /x, method: GET, entity: Event, handler: a.b, response: {one: {fields: {a: {list: Nope}}}}}",
 	}
 	var ent config.EntityDef
 	_ = yaml.Unmarshal([]byte(contractEntity), &ent)

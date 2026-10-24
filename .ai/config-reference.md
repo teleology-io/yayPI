@@ -318,14 +318,16 @@ endpoints:
       limit: { type: integer, validate: { min: 1, max: 100 } }
     body:                       # POST/PUT/PATCH: JSON fields (c.Body); unknown keys → 400
       note: string
-    response: { list: Event }   # data shape: {one|list: Entity | {fields: {...}}}, or {status: 204}
+    response: { list: Event }   # data shape: {one|list: Entity | {fields: {...}}}, or {status: 204};
+                                # object members may nest: events: {list: Event}
 ```
 
 Custom routes appear in OpenAPI from these declarations (walm `op:` requests
 are checked against them). Plugins answer with `c.Data(v)` / `c.Created(v)` /
 `c.Error(status, msg)` and read on a caller's behalf with
-`Store.Read(ctx, sdk.ReadRequest{Entity, Subject, Where: {"starts_at[gte]": t}})`,
-which applies the list endpoint's `row_access`, tenant scope and field rules.
+`Store.Read(ctx, sdk.ReadRequest{Entity, Subject, Where: {"starts_at[gte]": t}})`
+(a page; `Next` → `Cursor`) or `Store.ReadAll`, which apply the list
+endpoint's `row_access`, tenant scope and field rules.
 
 ### CRUD → HTTP mapping
 

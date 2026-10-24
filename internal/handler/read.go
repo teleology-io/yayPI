@@ -25,9 +25,16 @@ type ReadRequest struct {
 	// Where filters like list query parameters: "field" (equality; []any is
 	// IN, nil IS NULL) or "field[op]" with gt gte lt lte ne in nin contains
 	// starts_with is_null.
-	Where map[string]any
-	Sort  string // "field" or "-field"; default primary key
-	Limit int    // default and cap: 1000
+	Where  map[string]any
+	Sort   string // "field" or "-field"; default primary key
+	Limit  int    // page size; default and cap: 1000
+	Cursor string // ReadPage.Next of the previous page
+}
+
+// ReadPage is one page of a Read; Next is "" on the last page.
+type ReadPage struct {
+	Rows []map[string]any
+	Next string
 }
 
 // ErrInvalidRead marks a read that can't be served as asked.
@@ -39,37 +46,59 @@ const maxReadRows = 1000
 // endpoint: its row_access rules, the tenant scope, and field visibility
 // (omit_response, read_roles) apply exactly as for an HTTP list. Inside an
 // entity hook it reads in the write's transaction.
-func (f *Factory) Read(ctx context.Context, req ReadRequest) ([]map[string]any, error) {
+func (f *Factory) Read(ctx context.Context, req ReadRequest) (ReadPage, error) {
+	rows, next, err := f.read(ctx, req)
+	return ReadPage{Rows: rows, Next: next}, err
+}
+
+// ReadAll follows Read's pages and returns every matching row (Limit is
+// the page size).
+func (f *Factory) ReadAll(ctx context.Context, req ReadRequest) ([]map[string]any, error) {
+	var all []map[string]any
+	for {
+		rows, next, err := f.read(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, rows...)
+		if next == "" {
+			return all, nil
+		}
+		req.Cursor = next
+	}
+}
+
+func (f *Factory) read(ctx context.Context, req ReadRequest) ([]map[string]any, string, error) {
 	entity, ok := f.registry.GetEntity(req.Entity)
 	if !ok || entity.Internal {
-		return nil, fmt.Errorf("%w: unknown entity %q", ErrInvalidRead, req.Entity)
+		return nil, "", fmt.Errorf("%w: unknown entity %q", ErrInvalidRead, req.Entity)
 	}
 	if req.Subject == nil {
-		return nil, fmt.Errorf("%w: Read applies a subject's rules; pass Subject (use Query for system reads)", ErrInvalidRead)
+		return nil, "", fmt.Errorf("%w: Read applies a subject's rules; pass Subject (use Query for system reads)", ErrInvalidRead)
 	}
 	opts, err := f.listEndpoint(entity.Name, req.Via)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	dbc, err := f.db.ForEntity(entity.Name)
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 
 	row := query.RowFilter{}
 	if len(opts.RowAccess) > 0 {
 		frag, args, err := policy.ResolveRowFilter(opts.RowAccess, req.Subject)
 		if errors.Is(err, policy.ErrRowAccessDenied) {
-			return []map[string]any{}, nil // the endpoint would refuse this subject
+			return []map[string]any{}, "", nil // the endpoint would refuse this subject
 		}
 		if err != nil {
-			return nil, err
+			return nil, "", err
 		}
 		row = query.RowFilter{SQL: frag, Args: args}
 	}
 	if entity.TenantColumn != "" {
 		if req.Subject.Tenant == "" {
-			return []map[string]any{}, nil
+			return []map[string]any{}, "", nil
 		}
 		clause := dbc.Dialect.QuoteIdent(entity.TenantColumn) + " = $" + strconv.Itoa(len(row.Args)+1)
 		if row.SQL != "" {
@@ -89,12 +118,12 @@ func (f *Factory) Read(ctx context.Context, req ReadRequest) ([]map[string]any, 
 		if i := strings.IndexByte(k, '['); i > 0 && strings.HasSuffix(k, "]") {
 			name, op = k[:i], k[i+1:len(k)-1]
 			if !query.FilterOps[op] {
-				return nil, fmt.Errorf("%w: unknown operator %q in %q", ErrInvalidRead, op, k)
+				return nil, "", fmt.Errorf("%w: unknown operator %q in %q", ErrInvalidRead, op, k)
 			}
 		}
 		field, ok := fieldByKey(entity, name)
 		if !ok {
-			return nil, fmt.Errorf("%w: %s has no field %q", ErrInvalidRead, entity.Name, name)
+			return nil, "", fmt.Errorf("%w: %s has no field %q", ErrInvalidRead, entity.Name, name)
 		}
 		v := req.Where[k]
 		list, isList := v.([]any)
@@ -113,20 +142,20 @@ func (f *Factory) Read(ctx context.Context, req ReadRequest) ([]map[string]any, 
 			vals := make([]any, len(list))
 			for i, x := range list {
 				if vals[i], err = whereValue(field, x, dbc.Dialect.Name()); err != nil {
-					return nil, err
+					return nil, "", err
 				}
 			}
 			filters = append(filters, query.Filter{Column: field.ColumnName, Op: op, Value: vals})
 			continue
 		case op == "in" || op == "nin":
-			return nil, fmt.Errorf("%w: %s takes a []any", ErrInvalidRead, k)
+			return nil, "", fmt.Errorf("%w: %s takes a []any", ErrInvalidRead, k)
 		case op == "":
 			op = "eq"
 		}
 		var cv any = v
 		if op != "contains" && op != "starts_with" {
 			if cv, err = whereValue(field, v, dbc.Dialect.Name()); err != nil {
-				return nil, err
+				return nil, "", err
 			}
 		}
 		filters = append(filters, query.Filter{Column: field.ColumnName, Op: op, Value: cv})
@@ -137,7 +166,7 @@ func (f *Factory) Read(ctx context.Context, req ReadRequest) ([]map[string]any, 
 		desc := strings.HasPrefix(s, "-")
 		field, ok := fieldByKey(entity, strings.TrimPrefix(s, "-"))
 		if !ok {
-			return nil, fmt.Errorf("%w: %s has no field %q to sort by", ErrInvalidRead, entity.Name, s)
+			return nil, "", fmt.Errorf("%w: %s has no field %q to sort by", ErrInvalidRead, entity.Name, s)
 		}
 		srt = query.Sort{Column: field.ColumnName, Desc: desc}
 	}
@@ -146,18 +175,34 @@ func (f *Factory) Read(ctx context.Context, req ReadRequest) ([]map[string]any, 
 		limit = maxReadRows
 	}
 
+	lq := query.ListQuery{Filters: filters, Sort: srt, Limit: limit + 1, Row: row}
+	if req.Cursor != "" {
+		c, err := query.DecodeCursor(req.Cursor, f.secret)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: invalid cursor", ErrInvalidRead)
+		}
+		lq.Cursor = c
+	}
 	var x query.Executor = dbc.SQL
 	if tx := plugin.WriteTx(ctx); tx != nil {
 		x = tx
 	}
-	rows, err := query.NewBuilder(entity, x, dbc.Dialect).List(ctx, query.ListQuery{Filters: filters, Sort: srt, Limit: limit, Row: row})
+	rows, err := query.NewBuilder(entity, x, dbc.Dialect).List(ctx, lq)
+	if errors.Is(err, query.ErrCursorMismatch) {
+		return nil, "", fmt.Errorf("%w: the cursor was issued for a different sort", ErrInvalidRead)
+	}
 	if err != nil {
-		return nil, err
+		return nil, "", err
+	}
+	next := ""
+	if len(rows) > limit {
+		rows = rows[:limit]
+		next = query.EncodeCursor(query.NewCursor(entity, srt, rows[len(rows)-1]), f.secret)
 	}
 	for _, r := range rows {
 		presentRecord(entity, r, req.Subject)
 	}
-	return rows, nil
+	return rows, next, nil
 }
 
 func whereValue(f *schema.Field, v any, dialectName string) (any, error) {

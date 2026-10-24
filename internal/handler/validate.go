@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
@@ -206,12 +207,18 @@ func coerceValue(f *schema.Field, v any, dialectName string) (any, string) {
 		}
 		return u.String(), ""
 	case types.FieldTypeTimestamptz:
+		if t, ok := v.(time.Time); ok { // plugin values (RouteContext.Body hands these out)
+			return t.UTC(), ""
+		}
 		t, ok := f.ParseTime(v)
 		if !ok {
 			return bad(f.TimeExpectation())
 		}
 		return t.UTC(), ""
 	case types.FieldTypeDate:
+		if t, ok := v.(time.Time); ok {
+			return t.Format("2006-01-02"), ""
+		}
 		t, ok := f.ParseTime(v)
 		if !ok {
 			return bad(f.TimeExpectation())

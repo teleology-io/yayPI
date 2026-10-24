@@ -208,23 +208,23 @@ endpoints:
 		}
 	}
 	u1 := &sdk.Subject{ID: "u1", Role: "member"}
-	rows, err := s.Read(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Sort: "-title"})
+	rows, err := s.ReadAll(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Sort: "-title"})
 	if err != nil || len(rows) != 2 || rows[0]["title"] != "b" {
 		t.Fatalf("owner rows: %v %v", err, rows)
 	}
 	if _, leaked := rows[1]["secret"]; leaked {
 		t.Error("omit_response field returned")
 	}
-	if rows, _ := s.Read(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Where: map[string]any{"title": []any{"a", "c"}}}); len(rows) != 1 || rows[0]["title"] != "a" {
+	if rows, _ := s.ReadAll(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Where: map[string]any{"title": []any{"a", "c"}}}); len(rows) != 1 || rows[0]["title"] != "a" {
 		t.Fatalf("where IN under the owner rule: %v", rows)
 	}
-	if rows, _ := s.Read(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Where: map[string]any{"title[gt]": "a", "secret": nil}}); len(rows) != 1 || rows[0]["title"] != "b" {
+	if rows, _ := s.ReadAll(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Where: map[string]any{"title[gt]": "a", "secret": nil}}); len(rows) != 1 || rows[0]["title"] != "b" {
 		t.Fatalf("operators: %v", rows)
 	}
-	if _, err := s.Read(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Where: map[string]any{"title[near]": "a"}}); !sdk.IsPermanent(err) {
+	if _, err := s.ReadAll(ctx, sdk.ReadRequest{Entity: "Note", Subject: u1, Where: map[string]any{"title[near]": "a"}}); !sdk.IsPermanent(err) {
 		t.Fatalf("unknown operator: %v", err)
 	}
-	if rows, _ := s.Read(ctx, sdk.ReadRequest{Entity: "Note", Subject: &sdk.Subject{ID: "x", Role: "admin"}, Via: "GET /notes"}); len(rows) != 3 {
+	if rows, _ := s.ReadAll(ctx, sdk.ReadRequest{Entity: "Note", Subject: &sdk.Subject{ID: "x", Role: "admin"}, Via: "GET /notes"}); len(rows) != 3 {
 		t.Fatalf("admin sees all: %v", rows)
 	}
 	for name, req := range map[string]sdk.ReadRequest{
@@ -346,5 +346,59 @@ func TestRuleConfigErrors(t *testing.T) {
 		if _, err := schema.Build(&config.RootConfig{Entities: []*config.EntityConfig{{Entity: def}}}); err == nil {
 			t.Errorf("%s: accepted", name)
 		}
+	}
+}
+
+func TestReadPages(t *testing.T) {
+	var ent config.EntityDef
+	_ = yaml.Unmarshal([]byte("name: Item\ntable: items\nfields:\n  - {name: id, type: uuid, primary_key: true, default: uuid}\n  - {name: n, type: integer}\n  - {name: at, type: timestamptz}\n"), &ent)
+	var eps config.EndpointFileConfig
+	_ = yaml.Unmarshal([]byte("endpoints:\n  - {path: /items, entity: Item, crud: [list]}\n"), &eps)
+	reg, err := schema.Build(&config.RootConfig{Entities: []*config.EntityConfig{{Entity: ent}}, Endpoints: []*config.EndpointFileConfig{&eps}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbm := testutil.SQLiteDB(t, reg)
+	s := New(dbm, handler.NewFactory(reg, dbm, nil, nil, []byte(strings.Repeat("c", 32))), reg)
+	ctx := context.Background()
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	var reqs []sdk.WriteRequest
+	for i := 0; i < 25; i++ {
+		// time.Time values are accepted on writes (as RouteContext.Body hands them out).
+		reqs = append(reqs, sdk.WriteRequest{Entity: "Item", Action: "create", Data: map[string]any{"n": i % 7, "at": base.Add(time.Duration(i) * time.Hour)}})
+	}
+	if _, err := s.Write(ctx, reqs...); err != nil {
+		t.Fatal(err)
+	}
+	sub := &sdk.Subject{ID: "u", Role: "member"}
+	req := sdk.ReadRequest{Entity: "Item", Subject: sub, Sort: "-n", Limit: 10, Where: map[string]any{"at[gte]": base.Add(5 * time.Hour)}}
+	seen := map[any]bool{}
+	pages := 0
+	for {
+		p, err := s.Read(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		pages++
+		for _, r := range p.Rows {
+			if seen[r["id"]] {
+				t.Fatalf("row %v twice", r["id"])
+			}
+			seen[r["id"]] = true
+		}
+		if p.Next == "" {
+			break
+		}
+		req.Cursor = p.Next
+	}
+	if len(seen) != 20 || pages != 2 {
+		t.Fatalf("%d rows over %d pages", len(seen), pages)
+	}
+	all, err := s.ReadAll(ctx, sdk.ReadRequest{Entity: "Item", Subject: sub, Limit: 7})
+	if err != nil || len(all) != 25 {
+		t.Fatalf("ReadAll: %v %d", err, len(all))
+	}
+	if _, err := s.Read(ctx, sdk.ReadRequest{Entity: "Item", Subject: sub, Sort: "n", Cursor: req.Cursor}); !sdk.IsPermanent(err) {
+		t.Fatalf("cursor for another sort: %v", err)
 	}
 }
