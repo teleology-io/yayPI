@@ -77,6 +77,12 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 		tagSeen[name] = make(map[string]struct{})
 	}
 
+	// operationIds must be unique per spec; a repeat gets its path appended.
+	idsSeen := make(map[string]map[string]bool)
+	for name := range specs {
+		idsSeen[name] = make(map[string]bool)
+	}
+
 	// Process endpoints.
 	for _, ep := range reg.Endpoints() {
 		if ep.ExcludeFromSpec {
@@ -110,6 +116,7 @@ func Build(reg *schema.Registry, projectName string, authConfigured bool) map[st
 			for _, op := range ep.CRUD {
 				oaiPath := resolvePath(ep.Path, op)
 				operation := buildOperation(op, ep, entity, projectName, authConfigured)
+				operation.OperationID = uniqueID(idsSeen[specName], operation.OperationID, oaiPath)
 
 				if s.Paths[oaiPath] == nil {
 					s.Paths[oaiPath] = &PathItem{}
@@ -230,6 +237,14 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 					Name:        field,
 					In:          "query",
 					Description: "Equality filter. Operators: " + field + "[gt|gte|lt|lte|ne|in|nin|contains|starts_with|is_null]=value (in/nin take comma-separated values).",
+					Schema:      filterSchema(entity, field),
+				})
+			}
+			if len(ep.List.Search) > 0 {
+				params = append(params, Parameter{
+					Name:        "q",
+					In:          "query",
+					Description: "Case-insensitive search over: " + strings.Join(ep.List.Search, ", "),
 					Schema:      &Schema{Type: "string"},
 				})
 			}
@@ -239,6 +254,7 @@ func buildOperation(op string, ep *schema.Endpoint, entity *schema.Entity, proje
 					In:          "query",
 					Description: fmt.Sprintf("col, col:asc, col:desc or -col. Allowed: %s", strings.Join(ep.List.AllowSortBy, ", ")),
 					Schema:      &Schema{Type: "string"},
+					XSortFields: ep.List.AllowSortBy,
 				})
 			}
 			params = append(params, Parameter{Name: "limit", In: "query", Schema: &Schema{Type: "integer", Format: "int32"}})
@@ -576,4 +592,37 @@ func requiresAuth(op string, ep *schema.Endpoint) bool {
 		opAuth = ep.Auth
 	}
 	return opAuth != nil && (opAuth.Require || len(opAuth.Roles) > 0 || len(opAuth.Conditions) > 0)
+}
+
+// filterSchema is the schema of a filter parameter: the field's own type, so
+// clients can check values (enums, formats) before sending them.
+func filterSchema(entity *schema.Entity, name string) *Schema {
+	for i := range entity.Fields {
+		f := &entity.Fields[i]
+		if f.Name == name || f.ColumnName == name {
+			return fieldSchemaFor(f)
+		}
+	}
+	return &Schema{Type: "string"}
+}
+
+// uniqueID returns id, or id plus the path's segments when id is taken
+// (two endpoints over one entity would otherwise share listPost).
+func uniqueID(seen map[string]bool, id, path string) string {
+	out := id
+	if seen[out] {
+		suffix := ""
+		for _, seg := range strings.Split(path, "/") {
+			seg = strings.Trim(seg, "{}")
+			if seg != "" {
+				suffix += strings.ToUpper(seg[:1]) + seg[1:]
+			}
+		}
+		out = id + "By" + suffix
+		for n := 2; seen[out]; n++ {
+			out = fmt.Sprintf("%sBy%s%d", id, suffix, n)
+		}
+	}
+	seen[out] = true
+	return out
 }

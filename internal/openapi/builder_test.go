@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/teleology-io/yayPI/internal/config"
+	"github.com/teleology-io/yayPI/internal/query"
 	"github.com/teleology-io/yayPI/internal/schema"
 	"github.com/teleology-io/yayPI/internal/timefmt"
 	"github.com/teleology-io/yayPI/pkg/types"
@@ -100,5 +101,46 @@ func TestAuthRoutesFollowMountSwitches(t *testing.T) {
 	}
 	if spec.Paths["/account/logout-all"].Post.Security == nil || spec.Paths["/account/login"].Post.Security != nil {
 		t.Error("security: logout-all needs a bearer, login doesn't")
+	}
+}
+
+func TestListParamsForClients(t *testing.T) {
+	reg := schema.NewRegistry()
+	reg.Specs = []schema.SpecMeta{{Name: "api", Title: "API", Version: "1"}}
+	reg.RegisterEntity(&schema.Entity{Name: "Post", Table: "posts", Fields: []schema.Field{
+		{Name: "id", ColumnName: "id", Type: types.FieldTypeUUID, PrimaryKey: true},
+		{Name: "status", ColumnName: "status", Type: types.FieldTypeEnum, EnumValues: []string{"draft", "live"}},
+	}})
+	list := &schema.ListOpts{AllowFilterBy: []string{"status"}, Search: []string{"status"}, AllowSortBy: []string{"id"}, Pagination: schema.Pagination{Style: "offset"}}
+	reg.RegisterEndpoint(&schema.Endpoint{Path: "/posts", Entity: "Post", CRUD: []string{"list"}, List: list})
+	reg.RegisterEndpoint(&schema.Endpoint{Path: "/live", Entity: "Post", CRUD: []string{"list"}, List: &schema.ListOpts{}})
+	spec := Build(reg, "p", false)["api"]
+
+	params := map[string]Parameter{}
+	for _, p := range spec.Paths["/posts"].Get.Parameters {
+		params[p.Name] = p
+	}
+	if got := params["status"].Schema.Enum; len(got) != 2 {
+		t.Errorf("filter param should carry the field's enum, got %+v", params["status"].Schema)
+	}
+	if _, ok := params["q"]; !ok {
+		t.Error("q not exported for an endpoint with list.search")
+	}
+	if got := params["sort"].XSortFields; len(got) != 1 || got[0] != "id" {
+		t.Errorf("x-sort-fields = %v", got)
+	}
+	a, b := spec.Paths["/posts"].Get.OperationID, spec.Paths["/live"].Get.OperationID
+	if a == b {
+		t.Errorf("duplicate operationId %q", a)
+	}
+}
+
+func TestWalmProfile(t *testing.T) {
+	p := BuildWalmProfile("/api/v1")
+	if p.Base != "/api/v1" || p.Envelope.List.Items != "data" || p.Envelope.One.Item != "data" || p.Errors.Message != "error" {
+		t.Errorf("profile: %+v", p)
+	}
+	if len(p.Query.Filter.Ops) != len(query.FilterOps) || p.Query.Sort.DescPrefix != "-" {
+		t.Errorf("query conventions: %+v", p.Query)
 	}
 }

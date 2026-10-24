@@ -151,6 +151,12 @@ schema (`token`, `expires_in`, `user`, plus `refresh_token` with
 
 Every operation also documents 400 and 429, and 401/403 when auth is required. All errors reference the shared `Error` schema (`error`, `code`, `request_id`, `errors`). Internal tables (refresh tokens, outbox, audit log, …) never appear in specs.
 
+**List parameters** are typed for clients: each `allow_filter_by` parameter
+has the field's own schema (enum values, formats), `q` is documented when
+`list.search` is set, and the `sort` parameter lists its fields in
+`x-sort-fields`. operationIds are unique per spec: a second endpoint over
+the same entity gets its path appended (`listPostByFeatured`).
+
 **Entity schemas** in `components/schemas`:
 - All fields except those with `serialization.omit_response: true`
 - Nullable fields marked `nullable: true`
@@ -264,3 +270,22 @@ CLI:
 yaypi spec generate --name api --output api.json
 yaypi spec generate --name sdk --output sdk.json
 ```
+
+---
+
+## walm-cl
+
+`yaypi spec generate --name api --walm` also writes `walm.profile.yaml`
+next to the spec: the conventions walm-cl needs beyond OpenAPI (the
+`{data, meta}` envelopes, the `error` message path, filter operators, sort
+syntax and `project.base_url`). A WALM definition then uses both:
+
+```yaml
+api:
+  openapi: openapi.json
+  profile: walm.profile.yaml
+  token: token
+```
+
+walm-cl expands `op: GET /posts` requests against them and checks fields,
+filters, sorts, path parameters and bodies at build time.

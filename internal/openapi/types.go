@@ -57,6 +57,8 @@ type Parameter struct {
 	Description string  `json:"description,omitempty"`
 	Required    bool    `json:"required,omitempty"`
 	Schema      *Schema `json:"schema,omitempty"`
+	// XSortFields lists the fields a sort parameter accepts (vendor extension).
+	XSortFields []string `json:"x-sort-fields,omitempty"`
 }
 
 // RequestBody describes the request body for an operation.
